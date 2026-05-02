@@ -3,7 +3,7 @@ Date: 2026-05-01
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 4 finished; Series 5 pending design
+- current state: Series 4 finished; Series 5 design draft
 Completion:
 - execution complete: no
 
@@ -873,11 +873,12 @@ Commit 6/6: protocol: bound toy wire allocations
 
 ## Series 5: Docker And Kernel-NBD Smoke
 
-Depends on: Series 4 and a future approved Docker/kernel smoke design
+Depends on: Series 4 and an approved Docker/kernel smoke design
 
 Roadmap milestone: M4
 
-Design coverage: pending future design doc
+Design coverage:
+`docs/plans/initial-integration/2026-05-02-docker-kernel-smoke.md`
 
 Stable checkpoint: a privileged Linux container can run the toy server and a
 real NBD client can perform basic I/O.
@@ -897,4 +898,5 @@ make docker-build
 make docker-smoke
 ```
 
-Not included: this series is not approved until its design doc exists.
+Not included: this series is not approved until the draft design doc is
+reviewed and approved.
