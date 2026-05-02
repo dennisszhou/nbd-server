@@ -12,6 +12,7 @@ fn fixture_writes_loadable_explicit_config() {
 
     assert_eq!(config.runtime.state_dir, runtime.state_dir());
     assert_eq!(config.catalog.url, runtime.catalog_url());
+    assert!(runtime.catalog_url().starts_with("file:"));
 }
 
 #[test]

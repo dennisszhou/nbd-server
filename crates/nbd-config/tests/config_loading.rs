@@ -1,6 +1,6 @@
 use nbd_config::{
-    default_config_path_for_home, default_state_dir_for_home, sqlite_url_for_path, ConfigSource,
-    NbdConfig,
+    catalog_file_url_for_path, default_config_path_for_home, default_state_dir_for_home,
+    ConfigSource, NbdConfig,
 };
 use std::env;
 use std::fs;
@@ -24,7 +24,7 @@ fn explicit_config_loads_from_requested_path() {
     assert_eq!(config.runtime.state_dir, state_dir);
     assert_eq!(
         config.catalog.url,
-        sqlite_url_for_path(catalog_path).unwrap()
+        catalog_file_url_for_path(catalog_path).unwrap()
     );
 }
 
@@ -67,8 +67,9 @@ fn default_user_path_bootstraps_absolute_config() {
     assert!(config.runtime.state_dir.is_absolute());
     assert_eq!(
         config.catalog.url,
-        sqlite_url_for_path(fake_home.join(".nbd").join("catalog.db")).unwrap()
+        catalog_file_url_for_path(fake_home.join(".nbd").join("catalog.db")).unwrap()
     );
+    assert!(config.catalog.url.starts_with("file:"));
 
     let loaded = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
     assert_eq!(loaded, config);
@@ -90,7 +91,7 @@ fn malformed_config_reports_error() {
 fn write_config(config_path: &Path, state_dir: &Path, catalog_path: &Path) {
     let contents = format!(
         "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n",
-        sqlite_url_for_path(catalog_path).unwrap(),
+        catalog_file_url_for_path(catalog_path).unwrap(),
         state_dir
     );
 

@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use nbd_config::{sqlite_url_for_path, CatalogConfig, ConfigError, NbdConfig, RuntimeConfig};
+use nbd_config::{catalog_file_url_for_path, CatalogConfig, ConfigError, NbdConfig, RuntimeConfig};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -27,7 +27,7 @@ impl TestRuntime {
         let state_dir = root.path().join("state");
         let config_path = root.path().join("config.toml");
         let catalog_path = root.path().join("catalog.db");
-        let catalog_url = sqlite_url_for_path(&catalog_path)?;
+        let catalog_url = catalog_file_url_for_path(&catalog_path)?;
 
         fs::create_dir_all(&state_dir).map_err(|source| TestRuntimeError::CreateStateDir {
             path: state_dir.clone(),

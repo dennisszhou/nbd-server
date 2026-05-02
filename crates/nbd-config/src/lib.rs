@@ -94,7 +94,7 @@ impl NbdConfig {
 
         Ok(Self {
             catalog: CatalogConfig {
-                url: sqlite_url_for_path(catalog_path)?,
+                url: catalog_file_url_for_path(catalog_path)?,
             },
             runtime: RuntimeConfig { state_dir },
         })
@@ -111,14 +111,14 @@ pub fn default_state_dir_for_home(home: impl AsRef<Path>) -> PathBuf {
     home.as_ref().join(CONFIG_DIR)
 }
 
-/// Convert a local SQLite database path into the URL shape used by config.
-pub fn sqlite_url_for_path(path: impl AsRef<Path>) -> Result<String, ConfigError> {
+/// Convert a local SQLite database path into the canonical catalog URL shape.
+pub fn catalog_file_url_for_path(path: impl AsRef<Path>) -> Result<String, ConfigError> {
     let path = path.as_ref();
     let path = path
         .to_str()
         .ok_or_else(|| ConfigError::NonUtf8Path(path.to_path_buf()))?;
 
-    Ok(format!("sqlite://{path}"))
+    Ok(format!("file:{path}"))
 }
 
 fn load_file(path: &Path) -> Result<NbdConfig, ConfigError> {
