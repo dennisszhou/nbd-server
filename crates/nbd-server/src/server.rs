@@ -14,11 +14,15 @@ pub struct ToyServer {
 
 impl ToyServer {
     pub async fn start(config: NbdConfig) -> Result<Self> {
+        Self::start_on(config, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await
+    }
+
+    pub async fn start_on(config: NbdConfig, listen: SocketAddr) -> Result<Self> {
         let catalog_url = CatalogUrl::parse(&config.catalog.url).map_err(ServerError::catalog)?;
         let catalog = SQLiteExportCatalog::connect(&catalog_url)
             .await
             .map_err(ServerError::catalog)?;
-        let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        let listener = TcpListener::bind(listen)
             .await
             .map_err(|source| ServerError::io("bind toy NBD server", source))?;
         let addr = listener
