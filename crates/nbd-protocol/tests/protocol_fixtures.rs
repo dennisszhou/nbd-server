@@ -5,14 +5,14 @@ use nbd_protocol::handshake::{
 use nbd_protocol::option::{
     encode_abort_request, encode_ack_reply, encode_export_info_reply, encode_go_request,
     encode_unknown_export_reply, encode_unsupported_option_reply, parse_option_reply,
-    parse_option_reply_header, parse_option_request, OptionReply, OptionRequest,
-    OPTION_REPLY_HEADER_BYTES,
+    parse_option_reply_header, parse_option_request, parse_option_request_header, OptionReply,
+    OptionRequest, MAX_OPTION_PAYLOAD_BYTES, OPTION_REPLY_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
     encode_disconnect_request, encode_flush_request, encode_read_reply, encode_read_request,
     encode_success_reply, encode_write_request, parse_read_reply, parse_request,
     parse_request_header, parse_simple_reply, ReadReply, SimpleReply, TransmissionRequest,
-    MAX_WRITE_PAYLOAD_BYTES, REQUEST_HEADER_BYTES, SIMPLE_REPLY_BYTES,
+    MAX_IO_BYTES, REQUEST_HEADER_BYTES, SIMPLE_REPLY_BYTES,
 };
 use nbd_protocol::wire::{
     write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode,
@@ -217,6 +217,40 @@ fn option_replies_match_fixed_newstyle_wire_layout() {
     assert_eq!(header.option(), option);
     assert_eq!(header.reply_type(), constants::NBD_REP_ERR_UNKNOWN);
     assert_eq!(header.payload_len(), 7);
+    assert_eq!(header.bounded_payload_len().unwrap(), 7);
+}
+
+#[test]
+fn option_headers_reject_oversized_supported_payloads() {
+    let oversized = MAX_OPTION_PAYLOAD_BYTES + 1;
+    let mut request = Vec::new();
+    write_u64(&mut request, constants::IHAVEOPT_MAGIC);
+    write_u32(&mut request, constants::NBD_OPT_GO);
+    write_u32(&mut request, oversized);
+    let request_header = parse_option_request_header(&request).unwrap();
+    assert_eq!(
+        request_header.bounded_payload_len(),
+        Err(ProtocolError::LengthTooLarge {
+            field: "option request payload",
+            len: oversized as usize,
+            max: MAX_OPTION_PAYLOAD_BYTES as usize,
+        }),
+    );
+
+    let mut reply = Vec::new();
+    write_u64(&mut reply, constants::OPTION_REPLY_MAGIC);
+    write_u32(&mut reply, constants::NBD_OPT_GO);
+    write_u32(&mut reply, constants::NBD_REP_INFO);
+    write_u32(&mut reply, oversized);
+    let reply_header = parse_option_reply_header(&reply).unwrap();
+    assert_eq!(
+        reply_header.bounded_payload_len(),
+        Err(ProtocolError::LengthTooLarge {
+            field: "option reply payload",
+            len: oversized as usize,
+            max: MAX_OPTION_PAYLOAD_BYTES as usize,
+        }),
+    );
 }
 
 #[test]
@@ -245,13 +279,10 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
     let write_cookie = NbdCookie::new(0x0102_0304_0506_0708);
     let write = encode_write_request(write_cookie, 4096, b"hello").unwrap();
     let write_header = parse_request_header(&write[..REQUEST_HEADER_BYTES]).unwrap();
-    assert_eq!(
-        write_header.payload_len(MAX_WRITE_PAYLOAD_BYTES).unwrap(),
-        5
-    );
+    assert_eq!(write_header.payload_len(MAX_IO_BYTES).unwrap(), 5);
 
     assert_eq!(
-        parse_request(&write, MAX_WRITE_PAYLOAD_BYTES).unwrap(),
+        parse_request(&write, MAX_IO_BYTES).unwrap(),
         TransmissionRequest::Write {
             cookie: write_cookie,
             offset: 4096,
@@ -277,7 +308,7 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
     assert_eq!(
         parse_request(
             &encode_read_request(read_cookie, 4096, 5).unwrap(),
-            MAX_WRITE_PAYLOAD_BYTES
+            MAX_IO_BYTES
         )
         .unwrap(),
         TransmissionRequest::Read {
@@ -304,11 +335,7 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
 
     let flush_cookie = NbdCookie::new(0x2122_2324_2526_2728);
     assert_eq!(
-        parse_request(
-            &encode_flush_request(flush_cookie).unwrap(),
-            MAX_WRITE_PAYLOAD_BYTES
-        )
-        .unwrap(),
+        parse_request(&encode_flush_request(flush_cookie).unwrap(), MAX_IO_BYTES).unwrap(),
         TransmissionRequest::Flush {
             cookie: flush_cookie,
         },
@@ -318,7 +345,7 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
     assert_eq!(
         parse_request(
             &encode_disconnect_request(disconnect_cookie).unwrap(),
-            MAX_WRITE_PAYLOAD_BYTES,
+            MAX_IO_BYTES,
         )
         .unwrap(),
         TransmissionRequest::Disconnect {
@@ -329,7 +356,7 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
 
 #[test]
 fn transmission_rejects_invalid_supported_request_shapes() {
-    let oversized = MAX_WRITE_PAYLOAD_BYTES + 1;
+    let oversized = MAX_IO_BYTES + 1;
     let cases = [
         (
             "bad magic",
@@ -370,22 +397,27 @@ fn transmission_rejects_invalid_supported_request_shapes() {
             },
         ),
         (
+            "oversized read length",
+            request_header(0, constants::NBD_CMD_READ, 1, 0, oversized),
+            ProtocolError::LengthTooLarge {
+                field: "read length",
+                len: oversized as usize,
+                max: MAX_IO_BYTES as usize,
+            },
+        ),
+        (
             "oversized write payload",
             request_header(0, constants::NBD_CMD_WRITE, 1, 0, oversized),
             ProtocolError::LengthTooLarge {
                 field: "write payload",
                 len: oversized as usize,
-                max: MAX_WRITE_PAYLOAD_BYTES as usize,
+                max: MAX_IO_BYTES as usize,
             },
         ),
     ];
 
     for (name, bytes, expected) in cases {
-        assert_eq!(
-            parse_request(&bytes, MAX_WRITE_PAYLOAD_BYTES),
-            Err(expected),
-            "{name}",
-        );
+        assert_eq!(parse_request(&bytes, MAX_IO_BYTES), Err(expected), "{name}",);
     }
 }
 

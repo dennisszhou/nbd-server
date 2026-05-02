@@ -232,7 +232,7 @@ async fn read_option_reply(stream: &mut TcpStream) -> Result<OptionReply> {
     let parsed_header = parse_option_reply_header(&header)?;
 
     let mut bytes = header.to_vec();
-    let mut payload = vec![0; parsed_header.payload_len() as usize];
+    let mut payload = vec![0; parsed_header.bounded_payload_len()?];
     stream
         .read_exact(&mut payload)
         .await

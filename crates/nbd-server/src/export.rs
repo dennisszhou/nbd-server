@@ -1,4 +1,5 @@
 use crate::Result;
+use std::sync::Arc;
 
 /// Byte-oriented export boundary used by protocol handling.
 #[async_trait::async_trait]
@@ -9,3 +10,5 @@ pub trait Export: Send + Sync {
 
     async fn flush(&self) -> Result<()>;
 }
+
+pub type ExportHandle = Arc<dyn Export>;

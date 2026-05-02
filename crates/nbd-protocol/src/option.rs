@@ -9,6 +9,7 @@ use crate::{ProtocolError, Result};
 
 pub const OPTION_REQUEST_HEADER_BYTES: usize = 16;
 pub const OPTION_REPLY_HEADER_BYTES: usize = 20;
+pub const MAX_OPTION_PAYLOAD_BYTES: u32 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OptionRequest {
@@ -33,6 +34,26 @@ impl OptionRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionRequestHeader {
+    option: NbdOptionCode,
+    payload_len: u32,
+}
+
+impl OptionRequestHeader {
+    pub fn option(self) -> NbdOptionCode {
+        self.option
+    }
+
+    pub fn payload_len(self) -> u32 {
+        self.payload_len
+    }
+
+    pub fn bounded_payload_len(self) -> Result<usize> {
+        bounded_payload_len("option request payload", self.payload_len)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptionReplyHeader {
     option: NbdOptionCode,
     reply_type: u32,
@@ -50,6 +71,10 @@ impl OptionReplyHeader {
 
     pub fn payload_len(self) -> u32 {
         self.payload_len
+    }
+
+    pub fn bounded_payload_len(self) -> Result<usize> {
+        bounded_payload_len("option reply payload", self.payload_len)
     }
 }
 
@@ -108,6 +133,7 @@ pub fn encode_option_request(option: NbdOptionCode, payload: &[u8]) -> Result<Ve
         len: payload.len(),
         max: u32::MAX as usize,
     })?;
+    bounded_payload_len("option request payload", payload_len)?;
 
     let mut out = Vec::with_capacity(OPTION_REQUEST_HEADER_BYTES + payload.len());
     write_u64(&mut out, IHAVEOPT_MAGIC);
@@ -156,17 +182,9 @@ pub fn encode_abort_request(payload: &[u8]) -> Result<Vec<u8>> {
 
 pub fn parse_option_request(input: &[u8]) -> Result<OptionRequest> {
     let mut reader = WireReader::new(input);
-    let magic = reader.read_u64()?;
-    if magic != IHAVEOPT_MAGIC {
-        return Err(ProtocolError::InvalidMagic {
-            context: "option request",
-            expected: IHAVEOPT_MAGIC,
-            actual: magic,
-        });
-    }
-
-    let code = NbdOptionCode::new(reader.read_u32()?);
-    let len = reader.read_u32()? as usize;
+    let header = parse_option_request_header(reader.read_bytes(OPTION_REQUEST_HEADER_BYTES)?)?;
+    let code = header.option();
+    let len = header.bounded_payload_len()?;
     let payload = reader.read_bytes(len)?;
 
     if reader.remaining() != 0 {
@@ -185,6 +203,31 @@ pub fn parse_option_request(input: &[u8]) -> Result<OptionRequest> {
             payload: payload.to_vec(),
         }),
     }
+}
+
+pub fn parse_option_request_header(input: &[u8]) -> Result<OptionRequestHeader> {
+    let mut reader = WireReader::new(input);
+    let magic = reader.read_u64()?;
+    if magic != IHAVEOPT_MAGIC {
+        return Err(ProtocolError::InvalidMagic {
+            context: "option request",
+            expected: IHAVEOPT_MAGIC,
+            actual: magic,
+        });
+    }
+
+    let header = OptionRequestHeader {
+        option: NbdOptionCode::new(reader.read_u32()?),
+        payload_len: reader.read_u32()?,
+    };
+
+    if reader.remaining() != 0 {
+        return Err(ProtocolError::TrailingBytes {
+            remaining: reader.remaining(),
+        });
+    }
+
+    Ok(header)
 }
 
 pub fn parse_option_reply_header(input: &[u8]) -> Result<OptionReplyHeader> {
@@ -216,7 +259,7 @@ pub fn parse_option_reply_header(input: &[u8]) -> Result<OptionReplyHeader> {
 pub fn parse_option_reply(input: &[u8]) -> Result<OptionReply> {
     let mut reader = WireReader::new(input);
     let header = parse_option_reply_header(reader.read_bytes(OPTION_REPLY_HEADER_BYTES)?)?;
-    let payload = reader.read_bytes(header.payload_len() as usize)?;
+    let payload = reader.read_bytes(header.bounded_payload_len()?)?;
 
     if reader.remaining() != 0 {
         return Err(ProtocolError::TrailingBytes {
@@ -260,6 +303,7 @@ pub fn encode_option_reply(
         len: payload.len(),
         max: u32::MAX as usize,
     })?;
+    bounded_payload_len("option reply payload", payload_len)?;
 
     let mut out = Vec::with_capacity(20 + payload.len());
     write_u64(&mut out, OPTION_REPLY_MAGIC);
@@ -322,6 +366,18 @@ fn parse_info_reply(option: NbdOptionCode, payload: &[u8]) -> Result<OptionReply
 
 fn is_error_reply(reply_type: u32) -> bool {
     reply_type & (1 << 31) != 0
+}
+
+fn bounded_payload_len(field: &'static str, payload_len: u32) -> Result<usize> {
+    if payload_len > MAX_OPTION_PAYLOAD_BYTES {
+        return Err(ProtocolError::LengthTooLarge {
+            field,
+            len: payload_len as usize,
+            max: MAX_OPTION_PAYLOAD_BYTES as usize,
+        });
+    }
+
+    Ok(payload_len as usize)
 }
 
 fn parse_go_payload(payload: &[u8]) -> Result<GoRequest> {

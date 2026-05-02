@@ -781,7 +781,7 @@ Commit 4/5: server: implement TCP option negotiation
                     kernel NBD.
   Depends on:       3
 
-Commit 5/5: server: handle toy I/O commands
+Commit 5/6: server: handle toy I/O commands
 
   Type:             semantic
   Required:         yes
@@ -816,6 +816,45 @@ Commit 5/5: server: handle toy I/O commands
                     control, pipelining, same-export shared state across
                     connections, or Docker/kernel NBD.
   Depends on:       4
+
+Commit 6/6: protocol: bound toy wire allocations
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Address review findings by adding protocol-owned supported
+                    payload limits and keeping socket transmission behind an
+                    Export trait handle.
+  Invariant focus:  Wire lengths are capped before allocation, and the
+                    connection loop depends on the Export boundary rather than
+                    MemoryExport directly.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-client/src/client.rs
+                    crates/nbd-protocol/src/lib.rs
+                    crates/nbd-protocol/src/option.rs
+                    crates/nbd-protocol/src/transmission.rs
+                    crates/nbd-protocol/tests/protocol_fixtures.rs
+                    crates/nbd-server/src/connection.rs
+                    crates/nbd-server/src/export.rs
+                    crates/nbd-server/src/lib.rs
+                    docs/execution/2026-05-01-initial-integration.md
+                    docs/plans/initial-integration/2026-05-01-toy-nbd-server.md
+  Preconditions:    Commit 5 has completed the toy TCP command path and review
+                    has identified the allocation and concrete-type boundary
+                    gaps.
+  Postconditions:   Option payload allocation is capped at 64 KiB, read/write
+                    I/O is capped at 64 MiB, and successful negotiation returns
+                    an ExportHandle to the transmission loop.
+  Verify:           cargo test -p nbd-protocol --test protocol_fixtures
+                    cargo test -p nbd-server --test tcp_integration
+                    make test
+                    make fmt
+                    make clippy
+  Risks:            This is still a toy sequential server; the cap is a
+                    supported-subset limit, not a full resource-control model.
+  Not included:     Per-export quotas, admission control, workqueues, pipelined
+                    command execution, or durable backing state.
+  Depends on:       5
 
 ## Series 5: Docker And Kernel-NBD Smoke
 

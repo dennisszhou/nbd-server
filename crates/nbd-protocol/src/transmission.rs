@@ -9,7 +9,7 @@ use crate::{ProtocolError, Result};
 
 pub const REQUEST_HEADER_BYTES: usize = 28;
 pub const SIMPLE_REPLY_BYTES: usize = 16;
-pub const MAX_WRITE_PAYLOAD_BYTES: u32 = 1024 * 1024;
+pub const MAX_IO_BYTES: u32 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestHeader {
@@ -21,19 +21,20 @@ pub struct RequestHeader {
 }
 
 impl RequestHeader {
-    pub fn payload_len(self, max_write_payload_bytes: u32) -> Result<usize> {
+    pub fn payload_len(self, max_io_bytes: u32) -> Result<usize> {
         validate_common_header(self)?;
 
         match self.command.raw() {
             NBD_CMD_READ => {
                 validate_nonzero_len("NBD_CMD_READ", self.length)?;
                 validate_effect_range(self.offset, self.length)?;
+                validate_io_len("read length", self.length, max_io_bytes)?;
                 Ok(0)
             }
             NBD_CMD_WRITE => {
                 validate_nonzero_len("NBD_CMD_WRITE", self.length)?;
                 validate_effect_range(self.offset, self.length)?;
-                validate_write_payload_len(self.length, max_write_payload_bytes)?;
+                validate_io_len("write payload", self.length, max_io_bytes)?;
                 Ok(self.length as usize)
             }
             NBD_CMD_FLUSH => {
@@ -107,7 +108,7 @@ pub fn encode_read_request(cookie: NbdCookie, offset: u64, length: u32) -> Resul
         offset,
         length,
     };
-    header.payload_len(MAX_WRITE_PAYLOAD_BYTES)?;
+    header.payload_len(MAX_IO_BYTES)?;
     Ok(encode_request_header(header))
 }
 
@@ -124,7 +125,7 @@ pub fn encode_write_request(cookie: NbdCookie, offset: u64, data: &[u8]) -> Resu
         offset,
         length,
     };
-    header.payload_len(MAX_WRITE_PAYLOAD_BYTES)?;
+    header.payload_len(MAX_IO_BYTES)?;
 
     let mut out = encode_request_header(header);
     out.extend_from_slice(data);
@@ -150,10 +151,10 @@ pub fn encode_request_header(header: RequestHeader) -> Vec<u8> {
     out
 }
 
-pub fn parse_request(input: &[u8], max_write_payload_bytes: u32) -> Result<TransmissionRequest> {
+pub fn parse_request(input: &[u8], max_io_bytes: u32) -> Result<TransmissionRequest> {
     let mut reader = WireReader::new(input);
     let header = parse_header(&mut reader)?;
-    let payload_len = header.payload_len(max_write_payload_bytes)?;
+    let payload_len = header.payload_len(max_io_bytes)?;
 
     match header.command.raw() {
         NBD_CMD_READ => {
@@ -275,7 +276,7 @@ fn encode_zero_range_request(cookie: NbdCookie, command: u16) -> Result<Vec<u8>>
         offset: 0,
         length: 0,
     };
-    header.payload_len(MAX_WRITE_PAYLOAD_BYTES)?;
+    header.payload_len(MAX_IO_BYTES)?;
     Ok(encode_request_header(header))
 }
 
@@ -326,12 +327,12 @@ fn validate_effect_range(offset: u64, length: u32) -> Result<()> {
         .ok_or(ProtocolError::LengthOverflow { offset, length })
 }
 
-fn validate_write_payload_len(length: u32, max_write_payload_bytes: u32) -> Result<()> {
-    if length > max_write_payload_bytes {
+fn validate_io_len(field: &'static str, length: u32, max_io_bytes: u32) -> Result<()> {
+    if length > max_io_bytes {
         return Err(ProtocolError::LengthTooLarge {
-            field: "write payload",
+            field,
             len: length as usize,
-            max: max_write_payload_bytes as usize,
+            max: max_io_bytes as usize,
         });
     }
 

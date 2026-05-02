@@ -30,6 +30,9 @@ Implement the M2/M3 toy server slice:
 - No WAL, `ExportReadView`, `StorageEngine`, compaction, S3, Docker, or kernel
   NBD is implemented in this slice.
 - The server should not advertise protocol flags it does not implement.
+- The server and client should bound wire-advertised lengths before allocating
+  buffers: option payloads are limited to 64 KiB and read/write I/O is limited
+  to 64 MiB in this toy slice.
 - Integration tests must use temp config and temp SQLite databases.
 - Tests for behavior should land with the behavior they prove; Series 4 should
   not end with a generic test-only coverage commit.
@@ -101,6 +104,8 @@ client: NBD_FLAG_C_FIXED_NEWSTYLE, optionally NBD_FLAG_C_NO_ZEROES
 options: NBD_OPT_GO, NBD_OPT_ABORT
 commands: READ, WRITE, FLUSH, DISC
 replies: simple replies
+supported option payload: <= 64 KiB
+supported read/write length: <= 64 MiB
 ```
 
 Advertise transmission flags:
@@ -298,6 +303,7 @@ workqueue/admission changes do not rewrite wire parsing.
   through `MemoryExport` internals.
 - The server advertises only features it implements.
 - Successful reads return exactly the requested number of bytes.
+- Wire lengths are capped before allocation.
 - Out-of-bounds reads/writes fail with an NBD error.
 - Successful toy writes are visible to later reads on the same connection.
 - Flush returns only after earlier sequential toy writes have completed.

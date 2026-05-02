@@ -1,17 +1,18 @@
-use crate::{Export, MemoryExport, Result, ServerError};
+use crate::{ExportHandle, MemoryExport, Result, ServerError};
 use nbd_control_plane::{ExportCatalog, ExportName, SQLiteExportCatalog};
 use nbd_protocol::constants::{NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
 use nbd_protocol::handshake::{decode_client_flags, encode_server_handshake};
 use nbd_protocol::option::{
     encode_ack_reply, encode_export_info_reply, encode_unknown_export_reply,
-    encode_unsupported_option_reply, parse_option_request, OptionRequest,
-    OPTION_REQUEST_HEADER_BYTES,
+    encode_unsupported_option_reply, parse_option_request, parse_option_request_header,
+    OptionRequest, OPTION_REQUEST_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
     encode_read_reply, encode_simple_reply, encode_success_reply, parse_request,
-    parse_request_header, TransmissionRequest, MAX_WRITE_PAYLOAD_BYTES, REQUEST_HEADER_BYTES,
+    parse_request_header, TransmissionRequest, MAX_IO_BYTES, REQUEST_HEADER_BYTES,
 };
 use nbd_protocol::wire::NbdOptionCode;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -43,7 +44,7 @@ async fn write_handshake(stream: &mut TcpStream) -> Result<()> {
 async fn negotiate_options(
     stream: &mut TcpStream,
     catalog: SQLiteExportCatalog,
-) -> Result<Option<MemoryExport>> {
+) -> Result<Option<ExportHandle>> {
     loop {
         let request = read_option_request(stream).await?;
         match request {
@@ -64,8 +65,8 @@ async fn negotiate_options(
                         return Ok(None);
                     }
                 };
-                let export = match MemoryExport::new(&meta) {
-                    Ok(export) => export,
+                let export: ExportHandle = match MemoryExport::new(&meta) {
+                    Ok(export) => Arc::new(export),
                     Err(error) => {
                         stream
                             .write_all(&encode_unknown_export_reply(
@@ -119,8 +120,8 @@ async fn read_option_request(stream: &mut TcpStream) -> Result<OptionRequest> {
         .await
         .map_err(|source| ServerError::io("read NBD option request header", source))?;
 
-    let payload_len = u32::from_be_bytes(bytes[12..16].try_into().expect("header length"));
-    let mut payload = vec![0; payload_len as usize];
+    let header = parse_option_request_header(&bytes)?;
+    let mut payload = vec![0; header.bounded_payload_len()?];
     stream
         .read_exact(&mut payload)
         .await
@@ -130,7 +131,7 @@ async fn read_option_request(stream: &mut TcpStream) -> Result<OptionRequest> {
     Ok(parse_option_request(&bytes)?)
 }
 
-async fn handle_transmission(stream: &mut TcpStream, export: MemoryExport) -> Result<()> {
+async fn handle_transmission(stream: &mut TcpStream, export: ExportHandle) -> Result<()> {
     loop {
         let mut bytes = vec![0; REQUEST_HEADER_BYTES];
         match stream.read_exact(&mut bytes).await {
@@ -142,7 +143,7 @@ async fn handle_transmission(stream: &mut TcpStream, export: MemoryExport) -> Re
         }
 
         let header = parse_request_header(&bytes)?;
-        let payload_len = match header.payload_len(MAX_WRITE_PAYLOAD_BYTES) {
+        let payload_len = match header.payload_len(MAX_IO_BYTES) {
             Ok(payload_len) => payload_len,
             Err(error) => {
                 stream
@@ -159,7 +160,7 @@ async fn handle_transmission(stream: &mut TcpStream, export: MemoryExport) -> Re
             .map_err(|source| ServerError::io("read NBD transmission payload", source))?;
         bytes.extend_from_slice(&payload);
 
-        match parse_request(&bytes, MAX_WRITE_PAYLOAD_BYTES)? {
+        match parse_request(&bytes, MAX_IO_BYTES)? {
             TransmissionRequest::Read {
                 cookie,
                 offset,
