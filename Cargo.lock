@@ -41,6 +41,10 @@ dependencies = [
 [[package]]
 name = "nbd-test-support"
 version = "0.1.0"
+dependencies = [
+ "nbd-config",
+ "toml",
+]
 
 [[package]]
 name = "proc-macro2"

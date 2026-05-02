@@ -6,3 +6,5 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+nbd-config = { path = "../nbd-config" }
+toml = "0.8"
