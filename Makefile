@@ -21,11 +21,21 @@ DOCKER_WORKSPACE_ARGS = \
 	-e PATH=$(DOCKER_PATH) \
 	-w $(DOCKER_WORKDIR)
 
+DOCKER_WORKSPACE_READONLY_ARGS = \
+	-v "$(CURDIR):$(DOCKER_WORKDIR):ro" \
+	-v nbd-cargo-registry:/usr/local/cargo/registry \
+	-v nbd-cargo-git:/usr/local/cargo/git \
+	-v nbd-cargo-target:$(DOCKER_CARGO_TARGET_DIR) \
+	-e CARGO_TARGET_DIR=$(DOCKER_CARGO_TARGET_DIR) \
+	-e PATH=$(DOCKER_PATH) \
+	-w $(DOCKER_WORKDIR)
+
 DOCKER_RUN_WORKSPACE = $(DOCKER_RUN_BASE) $(DOCKER_WORKSPACE_ARGS)
 DOCKER_RUN_WORKSPACE_NAMED = $(DOCKER_RUN_NAMED) $(DOCKER_WORKSPACE_ARGS)
+DOCKER_RUN_WORKSPACE_READONLY = $(DOCKER_RUN_BASE) $(DOCKER_WORKSPACE_READONLY_ARGS)
 DOCKER_RUN = $(DOCKER_RUN_WORKSPACE) $(DOCKER_IMAGE)
 
-.PHONY: test fmt clippy build-tools docker-build docker-test docker-shell docker-kernel-shell docker-attach docker-stop
+.PHONY: test fmt clippy build-tools docker-build docker-test docker-shell docker-kernel-shell docker-attach docker-smoke docker-stop kernel-smoke-inner
 
 test:
 	cargo test --workspace
@@ -60,5 +70,11 @@ docker-attach:
 	docker exec $(DOCKER_INTERACTIVE_FLAGS) -w $(DOCKER_WORKDIR) \
 		$(DOCKER_CONTAINER) bash
 
+docker-smoke: docker-build
+	$(DOCKER_RUN_WORKSPACE_READONLY) --privileged $(DOCKER_IMAGE) make kernel-smoke-inner
+
 docker-stop:
 	-docker rm -f $(DOCKER_CONTAINER)
+
+kernel-smoke-inner:
+	bash scripts/docker/kernel-smoke.sh
