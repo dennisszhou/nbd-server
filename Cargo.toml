@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/nbd-config",
+    "crates/nbd-control-plane",
     "crates/nbd-test-support",
 ]
 resolver = "2"
