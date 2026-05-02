@@ -1,14 +1,18 @@
 use nbd_protocol::constants;
 use nbd_protocol::handshake::{
-    decode_client_flags, encode_server_handshake, SERVER_HANDSHAKE_FLAGS,
+    decode_client_flags, encode_client_flags, encode_server_handshake, SERVER_HANDSHAKE_FLAGS,
 };
 use nbd_protocol::option::{
-    encode_ack_reply, encode_export_info_reply, encode_unsupported_option_reply,
-    parse_option_request, OptionRequest,
+    encode_abort_request, encode_ack_reply, encode_export_info_reply, encode_go_request,
+    encode_unknown_export_reply, encode_unsupported_option_reply, parse_option_reply,
+    parse_option_reply_header, parse_option_request, OptionReply, OptionRequest,
+    OPTION_REPLY_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
-    encode_read_reply, encode_success_reply, parse_request, parse_request_header,
-    TransmissionRequest, MAX_WRITE_PAYLOAD_BYTES, REQUEST_HEADER_BYTES,
+    encode_disconnect_request, encode_flush_request, encode_read_reply, encode_read_request,
+    encode_success_reply, encode_write_request, parse_read_reply, parse_request,
+    parse_request_header, parse_simple_reply, ReadReply, SimpleReply, TransmissionRequest,
+    MAX_WRITE_PAYLOAD_BYTES, REQUEST_HEADER_BYTES, SIMPLE_REPLY_BYTES,
 };
 use nbd_protocol::wire::{
     write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode,
@@ -89,7 +93,10 @@ fn fixed_newstyle_server_handshake_matches_wire_layout() {
 #[test]
 fn client_flags_accept_fixed_newstyle_and_no_zeroes() {
     let raw = constants::NBD_FLAG_C_FIXED_NEWSTYLE | constants::NBD_FLAG_C_NO_ZEROES;
-    let flags = decode_client_flags(&raw.to_be_bytes()).unwrap();
+    let encoded = encode_client_flags(true);
+    assert_eq!(encoded, raw.to_be_bytes());
+
+    let flags = decode_client_flags(&encoded).unwrap();
 
     assert_eq!(flags.raw(), raw);
     assert!(flags.no_zeroes());
@@ -116,14 +123,12 @@ fn client_flags_reject_missing_fixed_newstyle_or_unknown_bits() {
 
 #[test]
 fn option_requests_parse_go_and_abort_wire_frames() {
-    let mut go_payload = Vec::new();
-    write_u32(&mut go_payload, 7);
-    go_payload.extend_from_slice(b"default");
-    write_u16(&mut go_payload, 2);
-    write_u16(&mut go_payload, constants::NBD_INFO_EXPORT);
-    write_u16(&mut go_payload, constants::NBD_INFO_BLOCK_SIZE);
-
-    match parse_option_request(&option_request_bytes(constants::NBD_OPT_GO, &go_payload)).unwrap() {
+    let go = encode_go_request(
+        "default",
+        &[constants::NBD_INFO_EXPORT, constants::NBD_INFO_BLOCK_SIZE],
+    )
+    .unwrap();
+    match parse_option_request(&go).unwrap() {
         OptionRequest::Go(go) => {
             assert_eq!(go.export_name(), "default");
             assert_eq!(
@@ -135,7 +140,7 @@ fn option_requests_parse_go_and_abort_wire_frames() {
     }
 
     assert_eq!(
-        parse_option_request(&option_request_bytes(constants::NBD_OPT_ABORT, b"ignored")).unwrap(),
+        parse_option_request(&encode_abort_request(b"ignored").unwrap()).unwrap(),
         OptionRequest::Abort {
             payload: b"ignored".to_vec(),
         },
@@ -155,6 +160,17 @@ fn option_replies_match_fixed_newstyle_wire_layout() {
             0x00, 0x00, 0x00, 0x05,
         ],
     );
+    assert_eq!(
+        parse_option_reply(
+            &encode_export_info_reply(option, 0x0400_0000, transmission_flags).unwrap()
+        )
+        .unwrap(),
+        OptionReply::InfoExport {
+            option,
+            export_size_bytes: 0x0400_0000,
+            transmission_flags,
+        },
+    );
 
     assert_eq!(
         encode_ack_reply(option).unwrap(),
@@ -162,6 +178,10 @@ fn option_replies_match_fixed_newstyle_wire_layout() {
             0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
             0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
         ],
+    );
+    assert_eq!(
+        parse_option_reply(&encode_ack_reply(option).unwrap()).unwrap(),
+        OptionReply::Ack { option },
     );
 
     let unsupported =
@@ -174,25 +194,43 @@ fn option_replies_match_fixed_newstyle_wire_layout() {
             b't', b'e', b'd',
         ],
     );
+    assert_eq!(
+        parse_option_reply(&unsupported).unwrap(),
+        OptionReply::Error {
+            option: NbdOptionCode::new(99),
+            reply_type: constants::NBD_REP_ERR_UNSUP,
+            message: b"unsupported".to_vec(),
+        },
+    );
+
+    let unknown = encode_unknown_export_reply(option, b"missing").unwrap();
+    assert_eq!(
+        parse_option_reply(&unknown).unwrap(),
+        OptionReply::Error {
+            option,
+            reply_type: constants::NBD_REP_ERR_UNKNOWN,
+            message: b"missing".to_vec(),
+        },
+    );
+
+    let header = parse_option_reply_header(&unknown[..OPTION_REPLY_HEADER_BYTES]).unwrap();
+    assert_eq!(header.option(), option);
+    assert_eq!(header.reply_type(), constants::NBD_REP_ERR_UNKNOWN);
+    assert_eq!(header.payload_len(), 7);
 }
 
 #[test]
 fn happy_path_protocol_script_round_trips_supported_frames() {
     assert_eq!(encode_server_handshake().len(), 18);
+    assert_eq!(SIMPLE_REPLY_BYTES, 16);
 
-    let client_flags = constants::NBD_FLAG_C_FIXED_NEWSTYLE | constants::NBD_FLAG_C_NO_ZEROES;
-    assert!(decode_client_flags(&client_flags.to_be_bytes())
+    assert!(decode_client_flags(&encode_client_flags(true))
         .unwrap()
         .no_zeroes());
 
-    let mut go_payload = Vec::new();
-    write_u32(&mut go_payload, 4);
-    go_payload.extend_from_slice(b"disk");
-    write_u16(&mut go_payload, 1);
-    write_u16(&mut go_payload, constants::NBD_INFO_EXPORT);
-
     let go =
-        parse_option_request(&option_request_bytes(constants::NBD_OPT_GO, &go_payload)).unwrap();
+        parse_option_request(&encode_go_request("disk", &[constants::NBD_INFO_EXPORT]).unwrap())
+            .unwrap();
     assert_eq!(go.code(), NbdOptionCode::new(constants::NBD_OPT_GO));
 
     let option = NbdOptionCode::new(constants::NBD_OPT_GO);
@@ -205,15 +243,13 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
     assert_eq!(encode_ack_reply(option).unwrap().len(), 20);
 
     let write_cookie = NbdCookie::new(0x0102_0304_0506_0708);
-    let mut write = request_header(0, constants::NBD_CMD_WRITE, write_cookie.raw(), 4096, 5);
-    assert_eq!(write.len(), REQUEST_HEADER_BYTES);
-    let write_header = parse_request_header(&write).unwrap();
+    let write = encode_write_request(write_cookie, 4096, b"hello").unwrap();
+    let write_header = parse_request_header(&write[..REQUEST_HEADER_BYTES]).unwrap();
     assert_eq!(
         write_header.payload_len(MAX_WRITE_PAYLOAD_BYTES).unwrap(),
         5
     );
 
-    write.extend_from_slice(b"hello");
     assert_eq!(
         parse_request(&write, MAX_WRITE_PAYLOAD_BYTES).unwrap(),
         TransmissionRequest::Write {
@@ -229,12 +265,19 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
             0x07, 0x08,
         ],
     );
+    assert_eq!(
+        parse_simple_reply(&encode_success_reply(write_cookie)).unwrap(),
+        SimpleReply {
+            cookie: write_cookie,
+            error: 0,
+        },
+    );
 
     let read_cookie = NbdCookie::new(0x1112_1314_1516_1718);
     assert_eq!(
         parse_request(
-            &request_header(0, constants::NBD_CMD_READ, read_cookie.raw(), 4096, 5),
-            MAX_WRITE_PAYLOAD_BYTES,
+            &encode_read_request(read_cookie, 4096, 5).unwrap(),
+            MAX_WRITE_PAYLOAD_BYTES
         )
         .unwrap(),
         TransmissionRequest::Read {
@@ -250,12 +293,20 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
             0x17, 0x18, b'h', b'e', b'l', b'l', b'o',
         ],
     );
+    assert_eq!(
+        parse_read_reply(&encode_read_reply(read_cookie, b"hello"), 5).unwrap(),
+        ReadReply {
+            cookie: read_cookie,
+            error: 0,
+            data: b"hello".to_vec(),
+        },
+    );
 
     let flush_cookie = NbdCookie::new(0x2122_2324_2526_2728);
     assert_eq!(
         parse_request(
-            &request_header(0, constants::NBD_CMD_FLUSH, flush_cookie.raw(), 0, 0),
-            MAX_WRITE_PAYLOAD_BYTES,
+            &encode_flush_request(flush_cookie).unwrap(),
+            MAX_WRITE_PAYLOAD_BYTES
         )
         .unwrap(),
         TransmissionRequest::Flush {
@@ -266,7 +317,7 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
     let disconnect_cookie = NbdCookie::new(0x3132_3334_3536_3738);
     assert_eq!(
         parse_request(
-            &request_header(0, constants::NBD_CMD_DISC, disconnect_cookie.raw(), 0, 0,),
+            &encode_disconnect_request(disconnect_cookie).unwrap(),
             MAX_WRITE_PAYLOAD_BYTES,
         )
         .unwrap(),
@@ -336,15 +387,6 @@ fn transmission_rejects_invalid_supported_request_shapes() {
             "{name}",
         );
     }
-}
-
-fn option_request_bytes(option: u32, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    write_u64(&mut bytes, constants::IHAVEOPT_MAGIC);
-    write_u32(&mut bytes, option);
-    write_u32(&mut bytes, payload.len() as u32);
-    bytes.extend_from_slice(payload);
-    bytes
 }
 
 fn request_header(flags: u16, command: u16, cookie: u64, offset: u64, length: u32) -> Vec<u8> {

@@ -47,6 +47,10 @@ pub enum ProtocolError {
         command: &'static str,
         reason: &'static str,
     },
+    InvalidReply {
+        reply: &'static str,
+        reason: &'static str,
+    },
     LengthOverflow {
         offset: u64,
         length: u32,
@@ -94,6 +98,9 @@ impl fmt::Display for ProtocolError {
             }
             Self::InvalidRequest { command, reason } => {
                 write!(f, "invalid NBD {command} request: {reason}")
+            }
+            Self::InvalidReply { reply, reason } => {
+                write!(f, "invalid NBD {reply} reply: {reason}")
             }
             Self::LengthOverflow { offset, length } => write!(
                 f,

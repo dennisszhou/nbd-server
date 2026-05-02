@@ -2,10 +2,13 @@ use crate::constants::{
     NBD_CMD_DISC, NBD_CMD_FLUSH, NBD_CMD_READ, NBD_CMD_WRITE, NBD_REQUEST_MAGIC,
     NBD_SIMPLE_REPLY_MAGIC,
 };
-use crate::wire::{write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, WireReader};
+use crate::wire::{
+    write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, WireReader,
+};
 use crate::{ProtocolError, Result};
 
 pub const REQUEST_HEADER_BYTES: usize = 28;
+pub const SIMPLE_REPLY_BYTES: usize = 16;
 pub const MAX_WRITE_PAYLOAD_BYTES: u32 = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +69,25 @@ pub enum TransmissionRequest {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimpleReply {
+    pub cookie: NbdCookie,
+    pub error: u32,
+}
+
+impl SimpleReply {
+    pub fn is_success(self) -> bool {
+        self.error == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadReply {
+    pub cookie: NbdCookie,
+    pub error: u32,
+    pub data: Vec<u8>,
+}
+
 impl TransmissionRequest {
     pub fn cookie(&self) -> NbdCookie {
         match self {
@@ -75,6 +97,57 @@ impl TransmissionRequest {
             | Self::Disconnect { cookie } => *cookie,
         }
     }
+}
+
+pub fn encode_read_request(cookie: NbdCookie, offset: u64, length: u32) -> Result<Vec<u8>> {
+    let header = RequestHeader {
+        flags: NbdCommandFlags::new(0),
+        command: NbdCommandType::new(NBD_CMD_READ),
+        cookie,
+        offset,
+        length,
+    };
+    header.payload_len(MAX_WRITE_PAYLOAD_BYTES)?;
+    Ok(encode_request_header(header))
+}
+
+pub fn encode_write_request(cookie: NbdCookie, offset: u64, data: &[u8]) -> Result<Vec<u8>> {
+    let length = u32::try_from(data.len()).map_err(|_| ProtocolError::LengthTooLarge {
+        field: "write payload",
+        len: data.len(),
+        max: u32::MAX as usize,
+    })?;
+    let header = RequestHeader {
+        flags: NbdCommandFlags::new(0),
+        command: NbdCommandType::new(NBD_CMD_WRITE),
+        cookie,
+        offset,
+        length,
+    };
+    header.payload_len(MAX_WRITE_PAYLOAD_BYTES)?;
+
+    let mut out = encode_request_header(header);
+    out.extend_from_slice(data);
+    Ok(out)
+}
+
+pub fn encode_flush_request(cookie: NbdCookie) -> Result<Vec<u8>> {
+    encode_zero_range_request(cookie, NBD_CMD_FLUSH)
+}
+
+pub fn encode_disconnect_request(cookie: NbdCookie) -> Result<Vec<u8>> {
+    encode_zero_range_request(cookie, NBD_CMD_DISC)
+}
+
+pub fn encode_request_header(header: RequestHeader) -> Vec<u8> {
+    let mut out = Vec::with_capacity(REQUEST_HEADER_BYTES);
+    write_u32(&mut out, NBD_REQUEST_MAGIC);
+    write_u16(&mut out, header.flags.raw());
+    write_u16(&mut out, header.command.raw());
+    write_u64(&mut out, header.cookie.raw());
+    write_u64(&mut out, header.offset);
+    write_u32(&mut out, header.length);
+    out
 }
 
 pub fn parse_request(input: &[u8], max_write_payload_bytes: u32) -> Result<TransmissionRequest> {
@@ -144,6 +217,66 @@ pub fn encode_read_reply(cookie: NbdCookie, data: &[u8]) -> Vec<u8> {
     let mut out = encode_success_reply(cookie);
     out.extend_from_slice(data);
     out
+}
+
+pub fn parse_simple_reply(input: &[u8]) -> Result<SimpleReply> {
+    let mut reader = WireReader::new(input);
+    let magic = reader.read_u32()?;
+    if magic != NBD_SIMPLE_REPLY_MAGIC {
+        return Err(ProtocolError::InvalidMagic {
+            context: "simple reply",
+            expected: NBD_SIMPLE_REPLY_MAGIC as u64,
+            actual: magic as u64,
+        });
+    }
+
+    let reply = SimpleReply {
+        error: reader.read_u32()?,
+        cookie: NbdCookie::new(reader.read_u64()?),
+    };
+
+    if reader.remaining() != 0 {
+        return Err(ProtocolError::TrailingBytes {
+            remaining: reader.remaining(),
+        });
+    }
+
+    Ok(reply)
+}
+
+pub fn parse_read_reply(input: &[u8], expected_len: u32) -> Result<ReadReply> {
+    let mut reader = WireReader::new(input);
+    let reply = parse_simple_reply(reader.read_bytes(SIMPLE_REPLY_BYTES)?)?;
+    let data_len = if reply.is_success() {
+        expected_len as usize
+    } else {
+        0
+    };
+    let data = reader.read_bytes(data_len)?;
+
+    if reader.remaining() != 0 {
+        return Err(ProtocolError::TrailingBytes {
+            remaining: reader.remaining(),
+        });
+    }
+
+    Ok(ReadReply {
+        cookie: reply.cookie,
+        error: reply.error,
+        data: data.to_vec(),
+    })
+}
+
+fn encode_zero_range_request(cookie: NbdCookie, command: u16) -> Result<Vec<u8>> {
+    let header = RequestHeader {
+        flags: NbdCommandFlags::new(0),
+        command: NbdCommandType::new(command),
+        cookie,
+        offset: 0,
+        length: 0,
+    };
+    header.payload_len(MAX_WRITE_PAYLOAD_BYTES)?;
+    Ok(encode_request_header(header))
 }
 
 fn parse_header(reader: &mut WireReader<'_>) -> Result<RequestHeader> {

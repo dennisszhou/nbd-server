@@ -22,6 +22,7 @@ pub const NBD_OPT_GO: u32 = 7;
 pub const NBD_REP_ACK: u32 = 1;
 pub const NBD_REP_INFO: u32 = 3;
 pub const NBD_REP_ERR_UNSUP: u32 = (1 << 31) + 1;
+pub const NBD_REP_ERR_UNKNOWN: u32 = (1 << 31) + 6;
 
 pub const NBD_INFO_EXPORT: u16 = 0;
 pub const NBD_INFO_BLOCK_SIZE: u16 = 3;

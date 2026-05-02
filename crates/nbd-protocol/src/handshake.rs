@@ -32,6 +32,14 @@ pub fn encode_server_handshake() -> Vec<u8> {
     out
 }
 
+pub fn encode_client_flags(no_zeroes: bool) -> Vec<u8> {
+    let mut raw = NBD_FLAG_C_FIXED_NEWSTYLE;
+    if no_zeroes {
+        raw |= NBD_FLAG_C_NO_ZEROES;
+    }
+    raw.to_be_bytes().to_vec()
+}
+
 pub fn decode_client_flags(input: &[u8]) -> Result<ClientFlags> {
     let mut reader = WireReader::new(input);
     let raw = reader.read_u32()?;
