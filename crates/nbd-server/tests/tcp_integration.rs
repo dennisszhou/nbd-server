@@ -1,4 +1,3 @@
-use nbd_client::{ClientError, NbdClient};
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
     CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportName, SQLiteExportCatalog,
@@ -8,6 +7,7 @@ use nbd_protocol::constants::{
 };
 use nbd_server::ToyServer;
 use nbd_test_support::TestRuntime;
+use nbd_us_client::{ClientError, NbdClient};
 
 const MIGRATION: &str =
     include_str!("../../../prisma/migrations/20260501000000_init/migration.sql");
@@ -177,7 +177,7 @@ fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
 }
 
-fn assert_unknown_export(result: nbd_client::Result<NbdClient>) {
+fn assert_unknown_export(result: nbd_us_client::Result<NbdClient>) {
     assert!(matches!(
         result,
         Err(ClientError::OptionError {

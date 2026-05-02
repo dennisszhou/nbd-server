@@ -759,7 +759,7 @@ Commit 4/6: server: implement TCP option negotiation
 
   Type:             semantic
   Required:         yes
-  Summary:          Add the small nbd-client validation crate and the toy server
+  Summary:          Add the small nbd-us-client validation crate and the toy server
                     listener/connection path through fixed-newstyle handshake
                     and NBD_OPT_GO.
   Invariant focus:  Integration tests observe only real TCP framing while the
@@ -768,10 +768,10 @@ Commit 4/6: server: implement TCP option negotiation
   Review gate:      code
   Files:            Cargo.lock
                     Cargo.toml
-                    crates/nbd-client/Cargo.toml (new)
-                    crates/nbd-client/src/client.rs (new)
-                    crates/nbd-client/src/error.rs (new)
-                    crates/nbd-client/src/lib.rs (new)
+                    crates/nbd-us-client/Cargo.toml (new)
+                    crates/nbd-us-client/src/client.rs (new)
+                    crates/nbd-us-client/src/error.rs (new)
+                    crates/nbd-us-client/src/lib.rs (new)
                     crates/nbd-server/Cargo.toml
                     crates/nbd-server/src/connection.rs (new)
                     crates/nbd-server/src/error.rs
@@ -783,13 +783,13 @@ Commit 4/6: server: implement TCP option negotiation
                     helpers.
   Postconditions:   Tests can load temp config, create temp catalog exports,
                     start the toy server on 127.0.0.1:0, connect through
-                    nbd-client, negotiate NBD_OPT_GO, inspect negotiated export
+                    nbd-us-client, negotiate NBD_OPT_GO, inspect negotiated export
                     size/flags, and see missing or deleted exports fail before
                     transmission mode.
-  Verify:           cargo test -p nbd-client
+  Verify:           cargo test -p nbd-us-client
                     cargo test -p nbd-server --test tcp_integration
   Risks:            This is the first async TCP boundary; keep the server task
-                    lifecycle simple and keep nbd-client independent of server
+                    lifecycle simple and keep nbd-us-client independent of server
                     internals.
   Not included:     READ/WRITE/FLUSH/DISC execution, workqueues, same-export
                     multi-connection visibility, server binary packaging, or
@@ -807,15 +807,15 @@ Commit 5/6: server: handle toy I/O commands
                     writes complete.
   Test level:       integration
   Review gate:      code
-  Files:            crates/nbd-client/src/client.rs
-                    crates/nbd-client/src/error.rs
-                    crates/nbd-client/src/lib.rs
+  Files:            crates/nbd-us-client/src/client.rs
+                    crates/nbd-us-client/src/error.rs
+                    crates/nbd-us-client/src/lib.rs
                     crates/nbd-server/src/connection.rs
                     crates/nbd-server/src/error.rs
                     crates/nbd-server/src/lib.rs
                     crates/nbd-server/tests/tcp_integration.rs
   Preconditions:    Commit 4 has proven fixed-newstyle TCP negotiation and
-                    catalog export opening through nbd-client.
+                    catalog export opening through nbd-us-client.
   Postconditions:   TCP integration tests prove zero reads from new exports,
                     write/readback, flush, clean disconnect, out-of-bounds error
                     reporting, and independent contents for different catalog
@@ -844,7 +844,7 @@ Commit 6/6: protocol: bound toy wire allocations
                     MemoryExport directly.
   Test level:       integration
   Review gate:      code
-  Files:            crates/nbd-client/src/client.rs
+  Files:            crates/nbd-us-client/src/client.rs
                     crates/nbd-protocol/src/lib.rs
                     crates/nbd-protocol/src/option.rs
                     crates/nbd-protocol/src/transmission.rs

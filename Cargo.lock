@@ -667,14 +667,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nbd-client"
-version = "0.1.0"
-dependencies = [
- "nbd-protocol",
- "tokio",
-]
-
-[[package]]
 name = "nbd-config"
 version = "0.1.0"
 dependencies = [
@@ -703,11 +695,11 @@ name = "nbd-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "nbd-client",
  "nbd-config",
  "nbd-control-plane",
  "nbd-protocol",
  "nbd-test-support",
+ "nbd-us-client",
  "sqlx",
  "tokio",
 ]
@@ -718,6 +710,14 @@ version = "0.1.0"
 dependencies = [
  "nbd-config",
  "toml",
+]
+
+[[package]]
+name = "nbd-us-client"
+version = "0.1.0"
+dependencies = [
+ "nbd-protocol",
+ "tokio",
 ]
 
 [[package]]

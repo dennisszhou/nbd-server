@@ -32,11 +32,10 @@ Constraints
 - Docker/kernel smoke must stay outside the normal `make test` loop.
 - The server is still the toy non-durable in-memory implementation.
 - The smoke path should use the real `nbd-client` userspace tool and the Linux
-  kernel NBD device, not our userspace client.
+  kernel NBD device, not our `nbd-us-client` validation crate.
 - In the Debian smoke image, `nbd-client` resolves to `/usr/sbin/nbd-client`
-  from the prebuilt `nbd-client` package. Our userspace client currently
-  collides with that tool name, so this series should rename it to
-  `nbd-us-client` before adding Docker smoke command wiring.
+  from the prebuilt `nbd-client` package. The Rust validation client is named
+  `nbd-us-client` so it cannot be confused with the kernel attach tool.
 - The container should be useful for manual Linux testing without requiring a
   full image rebuild after every source edit.
 
