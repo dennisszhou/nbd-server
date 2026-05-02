@@ -3,7 +3,7 @@ Date: 2026-05-01
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 3 approved
+- current state: Series 3 finished; Series 4 pending approval
 Completion:
 - execution complete: no
 
@@ -441,7 +441,7 @@ Done means: boundary-style protocol fixture tests prove the supported
 handshake, option, and transmission wire shapes through the public
 `nbd-protocol` API without a mock client, server, or kernel NBD client.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
