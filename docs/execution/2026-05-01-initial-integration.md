@@ -1,9 +1,9 @@
 Title: Initial Integration Execution
 Date: 2026-05-01
-Status: approved
+Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved
+- current state: Series 1 finished; Series 2 pending approval
 Completion:
 - execution complete: no
 
@@ -73,7 +73,7 @@ Done means: `cargo test --workspace`, formatter check, clippy, and the root
 Makefile targets all work. Tests prove that explicit config paths do not use
 developer `~/.nbd` state.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
