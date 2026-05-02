@@ -6,6 +6,10 @@ use nbd_protocol::option::{
     encode_ack_reply, encode_export_info_reply, encode_unsupported_option_reply,
     parse_option_request, OptionRequest,
 };
+use nbd_protocol::transmission::{
+    encode_read_reply, encode_success_reply, parse_request, parse_request_header,
+    TransmissionRequest, MAX_WRITE_PAYLOAD_BYTES, REQUEST_HEADER_BYTES,
+};
 use nbd_protocol::wire::{
     write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode,
     WireReader,
@@ -172,11 +176,195 @@ fn option_replies_match_fixed_newstyle_wire_layout() {
     );
 }
 
+#[test]
+fn happy_path_protocol_script_round_trips_supported_frames() {
+    assert_eq!(encode_server_handshake().len(), 18);
+
+    let client_flags = constants::NBD_FLAG_C_FIXED_NEWSTYLE | constants::NBD_FLAG_C_NO_ZEROES;
+    assert!(decode_client_flags(&client_flags.to_be_bytes())
+        .unwrap()
+        .no_zeroes());
+
+    let mut go_payload = Vec::new();
+    write_u32(&mut go_payload, 4);
+    go_payload.extend_from_slice(b"disk");
+    write_u16(&mut go_payload, 1);
+    write_u16(&mut go_payload, constants::NBD_INFO_EXPORT);
+
+    let go =
+        parse_option_request(&option_request_bytes(constants::NBD_OPT_GO, &go_payload)).unwrap();
+    assert_eq!(go.code(), NbdOptionCode::new(constants::NBD_OPT_GO));
+
+    let option = NbdOptionCode::new(constants::NBD_OPT_GO);
+    assert_eq!(
+        encode_export_info_reply(option, 0x4000, constants::NBD_FLAG_SEND_FLUSH)
+            .unwrap()
+            .len(),
+        32,
+    );
+    assert_eq!(encode_ack_reply(option).unwrap().len(), 20);
+
+    let write_cookie = NbdCookie::new(0x0102_0304_0506_0708);
+    let mut write = request_header(0, constants::NBD_CMD_WRITE, write_cookie.raw(), 4096, 5);
+    assert_eq!(write.len(), REQUEST_HEADER_BYTES);
+    let write_header = parse_request_header(&write).unwrap();
+    assert_eq!(
+        write_header.payload_len(MAX_WRITE_PAYLOAD_BYTES).unwrap(),
+        5
+    );
+
+    write.extend_from_slice(b"hello");
+    assert_eq!(
+        parse_request(&write, MAX_WRITE_PAYLOAD_BYTES).unwrap(),
+        TransmissionRequest::Write {
+            cookie: write_cookie,
+            offset: 4096,
+            data: b"hello".to_vec(),
+        },
+    );
+    assert_eq!(
+        encode_success_reply(write_cookie),
+        [
+            0x67, 0x44, 0x66, 0x98, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+            0x07, 0x08,
+        ],
+    );
+
+    let read_cookie = NbdCookie::new(0x1112_1314_1516_1718);
+    assert_eq!(
+        parse_request(
+            &request_header(0, constants::NBD_CMD_READ, read_cookie.raw(), 4096, 5),
+            MAX_WRITE_PAYLOAD_BYTES,
+        )
+        .unwrap(),
+        TransmissionRequest::Read {
+            cookie: read_cookie,
+            offset: 4096,
+            length: 5,
+        },
+    );
+    assert_eq!(
+        encode_read_reply(read_cookie, b"hello"),
+        [
+            0x67, 0x44, 0x66, 0x98, 0x00, 0x00, 0x00, 0x00, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
+            0x17, 0x18, b'h', b'e', b'l', b'l', b'o',
+        ],
+    );
+
+    let flush_cookie = NbdCookie::new(0x2122_2324_2526_2728);
+    assert_eq!(
+        parse_request(
+            &request_header(0, constants::NBD_CMD_FLUSH, flush_cookie.raw(), 0, 0),
+            MAX_WRITE_PAYLOAD_BYTES,
+        )
+        .unwrap(),
+        TransmissionRequest::Flush {
+            cookie: flush_cookie,
+        },
+    );
+
+    let disconnect_cookie = NbdCookie::new(0x3132_3334_3536_3738);
+    assert_eq!(
+        parse_request(
+            &request_header(0, constants::NBD_CMD_DISC, disconnect_cookie.raw(), 0, 0,),
+            MAX_WRITE_PAYLOAD_BYTES,
+        )
+        .unwrap(),
+        TransmissionRequest::Disconnect {
+            cookie: disconnect_cookie,
+        },
+    );
+}
+
+#[test]
+fn transmission_rejects_invalid_supported_request_shapes() {
+    let oversized = MAX_WRITE_PAYLOAD_BYTES + 1;
+    let cases = [
+        (
+            "bad magic",
+            bad_magic_request(),
+            ProtocolError::InvalidMagic {
+                context: "transmission request",
+                expected: constants::NBD_REQUEST_MAGIC as u64,
+                actual: 0,
+            },
+        ),
+        (
+            "unsupported flags",
+            request_header(1, constants::NBD_CMD_READ, 1, 0, 1),
+            ProtocolError::UnsupportedCommandFlags { raw: 1 },
+        ),
+        (
+            "zero-length read",
+            request_header(0, constants::NBD_CMD_READ, 1, 0, 0),
+            ProtocolError::InvalidRequest {
+                command: "NBD_CMD_READ",
+                reason: "zero length is unsupported",
+            },
+        ),
+        (
+            "zero-length write",
+            request_header(0, constants::NBD_CMD_WRITE, 1, 0, 0),
+            ProtocolError::InvalidRequest {
+                command: "NBD_CMD_WRITE",
+                reason: "zero length is unsupported",
+            },
+        ),
+        (
+            "range overflow",
+            request_header(0, constants::NBD_CMD_READ, 1, u64::MAX, 1),
+            ProtocolError::LengthOverflow {
+                offset: u64::MAX,
+                length: 1,
+            },
+        ),
+        (
+            "oversized write payload",
+            request_header(0, constants::NBD_CMD_WRITE, 1, 0, oversized),
+            ProtocolError::LengthTooLarge {
+                field: "write payload",
+                len: oversized as usize,
+                max: MAX_WRITE_PAYLOAD_BYTES as usize,
+            },
+        ),
+    ];
+
+    for (name, bytes, expected) in cases {
+        assert_eq!(
+            parse_request(&bytes, MAX_WRITE_PAYLOAD_BYTES),
+            Err(expected),
+            "{name}",
+        );
+    }
+}
+
 fn option_request_bytes(option: u32, payload: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     write_u64(&mut bytes, constants::IHAVEOPT_MAGIC);
     write_u32(&mut bytes, option);
     write_u32(&mut bytes, payload.len() as u32);
     bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn request_header(flags: u16, command: u16, cookie: u64, offset: u64, length: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_u32(&mut bytes, constants::NBD_REQUEST_MAGIC);
+    write_u16(&mut bytes, flags);
+    write_u16(&mut bytes, command);
+    write_u64(&mut bytes, cookie);
+    write_u64(&mut bytes, offset);
+    write_u32(&mut bytes, length);
+    bytes
+}
+
+fn bad_magic_request() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_u32(&mut bytes, 0);
+    write_u16(&mut bytes, 0);
+    write_u16(&mut bytes, constants::NBD_CMD_READ);
+    write_u64(&mut bytes, 1);
+    write_u64(&mut bytes, 0);
+    write_u32(&mut bytes, 1);
     bytes
 }

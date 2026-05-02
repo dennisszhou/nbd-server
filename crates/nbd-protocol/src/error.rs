@@ -37,6 +37,20 @@ pub enum ProtocolError {
         len: usize,
         max: usize,
     },
+    UnsupportedCommandFlags {
+        raw: u16,
+    },
+    UnsupportedCommand {
+        command: u16,
+    },
+    InvalidRequest {
+        command: &'static str,
+        reason: &'static str,
+    },
+    LengthOverflow {
+        offset: u64,
+        length: u32,
+    },
 }
 
 impl fmt::Display for ProtocolError {
@@ -71,6 +85,19 @@ impl fmt::Display for ProtocolError {
             Self::LengthTooLarge { field, len, max } => write!(
                 f,
                 "NBD {field} length {len} exceeds maximum supported length {max}",
+            ),
+            Self::UnsupportedCommandFlags { raw } => {
+                write!(f, "NBD command flags are unsupported: raw=0x{raw:04x}")
+            }
+            Self::UnsupportedCommand { command } => {
+                write!(f, "NBD command type {command} is not supported")
+            }
+            Self::InvalidRequest { command, reason } => {
+                write!(f, "invalid NBD {command} request: {reason}")
+            }
+            Self::LengthOverflow { offset, length } => write!(
+                f,
+                "NBD request range overflows u64: offset={offset}, length={length}",
             ),
         }
     }
