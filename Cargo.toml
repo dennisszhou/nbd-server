@@ -2,6 +2,7 @@
 members = [
     "crates/nbd-config",
     "crates/nbd-control-plane",
+    "crates/nbd-client",
     "crates/nbd-protocol",
     "crates/nbd-server",
     "crates/nbd-test-support",
