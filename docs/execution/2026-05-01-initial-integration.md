@@ -3,7 +3,7 @@ Date: 2026-05-01
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 4 approved
+- current state: Series 4 finished; Series 5 pending design
 Completion:
 - execution complete: no
 
@@ -633,7 +633,14 @@ open path, toy `MemoryExport` semantics, and honest non-durability.
 Done means: the first vertical slice passes through temp config, temp SQLite,
 SDK-created export metadata, toy server, and userspace validation client.
 
-Approval: approved
+Approval: finished
+
+Closeout: Series 4 completed the userspace TCP toy-server checkpoint. The
+final reviewed stack includes the review-fix commit that bounds wire
+allocations before buffers are allocated and keeps transmission handling behind
+the `Export` boundary. `$review-series` verdict was acceptable after those
+fixes, and `$polish-series` normalized the local commit history without
+changing final content.
 
 Verification plan:
 
@@ -648,7 +655,15 @@ control, concurrent request execution beyond one task per accepted connection,
 scripted protocol peers, same-export multi-connection visibility, operator-ready
 binary packaging, or kernel NBD.
 
-Commit 1/5: docs/execution: plan toy server series
+Closeout verification:
+
+```text
+make test
+make fmt
+make clippy
+```
+
+Commit 1/6: docs/execution: plan toy server series
 
   Type:             docs
   Required:         yes
@@ -672,7 +687,7 @@ Commit 1/5: docs/execution: plan toy server series
                     MemoryExport, or transmission I/O.
   Depends on:       none
 
-Commit 2/5: protocol: add client wire helpers
+Commit 2/6: protocol: add client wire helpers
 
   Type:             semantic
   Required:         yes
@@ -707,7 +722,7 @@ Commit 2/5: protocol: add client wire helpers
                     execution.
   Depends on:       1
 
-Commit 3/5: server: add memory export
+Commit 3/6: server: add memory export
 
   Type:             semantic
   Required:         yes
@@ -740,7 +755,7 @@ Commit 3/5: server: add memory export
                     shared export state.
   Depends on:       2
 
-Commit 4/5: server: implement TCP option negotiation
+Commit 4/6: server: implement TCP option negotiation
 
   Type:             semantic
   Required:         yes
