@@ -3,6 +3,7 @@ members = [
     "crates/nbd-config",
     "crates/nbd-control-plane",
     "crates/nbd-test-support",
+    "crates/nbdcli",
 ]
 resolver = "2"
 
