@@ -17,7 +17,7 @@ SQLite through explicit catalog traits.
 
 Implement the M1 control-plane slice:
 
-- Prisma schema and SQLite migration for exports;
+- Prisma schema and SQLite migration for exports and export generations;
 - `nbd-control-plane` Rust crate;
 - SQLite-backed `ExportCatalog`;
 - thin `nbdcli` binary;
@@ -49,7 +49,8 @@ Implement the M1 control-plane slice:
 
 After this slice:
 
-- Prisma can create a SQLite catalog schema.
+- Prisma can create a SQLite catalog schema with stable export identity rows
+  and append-only committed-root generation rows.
 - `nbd-control-plane` can create/list/inspect/delete exports.
 - `nbdcli` exposes create/list/inspect/delete by calling the SDK.
 - Integration tests can create a temp database, apply migrations, exercise the
@@ -86,34 +87,77 @@ M1 should use `sqlx` for the Rust runtime database client. `sqlx` supports both
 SQLite and Postgres, maps naturally to explicit SQL behind `ExportCatalog`, and
 keeps the runtime path independent of Prisma-generated clients.
 
+# Catalog URL Boundary
+
+M1 should introduce a `CatalogUrl` type as the runtime parser for
+`catalog.url`. The config file can keep a plain string field, but runtime code
+should not pass raw catalog URL strings directly into database clients.
+
+For local SQLite, use `file:` URLs:
+
+```text
+file:/Users/example/.nbd/catalog.db
+file:relative/catalog.db
+```
+
+`CatalogUrl` should interpret `file:` as SQLite and expose the connection
+string shape required by the runtime database client. If `sqlx` needs a
+`sqlite:` URL, the conversion belongs in `CatalogUrl`.
+
+M1 should update the M0 config and test-support helpers so newly bootstrapped
+operator configs and test runtimes write `file:` catalog URLs.
+
+Prisma can consume the `file:` URL directly for SQLite migrations. A future
+Postgres catalog can use `postgres://...` and route to a future Postgres
+catalog implementation behind the same SDK boundary.
+
+Unsupported schemes should fail loudly. The SDK should not silently guess a
+database provider from an arbitrary URL shape.
+
 # Database Schema V1
 
-V1 should define only the `exports` table. Tree metadata and lifecycle lease
-state land later.
+V1 should define `exports` and `export_generations`. Tree node/edge metadata
+and lifecycle lease state land later.
+
+`exports` owns the stable identity and lifecycle of a named disk:
 
 Conceptual fields:
 
 ```text
 exports
-  id                  text primary key
-  name                text not null unique
-  size_bytes          integer not null
-  block_size          integer not null
-  state               text not null
-  root_node_id        text null
-  checkpoint_wal_seq  integer not null
-  generation          integer not null
-  created_at          text not null
-  updated_at          text not null
+  id             text primary key
+  name           text not null unique
+  size_bytes     integer not null
+  block_size     integer not null
+  state          text not null
+  created_at     text not null
+  updated_at     text not null
+  deleted_at     text null
 ```
 
-Initial values for create:
+`export_generations` owns the published committed-root history for an export:
 
 ```text
-state = active
-root_node_id = null
-checkpoint_wal_seq = 0
-generation = 0
+export_generations
+  id                  text primary key
+  export_id           text not null references exports(id)
+  generation          integer not null
+  root_node_id        text null
+  checkpoint_wal_seq  integer not null
+  created_at          text not null
+
+  unique(export_id, generation)
+```
+
+Initial values for create are inserted transactionally:
+
+```text
+exports.state = active
+exports.deleted_at = null
+
+export_generations.generation = 0
+export_generations.root_node_id = null
+export_generations.checkpoint_wal_seq = 0
 ```
 
 Use text for IDs and timestamps initially. This keeps SQLite simple and leaves
@@ -127,6 +171,12 @@ deleted
 ```
 
 Rust should parse state into an enum at the SDK boundary.
+
+The latest committed root for an export is the row with the highest
+`generation` in `export_generations`. Generation rows are append-only; future
+compaction should publish a new generation instead of mutating an existing
+generation row. This gives clone a clean future model: create a new export and
+insert generation `0` copied from the source export's latest committed root.
 
 # API Shape
 
@@ -234,32 +284,47 @@ Expected commands:
 
 ```text
 make -C prisma db-migrate
+make -C prisma db-migrate-check
 make -C prisma db-reset
 ```
 
-`make -C prisma db-migrate` should apply migrations to the database URL from
-the active config or an explicit environment override. `make -C prisma
-db-reset` should be limited to local development/test databases and must not
-silently destroy an operator database.
+`make -C prisma db-migrate` should require an explicit `DATABASE_URL` and apply
+migrations to that database. Validation should use
+`make -C prisma db-migrate-check`, which creates and removes a temporary
+SQLite database instead of touching operator or developer catalog state.
+`make -C prisma db-reset` should require both an explicit `DATABASE_URL` and
+`ALLOW_DB_RESET=1` so it does not silently destroy an operator database.
 
 # Source Of Truth
 
 - Prisma schema/migrations are the database schema source of truth.
 - `ExportCatalog` is the Rust runtime metadata boundary.
+- `CatalogUrl` is the runtime interpretation boundary for `catalog.url`.
 - `nbdcli` owns command parsing and output formatting only.
 - Test fixtures own test database paths.
 
 # Invariants
 
+- Runtime catalog code parses `catalog.url` through `CatalogUrl`.
+- `file:` URLs mean local SQLite.
+- New local SQLite configs and test fixtures emit `file:` catalog URLs.
+- Unsupported catalog URL schemes fail loudly.
 - `nbdcli` does not directly issue SQL.
 - SDK integration tests do not shell out to `nbdcli`.
 - Deleted exports are not returned by `load_export`.
 - `inspect_export` can return deleted exports for operator visibility.
 - `list_exports` excludes deleted exports unless requested.
-- Create initializes root/checkpoint/generation to the all-zero committed
-  state.
+- Every export has at least one export generation.
+- `size_bytes` and `block_size` must both be greater than zero.
+- Create initializes generation `0` to the all-zero committed state in the same
+  database transaction as the export row.
+- `export_generations` rows are append-only.
+- The latest committed root is the highest generation for the export.
+- `checkpoint_wal_seq` belongs to a generation, not to the export row.
+- `root_node_id = null` means an empty/all-zero committed disk.
 - Delete is logical and does not remove rows.
-- M1 does not create tree metadata tables.
+- Deleted exports keep their generation history for inspect/debugging.
+- M1 does not create tree node or edge metadata tables.
 - M1 does not prevent open/delete races.
 
 # Alternatives Considered
@@ -295,7 +360,7 @@ Expected checks:
 - `make test`
 - `make fmt`
 - `make clippy`
-- `make -C prisma db-migrate`
+- `make -C prisma db-migrate-check`
 - Prisma migration command/check for SQLite
 - SDK integration tests against a temp SQLite database
 - CLI smoke tests against a temp SQLite database and explicit config
@@ -331,7 +396,7 @@ This design is ready for `$review-plan` when:
 - the Prisma-as-migrations-only boundary is accepted;
 - the `nbd-control-plane` SDK boundary is accepted;
 - the `nbdcli` command shape is accepted;
-- the M1 schema is accepted as exports-only;
+- the M1 schema is accepted as exports plus append-only export generations;
 - deferring open/delete race prevention is accepted.
 
 # Recommended Next Step

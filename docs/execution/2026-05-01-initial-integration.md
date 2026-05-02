@@ -3,7 +3,7 @@ Date: 2026-05-01
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 1 finished; Series 2 pending approval
+- current state: Series 2 approved
 Completion:
 - execution complete: no
 
@@ -232,9 +232,9 @@ Roadmap milestone: M1
 Design coverage:
 `docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md`
 
-Stable checkpoint: Prisma creates the SQLite `exports` schema; the Rust SDK
-and `nbdcli` can create, list, inspect, and logically delete exports against a
-temp database.
+Stable checkpoint: Prisma creates the SQLite `exports` and
+`export_generations` schema; the Rust SDK and `nbdcli` can create, list,
+inspect, and logically delete exports against a temp database.
 
 Review focus: schema shape, SQL/runtime boundary, SDK ownership, and CLI as a
 thin wrapper.
@@ -243,7 +243,7 @@ Done means: SDK integration tests use temp databases and do not shell out to
 the CLI; CLI smoke tests use explicit config and structured output where
 needed.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
@@ -251,11 +251,174 @@ Verification plan:
 make test
 make fmt
 make clippy
-make -C prisma db-migrate
+make -C prisma db-migrate-check
 ```
 
 Not included: real leases, open/delete race prevention, tree metadata, clone,
 or NBD server open paths.
+
+Commit 1/6: docs/execution: plan catalog SDK series
+
+  Type:             docs
+  Required:         yes
+  Summary:          Record the Series 2 commit contract now that the M0
+                    workspace checkpoint is finished.
+  Invariant focus:  Catalog execution work has an approved source of truth
+                    before schema, SDK, or CLI changes begin.
+  Test level:       none
+  Review gate:      structures
+  Files:            docs/execution/2026-05-01-initial-integration.md
+                    docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md
+  Preconditions:    Series 1 is finished and the M1 catalog SDK design is
+                    approved.
+  Postconditions:   Series 2 has explicit commit boundaries, verification
+                    commands, review gates, and deferred scope.
+  Verify:           git diff --cached --check
+  Risks:            Low; this is a planning-only commit.
+  Not included:     Prisma schema, Rust SDK code, CLI code, or migrations.
+  Depends on:       none
+
+Commit 2/6: config: make catalog file URLs canonical
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Update config and test-support helpers so local SQLite
+                    catalog URLs use the canonical `file:` form.
+  Invariant focus:  New local SQLite configs and test fixtures emit catalog
+                    URLs that Prisma can consume directly.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-config/src/lib.rs
+                    crates/nbd-config/tests/config_loading.rs
+                    crates/nbd-test-support/src/lib.rs
+                    crates/nbd-test-support/tests/runtime_fixture.rs
+  Preconditions:    Commit 1 has recorded the Series 2 execution contract.
+  Postconditions:   Default config bootstrap and `TestRuntime` produce `file:`
+                    catalog URLs for local SQLite paths.
+  Verify:           cargo test -p nbd-config
+                    cargo test -p nbd-test-support
+  Risks:            Existing M0 code used `sqlite:` URLs; tests must prove the
+                    new canonical local format is used consistently.
+  Not included:     Prisma schema, Rust catalog APIs, `nbdcli`, or database
+                    connections.
+  Depends on:       1
+
+Commit 3/6: prisma: add export catalog schema
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add the Prisma schema, initial SQLite migration, and
+                    migration Makefile for the V1 catalog tables.
+  Invariant focus:  Prisma schema and migrations are the database schema source
+                    of truth.
+  Test level:       integration
+  Review gate:      migration
+  Files:            prisma/schema.prisma
+                    prisma/migrations/20260501000000_init/migration.sql
+                    prisma/Makefile
+  Preconditions:    Commit 2 has made `file:` URLs canonical for local SQLite
+                    configs.
+  Postconditions:   Prisma can create the V1 `exports` and
+                    `export_generations` tables from a `file:` SQLite URL,
+                    with active/deleted export state, append-only committed
+                    root generations, and no tree node/edge tables.
+  Verify:           make -C prisma db-migrate-check
+  Risks:            Prisma consumes `file:` URLs directly; Rust runtime code
+                    must still go through `CatalogUrl` before opening a
+                    database connection.
+  Not included:     Rust catalog APIs, `nbdcli`, tree node/edge metadata,
+                    leases, or clone support.
+  Depends on:       2
+
+Commit 4/6: catalog: add control-plane API
+
+  Type:             preparatory
+  Required:         yes
+  Summary:          Add the `nbd-control-plane` crate with `CatalogUrl`, export
+                    metadata types, request/response structs, errors, and the
+                    `ExportCatalog` trait.
+  Invariant focus:  The SDK boundary owns catalog semantics and catalog URL
+                    interpretation; callers do not construct raw SQL or depend
+                    on Prisma runtime clients.
+  Test level:       unit
+  Review gate:      structures
+  Files:            Cargo.lock
+                    Cargo.toml
+                    crates/nbd-control-plane/Cargo.toml
+                    crates/nbd-control-plane/src/lib.rs
+                    crates/nbd-control-plane/src/catalog_url.rs
+                    crates/nbd-control-plane/src/error.rs
+                    crates/nbd-control-plane/src/model.rs
+                    crates/nbd-control-plane/tests/model.rs
+  Preconditions:    Commit 3 has landed the schema shape the API represents.
+  Postconditions:   The control-plane crate builds, parses `file:` catalog URLs
+                    as SQLite, validates basic domain values, represents the
+                    latest committed generation in `ExportMeta`, and exposes
+                    the catalog API without an SQLite implementation.
+  Verify:           cargo test -p nbd-control-plane
+  Risks:            The API should stay narrow enough for M1 while leaving room
+                    for clone, lifecycle leases, tree metadata, and explicit
+                    generation history operations later.
+  Not included:     SQLite queries, migrations, CLI commands, or server open
+                    paths.
+  Depends on:       3
+
+Commit 5/6: catalog: implement SQLite exports
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Implement `SQLiteExportCatalog` with create, list, inspect,
+                    load, and logical delete behavior.
+  Invariant focus:  `ExportCatalog` is the runtime metadata boundary, and
+                    deleted exports are never returned by `load_export`.
+  Test level:       integration
+  Review gate:      code
+  Files:            Cargo.lock
+                    crates/nbd-control-plane/Cargo.toml
+                    crates/nbd-control-plane/src/lib.rs
+                    crates/nbd-control-plane/src/sqlite.rs
+                    crates/nbd-control-plane/tests/sqlite_catalog.rs
+  Preconditions:    Commit 4 has landed the catalog API and Commit 3 has landed
+                    the migration SQL used by tests.
+  Postconditions:   SDK tests create a temp SQLite database through
+                    `CatalogUrl`, apply the export migration, and prove
+                    create/list/inspect/delete/load semantics including the
+                    transactional generation `0` row.
+  Verify:           cargo test -p nbd-control-plane
+  Risks:            SQLite integer values need explicit range handling before
+                    mapping into Rust `u64` domain types.
+  Not included:     `nbdcli`, real leases, open/delete race prevention, clone,
+                    or tree metadata.
+  Depends on:       4
+
+Commit 6/6: nbdcli: add catalog commands
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add the `nbdcli` binary as a thin wrapper over
+                    `nbd-control-plane` for create, list, inspect, and delete.
+  Invariant focus:  CLI code owns argument parsing and output formatting only;
+                    catalog behavior remains in the SDK.
+  Test level:       integration
+  Review gate:      code
+  Files:            Cargo.lock
+                    Cargo.toml
+                    crates/nbdcli/Cargo.toml
+                    crates/nbdcli/src/main.rs
+                    crates/nbdcli/tests/cli.rs
+  Preconditions:    Commit 5 has landed the SQLite catalog implementation.
+  Postconditions:   CLI smoke tests parse explicit temp config through
+                    `CatalogUrl` and use temp SQLite catalogs to create, list,
+                    inspect, and delete exports.
+  Verify:           cargo test -p nbdcli
+                    make test
+                    make fmt
+                    make clippy
+  Risks:            CLI tests should not become the only proof of SDK behavior
+                    and must not use the developer default config.
+  Not included:     Shelling out from SDK tests, NBD server open paths, real
+                    leases, clone, or tree metadata.
+  Depends on:       5
 
 ## Series 3: NBD Protocol And Mock Client
 
