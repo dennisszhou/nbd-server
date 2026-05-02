@@ -3,7 +3,7 @@ Date: 2026-05-01
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 2 finished; Series 3 pending approval
+- current state: Series 3 approved
 Completion:
 - execution complete: no
 
@@ -420,27 +420,28 @@ Commit 6/6: nbdcli: add catalog commands
                     leases, clone, or tree metadata.
   Depends on:       5
 
-## Series 3: NBD Protocol And Mock Client
+## Series 3: NBD Protocol
 
 Depends on: Series 2
 
-Roadmap milestone: M2
+Roadmap milestone: M2 protocol sub-slice
 
 Design coverage:
 `docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`
 
 Stable checkpoint: `nbd-protocol` can encode/decode the fixed-newstyle
 handshake, `NBD_OPT_GO`, `NBD_OPT_ABORT`, and read/write/flush/disconnect
-command framing. The mock client exercises real TCP framing helpers without
-depending on server internals.
+command framing against byte fixtures. No real TCP peer is introduced in this
+series.
 
-Review focus: protocol constants, endian handling, error mapping, and keeping
-protocol code independent of catalog/server crates.
+Review focus: protocol constants, endian handling, error mapping, public API
+shape, and keeping protocol code independent of catalog/server crates.
 
-Done means: protocol unit tests and mock-client framing tests pass without a
-kernel NBD client.
+Done means: boundary-style protocol fixture tests prove the supported
+handshake, option, and transmission wire shapes through the public
+`nbd-protocol` API without a mock client, server, or kernel NBD client.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
@@ -451,24 +452,181 @@ make clippy
 ```
 
 Not included: listener lifecycle, catalog export opening, persistence,
-concurrency, workqueues, or Docker.
+concurrency, workqueues, mock client TCP behavior, scripted NBD peers, or
+Docker.
 
-## Series 4: Toy Server And Catalog Integration
+Initial protocol policy: use a small explicit maximum write payload constant;
+reject unsupported nonzero command flags; reject unknown client flags except
+`NBD_FLAG_C_NO_ZEROES`, which is accepted and ignored because Series 3 does not
+write trailing handshake zeroes after client flags. Zero-length read/write
+requests are rejected as invalid for the toy protocol path; flush and
+disconnect have no payload.
+
+Commit 1/5: docs/execution: plan NBD protocol series
+
+  Type:             docs
+  Required:         yes
+  Summary:          Record the narrowed Series 3 contract after deciding that
+                    the first real TCP mock-client proof belongs with the toy
+                    server in Series 4.
+  Invariant focus:  The execution source of truth separates protocol byte-layout
+                    correctness from server lifecycle and export behavior.
+  Test level:       none
+  Review gate:      structures
+  Files:            docs/execution/2026-05-01-initial-integration.md
+  Preconditions:    Series 2 is finished and the toy NBD server design remains
+                    approved for the broader M2/M3 slice.
+  Postconditions:   Series 3 has explicit protocol-only commit boundaries,
+                    verification commands, and deferred mock-client/server
+                    scope.
+  Verify:           git diff --cached --check
+  Risks:            Low; this is a planning-only commit, but it must not
+                    silently redesign the approved toy-server architecture.
+  Not included:     Protocol implementation, mock client, server lifecycle,
+                    catalog opening, or MemoryExport.
+  Depends on:       none
+
+Commit 2/5: protocol: add NBD wire crate
+
+  Type:             preparatory
+  Required:         yes
+  Summary:          Add the nbd-protocol crate with public wire constants,
+                    endian helpers, small typed wrappers, and the first
+                    boundary-style fixture test through the public API.
+  Invariant focus:  Protocol constants and primitive wire types live in a crate
+                    that has no catalog or server dependencies.
+  Test level:       integration
+  Review gate:      structures
+  Files:            Cargo.lock
+                    Cargo.toml
+                    crates/nbd-protocol/Cargo.toml (new)
+                    crates/nbd-protocol/src/lib.rs (new)
+                    crates/nbd-protocol/src/constants.rs (new)
+                    crates/nbd-protocol/src/error.rs (new)
+                    crates/nbd-protocol/src/wire.rs (new)
+                    crates/nbd-protocol/tests/protocol_fixtures.rs (new)
+  Preconditions:    Commit 1 has recorded the Series 3 protocol-only boundary.
+  Postconditions:   The workspace builds with nbd-protocol, the crate exposes
+                    only protocol-level primitives, and the fixture test proves
+                    basic big-endian integer layout and known magic values.
+  Verify:           cargo test -p nbd-protocol --test protocol_fixtures
+  Risks:            Constants copied incorrectly from the public protocol would
+                    poison later parsing; keep this commit small and
+                    fixture-driven.
+  Not included:     Handshake parsing, option negotiation, transmission request
+                    parsing, mock client helpers, server code, or catalog
+                    integration.
+  Depends on:       1
+
+Commit 3/5: protocol: implement handshake framing
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Implement fixed-newstyle server handshake encoding and
+                    client-flag decoding for the supported handshake path,
+                    extending the public fixture coverage.
+  Invariant focus:  Handshake code accepts only fixed-newstyle client
+                    negotiation and rejects unsupported client flags explicitly.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-protocol/src/lib.rs
+                    crates/nbd-protocol/src/handshake.rs (new)
+                    crates/nbd-protocol/src/error.rs
+                    crates/nbd-protocol/tests/protocol_fixtures.rs
+  Preconditions:    Commit 2 has introduced constants, errors, and primitive
+                    wire helpers.
+  Postconditions:   The fixture test can encode the server initial handshake,
+                    decode valid fixed-newstyle client flags, accept
+                    `NBD_FLAG_C_NO_ZEROES`, and reject missing or unknown
+                    client flags without any server crate.
+  Verify:           cargo test -p nbd-protocol --test protocol_fixtures
+  Risks:            The NBD handshake is public wire protocol; byte order, magic
+                    values, and flag rejection need direct fixture coverage.
+  Not included:     Option negotiation, transmission commands, mock client TCP
+                    behavior, or export metadata.
+  Depends on:       2
+
+Commit 4/5: protocol: implement option negotiation framing
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Implement fixed-newstyle option request parsing and option
+                    reply encoding for NBD_OPT_GO, NBD_OPT_ABORT, export info,
+                    ACK, and unsupported-option errors, extending the same
+                    fixture file.
+  Invariant focus:  NBD_OPT_GO wire handling can represent export name,
+                    requested info ids, export size, transmission flags, and
+                    final ACK without opening an export.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-protocol/src/lib.rs
+                    crates/nbd-protocol/src/option.rs (new)
+                    crates/nbd-protocol/src/error.rs
+                    crates/nbd-protocol/tests/protocol_fixtures.rs
+  Preconditions:    Commit 3 has established fixed-newstyle handshake primitives
+                    and shared wire helpers.
+  Postconditions:   The fixture test parses GO and ABORT option requests,
+                    encodes export-info and ACK replies, and encodes
+                    unsupported-option errors with the original option code.
+  Verify:           cargo test -p nbd-protocol --test protocol_fixtures
+  Risks:            GO payload layout is easy to blur with server policy; keep
+                    this commit limited to syntax and reply framing.
+  Not included:     Catalog lookup, missing/deleted export policy, transmission
+                    request parsing, or standalone NBD_OPT_INFO.
+  Depends on:       3
+
+Commit 5/5: protocol: implement transmission framing
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Implement transmission request parsing, write payload
+                    sizing, simple reply encoding, read payload replies, and
+                    protocol-level validation for the supported commands.
+  Invariant focus:  READ, WRITE, FLUSH, and DISC are represented as typed
+                    protocol requests with cookies preserved and unsupported
+                    flags rejected before server logic exists.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-protocol/src/lib.rs
+                    crates/nbd-protocol/src/transmission.rs (new)
+                    crates/nbd-protocol/src/error.rs
+                    crates/nbd-protocol/tests/protocol_fixtures.rs
+  Preconditions:    Commit 4 has landed option negotiation framing and shared
+                    error handling.
+  Postconditions:   The fixture test has one happy-path protocol script and one
+                    invalid-input table covering bad magic, unsupported command
+                    flags, zero-length read/write, length overflow, oversized
+                    payloads, and simple replies with matching cookies.
+  Verify:           cargo test -p nbd-protocol --test protocol_fixtures
+                    cargo test -p nbd-protocol
+                    make test
+                    make fmt
+                    make clippy
+  Risks:            Transmission parsing determines later socket behavior; keep
+                    the fixture coverage holistic and avoid adding overlapping
+                    microtests that mostly restate implementation details.
+  Not included:     A mock NBD client, scripted peer, listener lifecycle,
+                    MemoryExport, catalog opening, concurrency, or kernel NBD
+                    validation.
+  Depends on:       4
+
+## Series 4: Toy Server, Mock Client, And Catalog Integration
 
 Depends on: Series 3
 
-Roadmap milestone: M3
+Roadmap milestone: M2 mock-client/toy-export completion and M3 server/catalog
+integration
 
 Design coverage:
 `docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`
 
-Stable checkpoint: a test creates export metadata through
-`nbd-control-plane`, starts `nbd-server` on `127.0.0.1:0`, negotiates with the
-mock client, and proves read zeroes, write/readback, flush, disconnect, and
-missing/deleted export failures.
+Stable checkpoint: a test creates export metadata through `nbd-control-plane`,
+starts `nbd-server` on `127.0.0.1:0`, connects with the real mock client,
+negotiates `NBD_OPT_GO`, and proves read zeroes, write/readback, flush,
+disconnect, and missing/deleted export failures.
 
-Review focus: server lifecycle, catalog open path, toy `MemoryExport`
-semantics, and honest non-durability.
+Review focus: server lifecycle, mock-client/server TCP boundary, catalog open
+path, toy `MemoryExport` semantics, and honest non-durability.
 
 Done means: the first vertical slice passes through temp config, temp SQLite,
 SDK-created export metadata, toy server, and mock TCP client.
@@ -484,7 +642,7 @@ make clippy
 ```
 
 Not included: WAL, `ExportReadView`, storage engine, compaction, admission
-control, concurrent request execution, or kernel NBD.
+control, concurrent request execution, scripted protocol peers, or kernel NBD.
 
 ## Series 5: Docker And Kernel-NBD Smoke
 
