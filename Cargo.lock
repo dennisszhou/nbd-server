@@ -691,6 +691,15 @@ name = "nbd-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "nbd-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "nbd-control-plane",
+ "tokio",
+]
+
+[[package]]
 name = "nbd-test-support"
 version = "0.1.0"
 dependencies = [
