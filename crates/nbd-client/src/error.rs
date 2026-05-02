@@ -1,3 +1,4 @@
+use nbd_protocol::wire::NbdCookie;
 use nbd_protocol::ProtocolError;
 use std::error::Error;
 use std::fmt;
@@ -20,6 +21,14 @@ pub enum ClientError {
     OptionError {
         reply_type: u32,
         message: Vec<u8>,
+    },
+    CommandError {
+        command: &'static str,
+        error: u32,
+    },
+    CookieMismatch {
+        expected: NbdCookie,
+        actual: NbdCookie,
     },
     UnexpectedOptionReply {
         reply: &'static str,
@@ -54,6 +63,15 @@ impl fmt::Display for ClientError {
                 "NBD option negotiation failed: reply_type=0x{reply_type:08x}, message={}",
                 String::from_utf8_lossy(message),
             ),
+            Self::CommandError { command, error } => {
+                write!(f, "NBD {command} failed with error {error}")
+            }
+            Self::CookieMismatch { expected, actual } => write!(
+                f,
+                "NBD reply cookie mismatch: expected 0x{:016x}, got 0x{:016x}",
+                expected.raw(),
+                actual.raw(),
+            ),
             Self::UnexpectedOptionReply { reply } => {
                 write!(f, "unexpected NBD option reply: {reply}")
             }
@@ -68,6 +86,8 @@ impl Error for ClientError {
             Self::Protocol { source } => Some(source),
             Self::UnsupportedServerFlags { .. }
             | Self::OptionError { .. }
+            | Self::CommandError { .. }
+            | Self::CookieMismatch { .. }
             | Self::UnexpectedOptionReply { .. } => None,
         }
     }

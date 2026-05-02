@@ -1,11 +1,15 @@
-use crate::{MemoryExport, Result, ServerError};
+use crate::{Export, MemoryExport, Result, ServerError};
 use nbd_control_plane::{ExportCatalog, ExportName, SQLiteExportCatalog};
-use nbd_protocol::constants::{NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
+use nbd_protocol::constants::{NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
 use nbd_protocol::handshake::{decode_client_flags, encode_server_handshake};
 use nbd_protocol::option::{
     encode_ack_reply, encode_export_info_reply, encode_unknown_export_reply,
     encode_unsupported_option_reply, parse_option_request, OptionRequest,
     OPTION_REQUEST_HEADER_BYTES,
+};
+use nbd_protocol::transmission::{
+    encode_read_reply, encode_simple_reply, encode_success_reply, parse_request,
+    parse_request_header, TransmissionRequest, MAX_WRITE_PAYLOAD_BYTES, REQUEST_HEADER_BYTES,
 };
 use nbd_protocol::wire::NbdOptionCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,10 +19,10 @@ const TOY_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
 
 pub async fn serve(mut stream: TcpStream, catalog: SQLiteExportCatalog) -> Result<()> {
     write_handshake(&mut stream).await?;
-    let Some(_export) = negotiate_options(&mut stream, catalog).await? else {
+    let Some(export) = negotiate_options(&mut stream, catalog).await? else {
         return Ok(());
     };
-    drain_until_eof(&mut stream).await
+    handle_transmission(&mut stream, export).await
 }
 
 async fn write_handshake(stream: &mut TcpStream) -> Result<()> {
@@ -126,15 +130,76 @@ async fn read_option_request(stream: &mut TcpStream) -> Result<OptionRequest> {
     Ok(parse_option_request(&bytes)?)
 }
 
-async fn drain_until_eof(stream: &mut TcpStream) -> Result<()> {
-    let mut buf = [0; 1024];
+async fn handle_transmission(stream: &mut TcpStream, export: MemoryExport) -> Result<()> {
     loop {
-        let n = stream
-            .read(&mut buf)
+        let mut bytes = vec![0; REQUEST_HEADER_BYTES];
+        match stream.read_exact(&mut bytes).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(source) => {
+                return Err(ServerError::io("read NBD transmission header", source));
+            }
+        }
+
+        let header = parse_request_header(&bytes)?;
+        let payload_len = match header.payload_len(MAX_WRITE_PAYLOAD_BYTES) {
+            Ok(payload_len) => payload_len,
+            Err(error) => {
+                stream
+                    .write_all(&encode_simple_reply(header.cookie, NBD_EINVAL))
+                    .await
+                    .map_err(|source| ServerError::io("write NBD request error", source))?;
+                return Err(error.into());
+            }
+        };
+        let mut payload = vec![0; payload_len];
+        stream
+            .read_exact(&mut payload)
             .await
-            .map_err(|source| ServerError::io("read toy transmission placeholder", source))?;
-        if n == 0 {
-            return Ok(());
+            .map_err(|source| ServerError::io("read NBD transmission payload", source))?;
+        bytes.extend_from_slice(&payload);
+
+        match parse_request(&bytes, MAX_WRITE_PAYLOAD_BYTES)? {
+            TransmissionRequest::Read {
+                cookie,
+                offset,
+                length,
+            } => match export.read(offset, length).await {
+                Ok(data) => {
+                    stream
+                        .write_all(&encode_read_reply(cookie, &data))
+                        .await
+                        .map_err(|source| ServerError::io("write NBD read reply", source))?;
+                }
+                Err(_) => {
+                    stream
+                        .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
+                        .await
+                        .map_err(|source| ServerError::io("write NBD read error", source))?;
+                }
+            },
+            TransmissionRequest::Write {
+                cookie,
+                offset,
+                data,
+            } => {
+                let error = match export.write(offset, &data).await {
+                    Ok(()) => 0,
+                    Err(_) => NBD_EINVAL,
+                };
+                stream
+                    .write_all(&encode_simple_reply(cookie, error))
+                    .await
+                    .map_err(|source| ServerError::io("write NBD write reply", source))?;
+            }
+            TransmissionRequest::Flush { cookie } => {
+                export.flush().await?;
+                stream
+                    .write_all(&encode_success_reply(cookie))
+                    .await
+                    .map_err(|source| ServerError::io("write NBD flush reply", source))?;
+            }
+            TransmissionRequest::Disconnect { .. } => return Ok(()),
         }
     }
 }
