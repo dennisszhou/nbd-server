@@ -5,8 +5,8 @@ Status: approved
 # Problem
 
 The first implementation needs a Rust project shape that can support the
-control plane, NBD server, mock client integration tests, and later Docker
-smoke tests without mixing developer-local state into tests.
+control plane, NBD server, userspace validation-client integration tests, and
+later Docker smoke tests without mixing developer-local state into tests.
 
 The important first checkpoint is not NBD behavior yet. It is a clean runtime
 and test foundation:
@@ -97,6 +97,9 @@ crates/nbd-protocol
 
 crates/nbd-server
   server binary and toy in-memory export
+
+crates/nbd-client
+  small userspace validation client for TCP protocol tests
 
 crates/nbd-storage-engine
   future StorageEngine trait and local/S3 implementations
@@ -219,7 +222,7 @@ The fixture should:
 - temp SQLite database path and URL helpers;
 - helpers that assert paths are inside the temp runtime root;
 - later, process/server harness helpers for integration tests;
-- later, mock-client test helpers if they do not belong in `nbd-protocol`.
+- later, validation-client test helpers if they do not belong in `nbd-client`.
 
 It should not contain production config parsing, catalog behavior, protocol
 logic, or storage behavior.
