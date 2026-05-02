@@ -3,7 +3,7 @@ Date: 2026-05-01
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 2 approved
+- current state: Series 2 finished; Series 3 pending approval
 Completion:
 - execution complete: no
 
@@ -243,7 +243,7 @@ Done means: SDK integration tests use temp databases and do not shell out to
 the CLI; CLI smoke tests use explicit config and structured output where
 needed.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
