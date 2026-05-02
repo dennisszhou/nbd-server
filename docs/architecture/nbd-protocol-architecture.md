@@ -53,10 +53,25 @@ Deferred:
 ## NBDServer
 
 Owns listener setup, connection acceptance, and global server shutdown.
+It should also own a process-local connection registry or task set for active
+connections. That registry is used to signal shutdown, stop accepting new
+requests, drain or cancel per-connection work according to policy, and join
+connection tasks before server shutdown returns.
+
+This connection registry is not durable metadata and is not the
+`LocalExportRegistry`. `LocalExportRegistry` tracks active exports and serving
+leases; the connection registry tracks socket/task lifecycle.
 
 ## NBDConnection
 
-Owns one client connection:
+Owns one client connection. It is the transport owner for that socket, not the
+export execution owner.
+
+Long term, each connection should have distinct inbound and outbound ownership:
+one reader side for protocol input and one writer side for serialized replies.
+The exact task names and implementation details are flexible, but the boundary
+is not: export work should not write sockets, and socket readers should not
+execute storage/WAL work.
 
 - handshake state;
 - negotiated export;
@@ -79,6 +94,88 @@ Owns wire-level parsing and encoding:
 
 It must not call storage, WAL, cache, or catalog code directly.
 
+# Runtime Model
+
+The server should use one process runtime and bounded work queues, not one OS
+thread per connection or per export. In Rust, Tokio is the expected async
+runtime, but the architectural requirement is the ownership split, not an exact
+task layout.
+
+Conceptual long-term shape:
+
+```text
+accept/listen
+  -> per-connection protocol input
+  -> per-export admission/order boundary
+  -> export/storage work
+  -> per-connection reply serialization
+```
+
+Multiple connections to one export share the same export ordering domain but
+keep independent reply paths:
+
+```text
+connection A ─┐
+connection B ─┼─> export X admission/work -> reply queue A/B/C
+connection C ─┘
+```
+
+The Series 4 toy server may collapse this to one sequential connection task
+that reads a request, executes `MemoryExport`, and writes a reply. That is an
+implementation shortcut for the first vertical slice, not the long-term socket
+architecture.
+
+# Runtime Boundaries
+
+## Socket Runtime
+
+Socket handling owns byte transport and protocol state. It may validate wire
+shape, size write payloads, and route requests. It must not own export
+correctness, WAL durability, storage object I/O, cache fill, or compaction.
+
+Long-term socket handling should include an explicit active-connection registry
+or task set. The accept loop registers each connection before spawning its
+runtime work and unregisters it only after inbound handling, reply writing, and
+connection cleanup have finished. Global shutdown uses that registry to:
+
+- stop accepting new connections;
+- signal active connections to stop accepting new requests;
+- drain or cancel outstanding per-connection work according to shutdown policy;
+- join connection tasks so shutdown completion is truthful.
+
+The toy server may detach connection tasks for the first vertical slice, but
+future socket-runtime design should not preserve that as the production model.
+
+## Export Runtime
+
+The export runtime owns the ordering domain for one active export. Requests
+from one or more connections enter through the same export request queue.
+`ExportAdmissionCtl` decides which reads, writes, and flushes may run. Work
+queues execute admitted work and return results to the original connection's
+reply queue.
+
+This is a logical ownership boundary. It does not require one OS thread per
+export.
+
+## StorageEngine Runtime
+
+Storage object I/O should be isolated behind a storage runtime or queue with
+bounded concurrency. S3-compatible backends should reuse client/config objects
+so HTTP connection pools, credentials, retries, and timeouts are shared rather
+than recreated per request.
+
+## Reply Queues
+
+Each connection has its own reply serialization path. Export work completes by
+returning a reply to the original connection's reply queue. The reply writer
+does not know whether a reply was served from memory, WAL, S3, or a future
+cache.
+
+NBD cookies let replies be correlated even when requests complete out of order.
+Reply order is therefore a scheduling policy, not the correctness mechanism.
+Flush correctness is owned by export admission and WAL durability, not by the
+connection writer.
+
 # Handshake
 
 The server supports fixed newstyle only.
@@ -88,11 +185,14 @@ Initial server message:
 ```text
 INIT_PASSWD
 IHAVEOPT
-handshake_flags = NBD_FLAG_FIXED_NEWSTYLE
+handshake_flags = NBD_FLAG_FIXED_NEWSTYLE | NBD_FLAG_NO_ZEROES
 ```
 
 The client replies with client flags. The server should reject unknown client
-flags and should require `NBD_FLAG_C_FIXED_NEWSTYLE` for the supported path.
+flags except `NBD_FLAG_C_NO_ZEROES` and should require
+`NBD_FLAG_C_FIXED_NEWSTYLE` for the supported path. Advertising
+`NBD_FLAG_NO_ZEROES` keeps the server handshake consistent with not writing the
+old trailing zero block after client flags.
 
 After that, the server accepts option requests.
 
@@ -304,9 +404,9 @@ read payload, only for successful reads
 ```
 
 The reply writer must serialize writes to the socket for one connection. Reply
-order may differ from request order only if the connection tracks cookies and
-the implementation is intentionally allowing concurrent completion. The first
-implementation may preserve request order for simplicity.
+order may differ from request order once export work can complete concurrently.
+Cookies are the correlation key. The first implementation may preserve request
+order for simplicity.
 
 # Error Mapping
 
@@ -353,10 +453,18 @@ the first implementation.
 
 The default is conservative: one active writable NBD connection per export.
 
+Multiple transport connections still use separate per-connection inbound and
+outbound ownership. If future authenticated multi-connection support is
+enabled, all connections serving the same export must route through the same
+export admission/order boundary.
+
 # Invariants
 
 - Protocol parsing and encoding live in protocol-specific modules.
 - The NBD layer dispatches to `Export`; it does not know storage internals.
+- One connection has one inbound protocol owner and one outbound reply owner.
+- A slow connection's reply path must not block writes to other connections.
+- All requests for the same export enter the same export ordering domain.
 - `NBD_OPT_GO` is the only supported path into transmission mode.
 - The server advertises only transmission flags it satisfies.
 - A successful read reply contains exactly the requested bytes.
@@ -368,9 +476,8 @@ The default is conservative: one active writable NBD connection per export.
 # Open Questions
 
 - Exact maximum payload size for the first implementation.
-- Whether first implementation preserves reply order or allows out-of-order
-  replies by cookie.
-- Whether to support `NBD_FLAG_C_NO_ZEROES` in the initial handshake.
 - Whether to include standalone `NBD_OPT_INFO` before it is required.
 - Whether `NBD_OPT_GO` should ignore all info requests except
   `NBD_INFO_EXPORT`, or reject malformed/duplicated requests more strictly.
+- Whether the long-term export ordering owner should be called `ExportRuntime`,
+  `ExportAdmissionCtl`, or another name in code.

@@ -114,15 +114,23 @@ reconstructable from durable WAL records or committed tree state.
 
 ## NBDServer
 
-Owns protocol handling only: handshake, option negotiation, request decoding,
-request enqueueing, and reply writing. It must not know about S3 keys, WAL
-layout, tree nodes, or compaction.
+Owns protocol handling only: listener setup, handshake, option negotiation,
+request decoding, request enqueueing, per-connection reply writing, and global
+shutdown. It owns a process-local connection registry or task set for accepted
+connections so shutdown can signal, drain or cancel, and join active connection
+tasks before reporting completion. It must not know about S3 keys, WAL layout,
+tree nodes, or compaction.
 
 ## NBDConnection
 
-Owns one client connection. Its socket read path decodes NBD requests and
-enqueues work. It does not perform WAL append, storage reads, compaction, or
-catalog transactions inline.
+Owns one client connection. In the long-term runtime split, inbound protocol
+handling and outbound reply serialization are separate per-connection
+responsibilities. Its read path decodes NBD requests and enqueues work. It does
+not perform WAL append, storage reads, compaction, or catalog transactions
+inline.
+
+Replies are serialized per connection. A slow connection must not block reply
+writes for other connections.
 
 ## ExportOpener
 
@@ -185,6 +193,10 @@ reads.
 Owns blob I/O only: create, read, ranged read, and delete. It never overwrites
 keys. It does not own export lifecycle, WAL sequencing, compaction policy, tree
 semantics, or metadata interpretation.
+
+The storage runtime owns backend resource pooling and concurrency limits. S3
+backends should reuse client/config objects rather than create per-request
+clients.
 
 ## ExportCatalog
 

@@ -30,13 +30,15 @@ connection request queue:
   offloads decoded NBD requests from the socket read path
 
 reply queue:
-  serializes replies back to one NBD connection
+  one bounded queue per NBD connection; serializes replies back to that
+  connection's socket writer
 
 export admission queue:
   grants permits for read/write/flush operations
 
 storage work queue:
-  bounds and executes object I/O against local/S3 storage
+  bounds and executes object I/O against local/S3 storage; owns storage-side
+  concurrency limits and shared backend client resources
 
 compaction queue:
   runs background checkpointing work at lower priority
@@ -90,6 +92,25 @@ read bytes from socket
 No WAL append, storage read, catalog update, or compaction work should happen on
 the socket read path.
 
+# Socket And Reply Boundary
+
+The long-term socket architecture separates inbound request handling from
+outbound reply serialization for each connection. The exact task layout is
+flexible; the ownership boundary is not.
+
+```text
+connection A input -> ExportRequestQueue -> admitted work
+                                      -> connection A reply queue
+                                      -> connection A output
+```
+
+There is no global reply writer. A slow or blocked client should apply
+backpressure to its own bounded reply path without blocking replies for other
+connections.
+
+Export workers do not write sockets. They complete by returning a reply to the
+reply path attached to the original request.
+
 # Storage Boundary
 
 Storage callers should normally submit object work to `StorageWorkQueue` rather
@@ -107,6 +128,11 @@ The queue may reorder independent storage I/O, but it must not define export
 correctness ordering. Correctness ordering belongs to `ExportAdmissionCtl` and
 WAL durability rules.
 
+For S3-compatible backends, the storage runtime should reuse backend client or
+configuration objects so connection pools, credential caches, retries, and
+timeouts are shared. The storage queue owns backend concurrency policy; export
+correctness is still defined above it.
+
 # Invariants
 
 - Queue capacity is bounded.
@@ -116,6 +142,8 @@ WAL durability rules.
 - Storage queues may reorder independent I/O but do not define read/write/flush
   correctness.
 - Admission defines conflicting operation order.
+- Reply queues are per connection.
+- Export workers never write directly to sockets.
 - Job context is available for tracing, cleanup, and diagnostics.
 - Cancellation must not make an acknowledged write disappear.
 
