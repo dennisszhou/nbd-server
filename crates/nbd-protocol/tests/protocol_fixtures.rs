@@ -1,4 +1,7 @@
 use nbd_protocol::constants;
+use nbd_protocol::handshake::{
+    decode_client_flags, encode_server_handshake, SERVER_HANDSHAKE_FLAGS,
+};
 use nbd_protocol::wire::{
     write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode,
     WireReader,
@@ -56,5 +59,49 @@ fn typed_wire_wrappers_preserve_raw_protocol_values() {
     assert_eq!(
         NbdOptionCode::new(constants::NBD_OPT_GO).raw(),
         constants::NBD_OPT_GO
+    );
+}
+
+#[test]
+fn fixed_newstyle_server_handshake_matches_wire_layout() {
+    assert_eq!(
+        SERVER_HANDSHAKE_FLAGS,
+        constants::NBD_FLAG_FIXED_NEWSTYLE | constants::NBD_FLAG_NO_ZEROES,
+    );
+
+    assert_eq!(
+        encode_server_handshake(),
+        [
+            0x4e, 0x42, 0x44, 0x4d, 0x41, 0x47, 0x49, 0x43, 0x49, 0x48, 0x41, 0x56, 0x45, 0x4f,
+            0x50, 0x54, 0x00, 0x03,
+        ],
+    );
+}
+
+#[test]
+fn client_flags_accept_fixed_newstyle_and_no_zeroes() {
+    let raw = constants::NBD_FLAG_C_FIXED_NEWSTYLE | constants::NBD_FLAG_C_NO_ZEROES;
+    let flags = decode_client_flags(&raw.to_be_bytes()).unwrap();
+
+    assert_eq!(flags.raw(), raw);
+    assert!(flags.no_zeroes());
+}
+
+#[test]
+fn client_flags_reject_missing_fixed_newstyle_or_unknown_bits() {
+    assert_eq!(
+        decode_client_flags(&constants::NBD_FLAG_C_NO_ZEROES.to_be_bytes()),
+        Err(ProtocolError::MissingClientFlag {
+            flag: "NBD_FLAG_C_FIXED_NEWSTYLE",
+        }),
+    );
+
+    let raw = constants::NBD_FLAG_C_FIXED_NEWSTYLE | 0x8000_0000;
+    assert_eq!(
+        decode_client_flags(&raw.to_be_bytes()),
+        Err(ProtocolError::UnsupportedClientFlags {
+            raw,
+            unsupported: 0x8000_0000,
+        }),
     );
 }

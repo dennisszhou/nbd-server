@@ -4,7 +4,9 @@
 
 pub mod constants;
 pub mod error;
+pub mod handshake;
 pub mod wire;
 
 pub use error::{ProtocolError, Result};
+pub use handshake::{decode_client_flags, encode_server_handshake, ClientFlags};
 pub use wire::{NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode};
