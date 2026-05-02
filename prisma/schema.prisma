@@ -1,0 +1,31 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Export {
+  id          String             @id
+  name        String             @unique
+  sizeBytes   BigInt             @map("size_bytes")
+  blockSize   BigInt             @map("block_size")
+  state       String
+  createdAt   String             @map("created_at")
+  updatedAt   String             @map("updated_at")
+  deletedAt   String?            @map("deleted_at")
+  generations ExportGeneration[]
+
+  @@map("exports")
+}
+
+model ExportGeneration {
+  id               String @id
+  exportId         String @map("export_id")
+  generation       BigInt
+  rootNodeId       String? @map("root_node_id")
+  checkpointWalSeq BigInt @map("checkpoint_wal_seq")
+  createdAt        String @map("created_at")
+  export           Export @relation(fields: [exportId], references: [id], onDelete: Restrict)
+
+  @@unique([exportId, generation])
+  @@map("export_generations")
+}
