@@ -1,11 +1,11 @@
 Title: Initial Integration Execution
 Date: 2026-05-01
-Status: in_progress
+Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 4 finished; Series 5 design draft
+- current state: Series 5 finished; initial integration complete
 Completion:
-- execution complete: no
+- execution complete: yes
 
 ## Goal
 
@@ -42,6 +42,7 @@ Docker and kernel-NBD validation stay behind the userspace TCP proof path.
 - `docs/plans/initial-integration/2026-05-01-rust-workspace-testing.md`
 - `docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md`
 - `docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`
+- `docs/plans/initial-integration/2026-05-02-docker-kernel-smoke.md`
 
 ## Why Split
 
@@ -889,7 +890,19 @@ keeping Docker smoke outside the normal inner-loop proof.
 Done means: manual or ignored smoke commands are documented and runnable in the
 intended Linux/Docker environment.
 
-Approval: pending
+Approval: finished
+
+Closeout: Series 5 completed the Docker/kernel-NBD smoke checkpoint. The final
+reviewed stack adds the Docker smoke design, renames the Rust userspace
+validation crate to `nbd-us-client`, exposes the toy server through
+`nbd-server serve`, adds the Linux development container and Makefile workflow,
+and adds a privileged kernel smoke script that attaches the real Debian
+`/usr/sbin/nbd-client` to `/dev/nbd0`.
+
+The review pass found and fixed one cleanup ownership issue: the smoke script
+now refuses to run when the selected NBD device or mount point is already in
+use, and cleanup only unmounts or disconnects resources created by that smoke
+run.
 
 Verification plan:
 
@@ -898,5 +911,19 @@ make docker-build
 make docker-smoke
 ```
 
-Not included: this series is not approved until the draft design doc is
-reviewed and approved.
+Not included: CI-required privileged kernel testing, Docker Desktop
+installations whose Linux VM lacks NBD support, production image hardening,
+runtime durability, WAL, `ExportReadView`, storage engines, compaction,
+admission control, or multi-connection kernel NBD testing.
+
+Closeout verification:
+
+```text
+make -n docker-test
+make -n docker-smoke
+make -n docker-shell
+make -n docker-kernel-shell
+make -n docker-attach
+git --no-pager diff --check HEAD~5..HEAD
+make docker-smoke
+```

@@ -1,6 +1,6 @@
 Title: Docker Kernel NBD Smoke
 Date: 2026-05-02
-Status: draft
+Status: approved
 
 Problem
 - The userspace TCP tests prove our protocol and toy export path, but they do

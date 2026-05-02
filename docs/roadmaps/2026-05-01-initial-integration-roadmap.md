@@ -161,7 +161,7 @@ S3, compaction, or Docker.
   This should define userspace validation client coverage, protocol subset,
   in-memory export semantics, and server lifecycle.
 - Docker/kernel NBD smoke:
-  dedicated design doc exists in draft.
+  dedicated design doc exists.
   Path:
   `docs/plans/initial-integration/2026-05-02-docker-kernel-smoke.md`.
   This needs Linux privileges, device handling, and manual/ignored test
