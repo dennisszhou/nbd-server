@@ -120,10 +120,10 @@ connection B ─┼─> export X admission/work -> reply queue A/B/C
 connection C ─┘
 ```
 
-The Series 4 toy server may collapse this to one sequential connection task
-that reads a request, executes `MemoryExport`, and writes a reply. That is an
-implementation shortcut for the first vertical slice, not the long-term socket
-architecture.
+The Series 4 in-memory server may collapse this to one sequential connection
+task that reads a request, executes `MemoryExport`, and writes a reply. That is
+an implementation shortcut for the first vertical slice, not the long-term
+socket architecture.
 
 # Runtime Boundaries
 
@@ -143,8 +143,9 @@ connection cleanup have finished. Global shutdown uses that registry to:
 - drain or cancel outstanding per-connection work according to shutdown policy;
 - join connection tasks so shutdown completion is truthful.
 
-The toy server may detach connection tasks for the first vertical slice, but
-future socket-runtime design should not preserve that as the production model.
+The in-memory server may detach connection tasks for the first vertical slice,
+but future socket-runtime design should not preserve that as the production
+model.
 
 ## Export Runtime
 

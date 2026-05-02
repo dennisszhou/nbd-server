@@ -6,13 +6,13 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-pub struct ToyServer {
+pub struct NbdServer {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
 }
 
-impl ToyServer {
+impl NbdServer {
     pub async fn start(config: NbdConfig) -> Result<Self> {
         Self::start_on(config, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await
     }
@@ -24,10 +24,10 @@ impl ToyServer {
             .map_err(ServerError::catalog)?;
         let listener = TcpListener::bind(listen)
             .await
-            .map_err(|source| ServerError::io("bind toy NBD server", source))?;
+            .map_err(|source| ServerError::io("bind NBD server", source))?;
         let addr = listener
             .local_addr()
-            .map_err(|source| ServerError::io("read toy NBD server address", source))?;
+            .map_err(|source| ServerError::io("read NBD server address", source))?;
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let task = tokio::spawn(async move {
@@ -65,7 +65,7 @@ impl ToyServer {
         if let Some(task) = self.task.take() {
             task.await.map_err(|source| {
                 ServerError::io(
-                    "join toy NBD server task",
+                    "join NBD server task",
                     std::io::Error::other(source.to_string()),
                 )
             })?;
@@ -74,7 +74,7 @@ impl ToyServer {
     }
 }
 
-impl Drop for ToyServer {
+impl Drop for NbdServer {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());

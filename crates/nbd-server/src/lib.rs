@@ -1,4 +1,4 @@
-//! Toy NBD server implementation.
+//! NBD server implementation with an in-memory export backend.
 
 #![forbid(unsafe_code)]
 
@@ -12,4 +12,4 @@ pub mod server;
 pub use error::{Result, ServerError};
 pub use export::{Export, ExportHandle};
 pub use memory::{MemoryExport, MAX_MEMORY_EXPORT_BYTES};
-pub use server::ToyServer;
+pub use server::NbdServer;

@@ -3,9 +3,9 @@ Date: 2026-05-02
 Status: approved
 
 Problem
-- The userspace TCP tests prove our protocol and toy export path, but they do
-  not prove that a real Linux NBD client can attach the server to the kernel
-  block layer.
+- The userspace TCP tests prove our protocol and in-memory export path, but
+  they do not prove that a real Linux NBD client can attach the server to the
+  kernel block layer.
 - We need a cheap, repeatable Linux environment from macOS on Apple Silicon
   without making privileged kernel tests part of the normal inner loop.
 - We also need an interactive workflow where a named container can stay running
@@ -14,7 +14,7 @@ Problem
 Goal
 - Add a Docker-based smoke environment that can:
   - build and test the Rust workspace using the container toolchain;
-  - run the toy server inside Linux;
+  - run the NBD server inside Linux;
   - provision an isolated SQLite catalog and export;
   - connect a real kernel NBD device with `nbd-client`;
   - create, mount, write, read, sync, unmount, and disconnect the export;
@@ -30,7 +30,7 @@ Constraints
 - The smoke test must use temp config and temp SQLite state. It must not touch
   the operator's default `~/.nbd` catalog.
 - Docker/kernel smoke must stay outside the normal `make test` loop.
-- The server is still the toy non-durable in-memory implementation.
+- The server still uses the non-durable `MemoryExport` implementation.
 - The smoke path should use the real `nbd-client` userspace tool and the Linux
   kernel NBD device, not our `nbd-us-client` validation crate.
 - In the Debian smoke image, `nbd-client` resolves to `/usr/sbin/nbd-client`
@@ -133,7 +133,7 @@ ca-certificates
 Server binary
 - Series 4 introduced a server library, but kernel smoke needs an operator
   process with a stable listen address.
-- Add a minimal `nbd-server` binary for the toy server:
+- Add a minimal `nbd-server` binary for the NBD server:
 
 ```text
 nbd-server serve [--config /path/to/config.toml] --listen 127.0.0.1:10809
@@ -144,10 +144,10 @@ nbd-server serve [--config /path/to/config.toml] --listen 127.0.0.1:10809
   - otherwise use `ConfigSource::DefaultUserPath`, which may bootstrap
     `$HOME/.nbd/config.toml`;
   - bind the provided listen address;
-  - serve the existing toy `MemoryExport` path;
+  - serve the existing `MemoryExport` path;
   - print the listen address after binding;
   - exit non-zero on startup or serving errors;
-  - remain honest that this is the toy non-durable server.
+  - remain honest that the current byte-content backend is non-durable.
 
 - The binary does not create exports, run migrations, or own lifecycle policy.
   Provisioning remains explicit through Prisma migration commands and `nbdcli`.
@@ -183,9 +183,9 @@ remove /tmp/nbd-smoke
 ```
 
 - The script must use `trap` cleanup so failed checks still unmount,
-  disconnect, and stop the toy server where possible.
-- The script should avoid discard-dependent behavior because the toy server does
-  not advertise or implement trim/write-zeroes.
+  disconnect, and stop the NBD server where possible.
+- The script should avoid discard-dependent behavior because the current server
+  does not advertise or implement trim/write-zeroes.
 - The script should build once with `make build-tools`, then invoke
   `$CARGO_TARGET_DIR/debug/nbdcli`,
   `$CARGO_TARGET_DIR/debug/nbd-server`, and `/usr/sbin/nbd-client` directly
@@ -279,7 +279,7 @@ crates/nbd-server/src/main.rs
 - Source-of-truth state:
   - repository files are the source for code and Docker behavior;
   - the temp config and temp SQLite catalog are the smoke export metadata truth;
-  - `MemoryExport` is the byte-content source while the toy server process runs;
+  - `MemoryExport` is the byte-content source while the NBD server process runs;
   - `/dev/nbd0` is derived kernel state and must be cleaned up.
 
 Invariants
@@ -289,7 +289,7 @@ Invariants
 - Kernel smoke uses an explicit temp config path and explicit `DATABASE_URL`.
 - Kernel smoke never uses the developer's default `~/.nbd` state.
 - Kernel smoke connects with one NBD connection.
-- Kernel smoke uses a fixed export size at or below the toy memory export cap.
+- Kernel smoke uses a fixed export size at or below the `MemoryExport` cap.
 - Kernel smoke cleans up mounts, NBD connections, and server process state on
   success and best-effort on failure.
 - Kernel smoke does not claim durability across server restart.
@@ -355,14 +355,14 @@ make kernel-smoke-inner
   - the container can build and run the server;
   - Prisma migrations can initialize a temp SQLite catalog in the container;
   - `nbdcli` can create the export in that catalog;
-  - the toy server can serve the export to the Linux kernel client;
+  - the NBD server can serve the export to the Linux kernel client;
   - a mounted filesystem can perform basic write/read/sync over `/dev/nbd0`;
   - cleanup can detach the NBD device and stop the server.
 
 Risks
 - Docker Desktop on macOS may not expose usable kernel NBD support in its Linux
   VM. The smoke script must make this failure explicit.
-- A mounted filesystem may issue block operations beyond the toy server's
+- A mounted filesystem may issue block operations beyond the current server's
   advertised feature set if command options are not constrained. Use
   `mkfs.ext4 -E nodiscard` and do not advertise unsupported NBD flags.
 - Privileged containers are intentionally broad. Keep them out of the default
@@ -380,7 +380,7 @@ Open questions
 Design exit criteria
 - The base image, platform strategy, and privileged/non-privileged command split
   are accepted.
-- The minimal toy `nbd-server serve` binary is accepted as part of Series 5.
+- The minimal `nbd-server serve` binary is accepted as part of Series 5.
 - The automated kernel smoke flow and cleanup contract are accepted.
 - The manual shell workflow is accepted.
 - The Docker Desktop/kernel-NBD limitation is accepted as an environment

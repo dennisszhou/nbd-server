@@ -17,7 +17,7 @@ The target is a sequence of small, provable Rust slices:
 - workspace, config, and temporary test harness;
 - SQLite catalog schema, control-plane SDK, and `nbdcli`;
 - NBD protocol framing and userspace validation client;
-- toy in-memory server integrated with the catalog;
+- in-memory NBD server integrated with the catalog;
 - later Docker/kernel-NBD smoke validation.
 
 ## Roadmap Context
@@ -31,7 +31,7 @@ The first shippable vertical slice is:
 ```text
 temp config + temp SQLite DB
   -> SDK creates export
-  -> toy NBD server opens export metadata
+  -> NBD server opens export metadata
   -> userspace validation client writes, reads, flushes, disconnects
 ```
 
@@ -41,7 +41,7 @@ Docker and kernel-NBD validation stay behind the userspace TCP proof path.
 
 - `docs/plans/initial-integration/2026-05-01-rust-workspace-testing.md`
 - `docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md`
-- `docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`
+- `docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md`
 - `docs/plans/initial-integration/2026-05-02-docker-kernel-smoke.md`
 
 ## Why Split
@@ -103,7 +103,7 @@ Commit 1/6: docs/plans: add initial integration designs
   Files:            docs/roadmaps/2026-05-01-initial-integration-roadmap.md
                     docs/plans/initial-integration/2026-05-01-rust-workspace-testing.md
                     docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md
-                    docs/plans/initial-integration/2026-05-01-toy-nbd-server.md
+                    docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md
   Preconditions:    Long-term architecture docs are already committed.
   Postconditions:   The approved initial integration roadmap and design inputs
                     are present in the repository.
@@ -428,7 +428,7 @@ Depends on: Series 2
 Roadmap milestone: M2 protocol sub-slice
 
 Design coverage:
-`docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`
+`docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md`
 
 Stable checkpoint: `nbd-protocol` can encode/decode the fixed-newstyle
 handshake, `NBD_OPT_GO`, `NBD_OPT_ABORT`, and read/write/flush/disconnect
@@ -461,7 +461,7 @@ Initial protocol policy: use a small explicit maximum write payload constant;
 reject unsupported nonzero command flags; reject unknown client flags except
 `NBD_FLAG_C_NO_ZEROES`, which is accepted and ignored because Series 3 does not
 write trailing handshake zeroes after client flags. Zero-length read/write
-requests are rejected as invalid for the toy protocol path; flush and
+requests are rejected as invalid for the in-memory protocol path; flush and
 disconnect have no payload.
 
 Commit 1/5: docs/execution: plan NBD protocol series
@@ -469,21 +469,22 @@ Commit 1/5: docs/execution: plan NBD protocol series
   Type:             docs
   Required:         yes
   Summary:          Record the narrowed Series 3 contract after deciding that
-                    the first real TCP validation proof belongs with the toy
-                    server in Series 4.
+                    the first real TCP validation proof belongs with the
+                    in-memory server in Series 4.
   Invariant focus:  The execution source of truth separates protocol byte-layout
                     correctness from server lifecycle and export behavior.
   Test level:       none
   Review gate:      structures
   Files:            docs/execution/2026-05-01-initial-integration.md
-  Preconditions:    Series 2 is finished and the toy NBD server design remains
-                    approved for the broader M2/M3 slice.
+  Preconditions:    Series 2 is finished and the in-memory NBD server design
+                    remains approved for the broader M2/M3 slice.
   Postconditions:   Series 3 has explicit protocol-only commit boundaries,
                     verification commands, and deferred validation-client/server
                     scope.
   Verify:           git diff --cached --check
   Risks:            Low; this is a planning-only commit, but it must not
-                    silently redesign the approved toy-server architecture.
+                    silently redesign the approved in-memory server
+                    architecture.
   Not included:     Protocol implementation, validation client, server
                     lifecycle, catalog opening, or MemoryExport.
   Depends on:       none
@@ -612,31 +613,31 @@ Commit 5/5: protocol: implement transmission framing
                     validation.
   Depends on:       4
 
-## Series 4: Toy Server, Validation Client, And Catalog Integration
+## Series 4: In-Memory Server, Validation Client, And Catalog Integration
 
 Depends on: Series 3
 
-Roadmap milestone: M2 userspace-validation/toy-export completion and M3
+Roadmap milestone: M2 userspace-validation/in-memory-export completion and M3
 server/catalog integration
 
 Design coverage:
-`docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`
+`docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md`
 
 Stable checkpoint: a test creates export metadata through `nbd-control-plane`,
-starts the toy server on `127.0.0.1:0`, connects with the small userspace
+starts the NBD server on `127.0.0.1:0`, connects with the small userspace
 validation client, negotiates `NBD_OPT_GO`, and proves read zeroes,
 write/readback, flush, disconnect, independent export contents, and
 missing/deleted export failures.
 
 Review focus: server lifecycle, validation-client/server TCP boundary, catalog
-open path, toy `MemoryExport` semantics, and honest non-durability.
+open path, `MemoryExport` semantics, and honest non-durability.
 
 Done means: the first vertical slice passes through temp config, temp SQLite,
-SDK-created export metadata, toy server, and userspace validation client.
+SDK-created export metadata, NBD server, and userspace validation client.
 
 Approval: finished
 
-Closeout: Series 4 completed the userspace TCP toy-server checkpoint. The
+Closeout: Series 4 completed the userspace TCP in-memory server checkpoint. The
 final reviewed stack includes the review-fix commit that bounds wire
 allocations before buffers are allocated and keeps transmission handling behind
 the `Export` boundary. `$review-series` verdict was acceptable after those
@@ -664,26 +665,26 @@ make fmt
 make clippy
 ```
 
-Commit 1/6: docs/execution: plan toy server series
+Commit 1/6: docs/execution: plan in-memory server series
 
   Type:             docs
   Required:         yes
-  Summary:          Mark the toy NBD server design approved for Series 4 and
-                    record the current commit contract in the execution
+  Summary:          Mark the in-memory NBD server design approved for Series 4
+                    and record the current commit contract in the execution
                     artifact.
   Invariant focus:  The execution source of truth reflects the validation-client
                     design before code changes begin.
   Test level:       none
   Review gate:      structures
   Files:            docs/execution/2026-05-01-initial-integration.md
-                    docs/plans/initial-integration/2026-05-01-toy-nbd-server.md
-  Preconditions:    Series 3 is finished and the validation-client toy-server
-                    design has been discussed.
+                    docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md
+  Preconditions:    Series 3 is finished and the validation-client in-memory
+                    server design has been discussed.
   Postconditions:   Series 4 has explicit commit boundaries, verification
                     commands, approval state, and accepted design guardrails.
   Verify:           git diff --cached --check
   Risks:            Low; this is planning-only, but it must not silently expand
-                    Series 4 beyond the toy server checkpoint.
+                    Series 4 beyond the in-memory server checkpoint.
   Not included:     Protocol helpers, validation-client code, server sockets,
                     MemoryExport, or transmission I/O.
   Depends on:       none
@@ -695,7 +696,7 @@ Commit 2/6: protocol: add client wire helpers
   Summary:          Add client-side framing helpers for fixed-newstyle
                     handshake, NBD_OPT_GO replies, and simple transmission
                     requests/replies.
-  Invariant focus:  Both the validation client and toy server use nbd-protocol
+  Invariant focus:  Both the validation client and NBD server use nbd-protocol
                     for public NBD wire shapes instead of private byte layouts.
   Test level:       integration
   Review gate:      code
@@ -728,9 +729,9 @@ Commit 3/6: server: add memory export
   Type:             semantic
   Required:         yes
   Summary:          Introduce the nbd-server crate with the Export trait and the
-                    toy MemoryExport implementation.
-  Invariant focus:  Toy byte contents live behind the Export boundary and remain
-                    explicitly non-durable.
+                    MemoryExport implementation.
+  Invariant focus:  In-memory byte contents live behind the Export boundary and
+                    remain explicitly non-durable.
   Test level:       unit
   Review gate:      structures
   Files:            Cargo.lock
@@ -744,11 +745,11 @@ Commit 3/6: server: add memory export
   Preconditions:    Commit 2 has kept protocol helpers independent of server
                     state.
   Postconditions:   MemoryExport validates export metadata, rejects oversized
-                    toy allocations, returns zero-filled reads before writes,
-                    persists writes only in process memory, enforces bounds, and
-                    treats flush as a completed-write barrier.
+                    in-memory allocations, returns zero-filled reads before
+                    writes, persists writes only in process memory, enforces
+                    bounds, and treats flush as a completed-write barrier.
   Verify:           cargo test -p nbd-server --test memory_export
-  Risks:            The toy in-memory size limit must make accidental OOM
+  Risks:            The in-memory size limit must make accidental OOM
                     unlikely while preserving enough space for integration
                     tests.
   Not included:     TCP listener lifecycle, NBD handshake handling, catalog
@@ -760,9 +761,9 @@ Commit 4/6: server: implement TCP option negotiation
 
   Type:             semantic
   Required:         yes
-  Summary:          Add the small nbd-us-client validation crate and the toy server
-                    listener/connection path through fixed-newstyle handshake
-                    and NBD_OPT_GO.
+  Summary:          Add the small nbd-us-client validation crate and the NBD
+                    server listener/connection path through fixed-newstyle
+                    handshake and NBD_OPT_GO.
   Invariant focus:  Integration tests observe only real TCP framing while the
                     server opens exports through ExportCatalog.
   Test level:       integration
@@ -783,29 +784,29 @@ Commit 4/6: server: implement TCP option negotiation
                     MemoryExport; Commit 2 has client-side option framing
                     helpers.
   Postconditions:   Tests can load temp config, create temp catalog exports,
-                    start the toy server on 127.0.0.1:0, connect through
-                    nbd-us-client, negotiate NBD_OPT_GO, inspect negotiated export
-                    size/flags, and see missing or deleted exports fail before
-                    transmission mode.
+                    start the NBD server on 127.0.0.1:0, connect through
+                    nbd-us-client, negotiate NBD_OPT_GO, inspect negotiated
+                    export size/flags, and see missing or deleted exports fail
+                    before transmission mode.
   Verify:           cargo test -p nbd-us-client
                     cargo test -p nbd-server --test tcp_integration
   Risks:            This is the first async TCP boundary; keep the server task
-                    lifecycle simple and keep nbd-us-client independent of server
-                    internals.
+                    lifecycle simple and keep nbd-us-client independent of
+                    server internals.
   Not included:     READ/WRITE/FLUSH/DISC execution, workqueues, same-export
                     multi-connection visibility, server binary packaging, or
                     kernel NBD.
   Depends on:       3
 
-Commit 5/6: server: handle toy I/O commands
+Commit 5/6: server: handle in-memory I/O commands
 
   Type:             semantic
   Required:         yes
-  Summary:          Extend the validation client and toy server transmission
+  Summary:          Extend the validation client and NBD server transmission
                     path for READ, WRITE, FLUSH, and DISC against MemoryExport.
-  Invariant focus:  Completed toy writes are visible to later reads on the same
-                    connection, and flush returns only after earlier sequential
-                    writes complete.
+  Invariant focus:  Completed in-memory writes are visible to later reads on
+                    the same connection, and flush returns only after earlier
+                    sequential writes complete.
   Test level:       integration
   Review gate:      code
   Files:            crates/nbd-us-client/src/client.rs
@@ -833,7 +834,7 @@ Commit 5/6: server: handle toy I/O commands
                     connections, or Docker/kernel NBD.
   Depends on:       4
 
-Commit 6/6: protocol: bound toy wire allocations
+Commit 6/6: protocol: bound in-memory wire allocations
 
   Type:             semantic
   Required:         yes
@@ -854,10 +855,10 @@ Commit 6/6: protocol: bound toy wire allocations
                     crates/nbd-server/src/export.rs
                     crates/nbd-server/src/lib.rs
                     docs/execution/2026-05-01-initial-integration.md
-                    docs/plans/initial-integration/2026-05-01-toy-nbd-server.md
-  Preconditions:    Commit 5 has completed the toy TCP command path and review
-                    has identified the allocation and concrete-type boundary
-                    gaps.
+                    docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md
+  Preconditions:    Commit 5 has completed the in-memory TCP command path and
+                    review has identified the allocation and concrete-type
+                    boundary gaps.
   Postconditions:   Option payload allocation is capped at 64 KiB, read/write
                     I/O is capped at 64 MiB, and successful negotiation returns
                     an ExportHandle to the transmission loop.
@@ -866,7 +867,7 @@ Commit 6/6: protocol: bound toy wire allocations
                     make test
                     make fmt
                     make clippy
-  Risks:            This is still a toy sequential server; the cap is a
+  Risks:            This is still a sequential in-memory server; the cap is a
                     supported-subset limit, not a full resource-control model.
   Not included:     Per-export quotas, admission control, workqueues, pipelined
                     command execution, or durable backing state.
@@ -881,7 +882,7 @@ Roadmap milestone: M4
 Design coverage:
 `docs/plans/initial-integration/2026-05-02-docker-kernel-smoke.md`
 
-Stable checkpoint: a privileged Linux container can run the toy server and a
+Stable checkpoint: a privileged Linux container can run the NBD server and a
 real NBD client can perform basic I/O.
 
 Review focus: privilege boundaries, device cleanup, Makefile ergonomics, and
@@ -894,7 +895,7 @@ Approval: finished
 
 Closeout: Series 5 completed the Docker/kernel-NBD smoke checkpoint. The final
 reviewed stack adds the Docker smoke design, renames the Rust userspace
-validation crate to `nbd-us-client`, exposes the toy server through
+validation crate to `nbd-us-client`, exposes the NBD server through
 `nbd-server serve`, adds the Linux development container and Makefile workflow,
 and adds a privileged kernel smoke script that attaches the real Debian
 `/usr/sbin/nbd-client` to `/dev/nbd0`.

@@ -1,4 +1,4 @@
-Title: Toy NBD Server
+Title: In-Memory NBD Server
 Date: 2026-05-01
 Status: approved
 
@@ -7,16 +7,16 @@ Status: approved
 The first data-path checkpoint should prove the NBD wire protocol and request
 loop without WAL, `ExportReadView`, storage engines, compaction, Docker, or a
 kernel NBD client. The server needs to be real enough to speak TCP NBD to a
-userspace validation client, but intentionally toy-like behind the `Export`
-boundary.
+userspace validation client, while byte contents stay intentionally
+non-durable behind the `Export` boundary.
 
 # Goal
 
-Implement the M2/M3 toy server slice:
+Implement the M2/M3 in-memory server slice:
 
 - `nbd-protocol` crate for fixed-newstyle wire parsing/encoding;
-- `nbd-client` crate for a small serial userspace validation client;
-- `nbd-server` crate for listener, connection, and toy export serving;
+- `nbd-us-client` crate for a small serial userspace validation client;
+- `nbd-server` crate for listener, connection, and export serving;
 - in-memory export backing store;
 - integration tests that create an export via `nbd-control-plane`, start the
   server, and prove read/write/flush/disconnect over TCP.
@@ -32,11 +32,11 @@ Implement the M2/M3 toy server slice:
 - The server should not advertise protocol flags it does not implement.
 - The server and client should bound wire-advertised lengths before allocating
   buffers: option payloads are limited to 64 KiB and read/write I/O is limited
-  to 64 MiB in this toy slice.
+  to 64 MiB in this in-memory slice.
 - Integration tests must use temp config and temp SQLite databases.
 - Tests for behavior should land with the behavior they prove; Series 4 should
   not end with a generic test-only coverage commit.
-- The toy memory export should reject sizes above an explicit in-memory limit
+- `MemoryExport` should reject sizes above an explicit in-memory limit
   instead of attempting an unbounded allocation.
 
 # Non-Goals
@@ -67,10 +67,11 @@ After this slice:
 - reads from a new export return zeroes;
 - writes update the in-memory export;
 - later reads observe earlier writes;
-- flush succeeds as a no-op barrier for the toy export;
+- flush succeeds as a no-op barrier for `MemoryExport`;
 - disconnect closes the connection cleanly;
 - missing/deleted exports fail during option negotiation;
-- two catalog exports served by the same process have independent toy contents;
+- two catalog exports served by the same process have independent in-memory
+  contents;
 - the integration test creates export metadata through `nbd-control-plane`.
 
 # Proposed Approach
@@ -81,15 +82,15 @@ Add two crates and use the existing protocol crate:
 crates/nbd-protocol
   protocol constants, wire parsing/encoding, request/reply structs
 
-crates/nbd-client
+crates/nbd-us-client
   small serial userspace validation client over TCP
 
 crates/nbd-server
-  server library, connection loop, export opener, toy in-memory export
+  server library, connection loop, export opener, MemoryExport backend
 ```
 
 `nbd-protocol` must not depend on `nbd-control-plane` or `nbd-server`.
-`nbd-client` must not depend on `nbd-server`, `nbd-control-plane`, or
+`nbd-us-client` must not depend on `nbd-server`, `nbd-control-plane`, or
 `nbd-test-support`. `nbd-server` may depend on `nbd-protocol`,
 `nbd-control-plane`, and `nbd-config`; it may use `nbd-test-support` only in
 tests.
@@ -128,7 +129,7 @@ read/write behavior clear enough to evolve later.
 
 # Userspace Validation Client
 
-`nbd-client` is a small validation client, not a production NBD client.
+`nbd-us-client` is a small validation client, not a production NBD client.
 
 It should provide a serial API:
 
@@ -166,7 +167,7 @@ The API should be informed by existing NBD clients such as libnbd's
 read/write/flush shape, but the implementation should stay minimal and should
 not copy external library code.
 
-# Toy Export Model
+# In-Memory Export Model
 
 Define a server-side `Export` boundary and use an in-memory implementation for
 this slice.
@@ -200,10 +201,11 @@ struct MemoryExport {
 Semantics:
 
 - initial bytes are zero;
-- construction rejects export sizes above the toy in-memory limit;
+- construction rejects export sizes above the in-memory limit;
 - reads validate bounds and return exactly the requested bytes;
 - writes validate bounds and copy bytes into `data`;
-- flush is a no-op that returns success after earlier toy writes complete;
+- flush is a no-op that returns success after earlier in-memory writes
+  complete;
 - disconnect does not persist anything.
 
 This export intentionally does not implement WAL durability. Tests should not
@@ -215,7 +217,7 @@ implementation without changing protocol handling.
 
 # Export Opening
 
-For this toy slice, the server should open exports on demand through the
+For this in-memory slice, the server should open exports on demand through the
 catalog when the client sends `NBD_OPT_GO`.
 
 Preferred M3 path:
@@ -230,7 +232,7 @@ server creates MemoryExport for that active connection
 
 Deleted or missing exports should fail during `NBD_OPT_GO`.
 
-The toy server should support multiple export names in one server process by
+The NBD server should support multiple export names in one server process by
 loading each export from the catalog by name. Tests do not need to start one
 server per export. Since Series 4 creates a fresh `MemoryExport` per successful
 connection, independent contents for two exports should fall out naturally and
@@ -239,7 +241,7 @@ multiple simultaneous connections is out of scope until the server has a real
 export registry and durable backing store.
 
 Open/delete race prevention is out of scope. The catalog doc already accepts
-that M1/M3 ignore this race for the toy example.
+that M1/M3 ignore this race for the in-memory example.
 
 # Server Lifecycle
 
@@ -271,7 +273,7 @@ depend on socket internals.
 
 # Request Handling
 
-For the toy server, request handling can be sequential:
+For the in-memory server, request handling can be sequential:
 
 ```text
 decode request
@@ -290,14 +292,14 @@ workqueue/admission changes do not rewrite wire parsing.
 
 - `ExportCatalog` is the source of export metadata: name, size, block size,
   and deleted/active state.
-- `MemoryExport` is the in-process source of byte contents for the toy server.
+- `MemoryExport` is the in-process source of byte contents for the NBD server.
 - The validation client observes only the TCP protocol, not server internals.
 - No durable byte-content source exists in this slice.
 
 # Invariants
 
 - `nbd-protocol` does not depend on catalog or server crates.
-- `nbd-client` does not depend on server, catalog, or test-support crates.
+- `nbd-us-client` does not depend on server, catalog, or test-support crates.
 - Server/catalog test harness helpers live in `nbd-test-support`.
 - Server connection handling calls through the `Export` boundary, not directly
   through `MemoryExport` internals.
@@ -305,13 +307,13 @@ workqueue/admission changes do not rewrite wire parsing.
 - Successful reads return exactly the requested number of bytes.
 - Wire lengths are capped before allocation.
 - Out-of-bounds reads/writes fail with an NBD error.
-- Successful toy writes are visible to later reads on the same connection.
-- Flush returns only after earlier sequential toy writes have completed.
+- Successful in-memory writes are visible to later reads on the same connection.
+- Flush returns only after earlier sequential in-memory writes have completed.
 - `NBD_CMD_DISC` closes without a command reply.
 - Missing/deleted exports do not enter transmission mode.
-- One toy server can serve multiple catalog exports by name.
+- One NBD server can serve multiple catalog exports by name.
 - Each successful connection gets its own `MemoryExport`.
-- Integration tests use real TCP framing through `nbd-client`.
+- Integration tests use real TCP framing through `nbd-us-client`.
 - Tests use temp config and temp SQLite catalogs.
 
 # Alternatives Considered
@@ -324,9 +326,9 @@ the inner loop first.
 
 ## Build A Scripted Peer First
 
-A scripted peer would isolate `nbd-client` from `nbd-server`, but it creates a
-second protocol implementation just for tests. Series 4 should validate against
-the real toy server instead.
+A scripted peer would isolate `nbd-us-client` from `nbd-server`, but it creates
+a second protocol implementation just for tests. Series 4 should validate
+against the real NBD server instead.
 
 ## Call Server Internals From Tests
 
@@ -336,8 +338,8 @@ untested.
 
 ## Implement Workqueues Immediately
 
-The architecture needs workqueues later, but the toy server does not need them
-to prove handshake/read/write/flush. Sequential request handling keeps the
+The architecture needs workqueues later, but the in-memory server does not need
+them to prove handshake/read/write/flush. Sequential request handling keeps the
 first data-path slice smaller.
 
 # Migration / Rollout
@@ -367,11 +369,11 @@ introduce the behavior.
 
 - Accidentally implementing a private protocol shape instead of NBD framing.
 - Letting the validation client depend on server internals.
-- Making toy write success sound durable when it is only in-memory.
+- Making write success sound durable when it is only in-memory.
 - Introducing concurrency before the first protocol path is proven.
 - Failing to preserve enough protocol structure for later workqueue/admission
   evolution.
-- Choosing a toy memory limit that is too high for the normal local test loop or
+- Choosing an in-memory limit that is too high for the normal local test loop or
   too low for useful protocol validation.
 
 # Open Questions
@@ -384,11 +386,11 @@ This design is approved for Series 4 execution planning with these accepted
 boundaries:
 
 - the `nbd-protocol` / `nbd-server` split is accepted;
-- the intentionally small `nbd-client` validation scope is accepted;
-- sequential request handling is accepted for the toy slice;
+- the intentionally small `nbd-us-client` validation scope is accepted;
+- sequential request handling is accepted for the in-memory slice;
 - the in-memory export semantics are accepted as non-durable;
-- the toy in-memory export size limit is accepted;
-- TCP integration through `nbd-client` is accepted as the primary proof; and
+- the `MemoryExport` size limit is accepted;
+- TCP integration through `nbd-us-client` is accepted as the primary proof; and
 - the `Export` / `MemoryExport` boundary is accepted.
 
 # Recommended Next Step

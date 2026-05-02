@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const TOY_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
+const SUPPORTED_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
 
 pub async fn serve(mut stream: TcpStream, catalog: SQLiteExportCatalog) -> Result<()> {
     write_handshake(&mut stream).await?;
@@ -82,7 +82,7 @@ async fn negotiate_options(
                     .write_all(&encode_export_info_reply(
                         option,
                         meta.size_bytes(),
-                        TOY_TRANSMISSION_FLAGS,
+                        SUPPORTED_TRANSMISSION_FLAGS,
                     )?)
                     .await
                     .map_err(|source| ServerError::io("write NBD export info", source))?;

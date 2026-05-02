@@ -343,11 +343,11 @@ Rust uses a direct database client behind `ExportCatalog`.
 
 ## Defer Lifecycle Leases
 
-Open/delete exclusion is real architecture, but it is not important for the toy
-example. Adding a SQLite lease table now would create a temporary mechanism
-that does not match the eventual etcd lease model. M1 keeps delete simple and
-logical; lifecycle leases are deferred until they are needed by a later server
-slice.
+Open/delete exclusion is real architecture, but it is not important for the
+initial in-memory example. Adding a SQLite lease table now would create a
+temporary mechanism that does not match the eventual etcd lease model. M1 keeps
+delete simple and logical; lifecycle leases are deferred until they are needed
+by a later server slice.
 
 # Migration / Rollout
 

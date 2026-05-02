@@ -63,7 +63,7 @@ impl fmt::Display for ServerError {
                 max_size_bytes,
             } => write!(
                 f,
-                "export `{name}` size {size_bytes} exceeds toy in-memory limit {max_size_bytes}",
+                "export `{name}` size {size_bytes} exceeds in-memory limit {max_size_bytes}",
             ),
             Self::OutOfBounds {
                 operation,

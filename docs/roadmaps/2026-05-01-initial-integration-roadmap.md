@@ -14,7 +14,7 @@ checkpoints:
 
 - a SQLite-backed control plane with Prisma-managed schema/migrations;
 - a Rust control-plane SDK used by both `nbdcli` and tests;
-- a toy in-memory NBD server tested through a userspace validation client;
+- an in-memory NBD server tested through a userspace validation client;
 - a Docker/kernel-NBD smoke path only after userspace TCP integration tests
   pass.
 
@@ -48,7 +48,7 @@ SDK configuration.
 - config loading and path resolution
 - temporary test database harness
 - root `Makefile` for local developer commands
-- toy in-memory `Export` implementation
+- in-memory `MemoryExport` implementation
 - NBD protocol server and userspace validation client
 - Docker/kernel-NBD smoke test path
 
@@ -70,11 +70,11 @@ SDK configuration.
   provide `make test`, `make fmt`, and `make clippy`.
 - `NBD protocol` component v1:
   fixed newstyle, `GO`, `ABORT`, read, write, flush, and disconnect.
-- `toy export` component v1:
+- `in-memory export` component v1:
   in-memory byte vector, no WAL/read-view/storage.
 - `userspace validation client` test v1:
   exercise real TCP protocol from tests.
-- `toy server` integration v1:
+- `NBD server` integration v1:
   create export, serve it, write/read/flush.
 - `Docker image` operational v1:
   run server in a Linux container.
@@ -92,11 +92,11 @@ SDK configuration.
   Prisma schema, migrations, SDK, and `nbdcli`.
   Exit when SDK and CLI can create/list/inspect/delete exports in SQLite.
 - M2:
-  protocol, toy export, and userspace validation client.
+  protocol, in-memory export, and userspace validation client.
   Exit when a small Rust validation client proves handshake/read/write/flush
   /disc over TCP.
 - M3:
-  toy server plus control plane.
+  NBD server plus control plane.
   Exit when a test creates an export through the SDK, starts the server, and
   verifies I/O through the validation client.
 - M4:
@@ -109,7 +109,7 @@ SDK configuration.
   CLI should be a thin wrapper, not the source of behavior.
 - SDK integration tests depend on the temp DB harness:
   tests must not leave local database artifacts.
-- Toy server catalog open depends on SDK/catalog v1:
+- NBD server catalog open depends on SDK/catalog v1:
   the server needs export size/name metadata before serving.
 - Userspace validation client tests depend on protocol v1:
   tests should exercise real wire framing.
@@ -131,9 +131,9 @@ Schema design should stay in the common SQLite/Postgres subset where practical:
 The first useful vertical slice is:
 
 ```text
-temp config + temp SQLite DB
+  temp config + temp SQLite DB
   -> SDK creates export
-  -> toy NBD server opens export metadata
+  -> NBD server opens export metadata
   -> userspace validation client writes, reads, flushes, disconnects
 ```
 
@@ -154,10 +154,10 @@ S3, compaction, or Docker.
   `docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md`.
   This should define Prisma schema, migration workflow, SDK API, and CLI
   behavior.
-- Toy NBD protocol server:
+- In-memory NBD protocol server:
   dedicated design doc required.
   Suggested path:
-  `docs/plans/initial-integration/2026-05-01-toy-nbd-server.md`.
+  `docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md`.
   This should define userspace validation client coverage, protocol subset,
   in-memory export semantics, and server lifecycle.
 - Docker/kernel NBD smoke:
@@ -173,7 +173,8 @@ S3, compaction, or Docker.
 - Tests must never silently use `~/.nbd` or a developer database.
 - The validation client must use real TCP framing instead of calling server
   internals.
-- The first server should stay toy-like; WAL and `ExportReadView` come later.
+- The first byte-content backend should stay in-memory and non-durable; WAL and
+  `ExportReadView` come later.
 - Docker/kernel NBD tests should not become the normal inner-loop proof.
 
 # What Not To Design Yet
@@ -190,7 +191,7 @@ S3, compaction, or Docker.
 
 1. Design the initial Rust workspace, config model, and test harness.
 2. Design the Prisma schema plus `nbd-control-plane` SDK / `nbdcli` boundary.
-3. Design the toy NBD server and validation client integration contract.
+3. Design the in-memory NBD server and validation client integration contract.
 
 # Roadmap Exit Criteria
 

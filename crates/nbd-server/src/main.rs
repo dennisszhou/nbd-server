@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use nbd_config::{ConfigSource, NbdConfig};
-use nbd_server::ToyServer;
+use nbd_server::NbdServer;
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -19,8 +19,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let args = parse_serve_args(&raw_args)?;
     let config = NbdConfig::load(args.config_source)?;
-    let server = ToyServer::start_on(config, args.listen).await?;
-    println!("toy NBD server listening on {}", server.addr());
+    let server = NbdServer::start_on(config, args.listen).await?;
+    println!("NBD server listening on {}", server.addr());
 
     std::future::pending::<()>().await;
     Ok(())

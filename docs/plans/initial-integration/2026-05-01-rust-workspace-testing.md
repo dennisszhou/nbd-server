@@ -96,9 +96,9 @@ crates/nbd-protocol
   NBD wire parsing and encoding
 
 crates/nbd-server
-  server binary and toy in-memory export
+  server binary and in-memory export
 
-crates/nbd-client
+crates/nbd-us-client
   small userspace validation client for TCP protocol tests
 
 crates/nbd-storage-engine

@@ -63,7 +63,7 @@ wait_for_server() {
         fi
         sleep 0.1
     done
-    echo "timed out waiting for toy NBD server on ${LISTEN}" >&2
+    echo "timed out waiting for NBD server on ${LISTEN}" >&2
     return 1
 }
 

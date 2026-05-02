@@ -5,7 +5,7 @@ use nbd_control_plane::{
 use nbd_protocol::constants::{
     NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_REP_ERR_UNKNOWN,
 };
-use nbd_server::ToyServer;
+use nbd_server::NbdServer;
 use nbd_test_support::TestRuntime;
 use nbd_us_client::{ClientError, NbdClient};
 
@@ -21,7 +21,7 @@ async fn active_export_negotiates_over_tcp() {
         .await
         .expect("create export");
 
-    let server = ToyServer::start(load_config(&runtime).expect("load config"))
+    let server = NbdServer::start(load_config(&runtime).expect("load config"))
         .await
         .expect("start server");
     let client = NbdClient::connect(server.addr(), "disk-a")
@@ -48,7 +48,7 @@ async fn client_reads_writes_flushes_and_disconnects() {
         .await
         .expect("create export");
 
-    let server = ToyServer::start(load_config(&runtime).expect("load config"))
+    let server = NbdServer::start(load_config(&runtime).expect("load config"))
         .await
         .expect("start server");
     let mut client = NbdClient::connect(server.addr(), "disk-a")
@@ -68,7 +68,7 @@ async fn client_reads_writes_flushes_and_disconnects() {
 }
 
 #[tokio::test]
-async fn different_exports_have_independent_toy_contents() {
+async fn different_exports_have_independent_in_memory_contents() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
@@ -80,7 +80,7 @@ async fn different_exports_have_independent_toy_contents() {
         .await
         .expect("create disk-b");
 
-    let server = ToyServer::start(load_config(&runtime).expect("load config"))
+    let server = NbdServer::start(load_config(&runtime).expect("load config"))
         .await
         .expect("start server");
     let mut disk_a = NbdClient::connect(server.addr(), "disk-a")
@@ -111,7 +111,7 @@ async fn out_of_bounds_reads_return_nbd_error() {
         .await
         .expect("create export");
 
-    let server = ToyServer::start(load_config(&runtime).expect("load config"))
+    let server = NbdServer::start(load_config(&runtime).expect("load config"))
         .await
         .expect("start server");
     let mut client = NbdClient::connect(server.addr(), "disk-a")
@@ -143,7 +143,7 @@ async fn missing_or_deleted_exports_fail_during_go() {
         .await
         .expect("delete export");
 
-    let server = ToyServer::start(load_config(&runtime).expect("load config"))
+    let server = NbdServer::start(load_config(&runtime).expect("load config"))
         .await
         .expect("start server");
 
