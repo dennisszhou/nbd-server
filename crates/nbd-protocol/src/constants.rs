@@ -24,6 +24,9 @@ pub const NBD_REP_INFO: u32 = 3;
 pub const NBD_REP_ERR_UNSUP: u32 = (1 << 31) + 1;
 
 pub const NBD_INFO_EXPORT: u16 = 0;
+pub const NBD_INFO_BLOCK_SIZE: u16 = 3;
+
+pub const MAX_STRING_BYTES: usize = 4096;
 
 pub const NBD_CMD_READ: u16 = 0;
 pub const NBD_CMD_WRITE: u16 = 1;

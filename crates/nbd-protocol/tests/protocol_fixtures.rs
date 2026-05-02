@@ -2,6 +2,10 @@ use nbd_protocol::constants;
 use nbd_protocol::handshake::{
     decode_client_flags, encode_server_handshake, SERVER_HANDSHAKE_FLAGS,
 };
+use nbd_protocol::option::{
+    encode_ack_reply, encode_export_info_reply, encode_unsupported_option_reply,
+    parse_option_request, OptionRequest,
+};
 use nbd_protocol::wire::{
     write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode,
     WireReader,
@@ -104,4 +108,75 @@ fn client_flags_reject_missing_fixed_newstyle_or_unknown_bits() {
             unsupported: 0x8000_0000,
         }),
     );
+}
+
+#[test]
+fn option_requests_parse_go_and_abort_wire_frames() {
+    let mut go_payload = Vec::new();
+    write_u32(&mut go_payload, 7);
+    go_payload.extend_from_slice(b"default");
+    write_u16(&mut go_payload, 2);
+    write_u16(&mut go_payload, constants::NBD_INFO_EXPORT);
+    write_u16(&mut go_payload, constants::NBD_INFO_BLOCK_SIZE);
+
+    match parse_option_request(&option_request_bytes(constants::NBD_OPT_GO, &go_payload)).unwrap() {
+        OptionRequest::Go(go) => {
+            assert_eq!(go.export_name(), "default");
+            assert_eq!(
+                go.info_requests(),
+                &[constants::NBD_INFO_EXPORT, constants::NBD_INFO_BLOCK_SIZE,],
+            );
+        }
+        other => panic!("expected GO request, got {other:?}"),
+    }
+
+    assert_eq!(
+        parse_option_request(&option_request_bytes(constants::NBD_OPT_ABORT, b"ignored")).unwrap(),
+        OptionRequest::Abort {
+            payload: b"ignored".to_vec(),
+        },
+    );
+}
+
+#[test]
+fn option_replies_match_fixed_newstyle_wire_layout() {
+    let option = NbdOptionCode::new(constants::NBD_OPT_GO);
+    let transmission_flags = constants::NBD_FLAG_HAS_FLAGS | constants::NBD_FLAG_SEND_FLUSH;
+
+    assert_eq!(
+        encode_export_info_reply(option, 0x0400_0000, transmission_flags).unwrap(),
+        [
+            0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
+            0x00, 0x03, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00,
+            0x00, 0x00, 0x00, 0x05,
+        ],
+    );
+
+    assert_eq!(
+        encode_ack_reply(option).unwrap(),
+        [
+            0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ],
+    );
+
+    let unsupported =
+        encode_unsupported_option_reply(NbdOptionCode::new(99), b"unsupported").unwrap();
+    assert_eq!(
+        unsupported,
+        [
+            0x00, 0x03, 0xe8, 0x89, 0x04, 0x55, 0x65, 0xa9, 0x00, 0x00, 0x00, 0x63, 0x80, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, b'u', b'n', b's', b'u', b'p', b'p', b'o', b'r',
+            b't', b'e', b'd',
+        ],
+    );
+}
+
+fn option_request_bytes(option: u32, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    write_u64(&mut bytes, constants::IHAVEOPT_MAGIC);
+    write_u32(&mut bytes, option);
+    write_u32(&mut bytes, payload.len() as u32);
+    bytes.extend_from_slice(payload);
+    bytes
 }
