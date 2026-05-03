@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 2 finished; Series 3 pending review
+- current state: Series 2 finished; Series 3 approved for implementation
 Completion:
 - execution complete: no
 - completed series: Series 1, Series 2
-- next series: Series 3 pending review
+- next series: Series 3 in progress
 
 ## Goal
 
@@ -470,18 +470,179 @@ disconnect cleanup while the export runtime remains serial by default. The
 Series 1 protocol integration suite continues to pass without weakening
 coverage.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
 ```text
-cargo test -p nbd-server --test tcp_integration
+make test-protocol
+cargo test -p nbd-server connection_runtime
 cargo test -p nbd-server --test export_runtime
 cargo fmt --all --check
 ```
 
 Not included: `ConcurrentExportRuntime`, admitted memory-engine storage,
 multi-thread Tokio runtime wiring, or concurrent-runtime smoke.
+
+Commit 1/5: docs/execution: plan connection runtime series
+
+  Type:             docs
+  Required:         yes
+  Summary:          Record the Series 3 commit contract for splitting
+                    transmission mode into a connection request reader and
+                    reply writer using the Series 2 runtime/completion
+                    boundary.
+  Invariant focus:  Series 3 scope is explicit before connection task
+                    lifecycle and protocol ownership change.
+  Test level:       none
+  Review gate:      structures
+  Files:            docs/execution/2026-05-03-connection-admission-concurrency.md
+  Preconditions:    Series 2 is finished and its queue slot, completion, and
+                    runtime close/drain contracts are committed.
+  Postconditions:   The execution artifact constrains Series 3 implementation
+                    and keeps concurrent runtime, admitted memory storage, and
+                    Tokio worker-thread policy deferred.
+  Verify:           git diff --cached --check
+  Risks:            Low; this is execution planning only.
+  Not included:     Connection, runtime, admission, or memory-engine code.
+  Depends on:       Series 2
+
+Commit 2/5: connection: model transmission replies
+
+  Type:             preparatory
+  Required:         yes
+  Summary:          Introduce the connection reply envelope and reply-kind
+                    helpers that map export results plus cookies into NBD wire
+                    replies, then route the current sequential transmission
+                    loop through that helper.
+  Invariant focus:  Reply serialization has one explicit representation and
+                    keeps the export queue slot alive until the write helper
+                    finishes or drops the reply.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/connection.rs
+                    crates/nbd-server/tests/tcp_integration.rs
+  Preconditions:    Commit 1 has landed the Series 3 execution contract and
+                    Series 2 completions already return queue slots.
+  Postconditions:   Existing sequential transmission behavior is unchanged,
+                    but reads, writes, flushes, and protocol errors all flow
+                    through a single connection reply encoding path.
+  Verify:           make test-protocol
+  Risks:            This touches wire reply mapping; tests must prove cookie
+                    echoing, read payloads, simple replies, and existing error
+                    behavior are preserved.
+  Not included:     Connection reply queues, reader/writer task split,
+                    connection completion targets, concurrent runtime, or
+                    admitted memory storage.
+  Depends on:       1
+
+Commit 3/5: export: send completions to reply queues
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Extend `ExportCompletion` with a connection-backed target
+                    that sends `ConnectionReply` values into a bounded reply
+                    queue and make runtime completion handoff await that send.
+  Invariant focus:  Export runtime completion still knows only the completion
+                    target, while completed replies carry their queue slot
+                    until the connection writer finishes or drops them.
+  Test level:       unit
+  Review gate:      structures
+  Files:            crates/nbd-server/src/export.rs
+                    crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/src/connection.rs
+                    crates/nbd-server/tests/export_runtime.rs
+  Preconditions:    Commit 2 has established the connection reply envelope used
+                    by queued completions.
+  Postconditions:   One-shot completions still work, connection completions can
+                    hand off exactly one reply through a bounded queue, and a
+                    full reply queue keeps the queue slot occupied until the
+                    reply is received or dropped.
+  Verify:           cargo test -p nbd-server --test export_runtime
+                    make test-protocol
+  Risks:            Awaiting reply queue handoff must not hold an admission
+                    permit in future concurrent runtime work; Series 3 has no
+                    admitted engine execution yet, but the boundary should not
+                    make that mistake easy later.
+  Not included:     Reader/writer task split, admission runtime wiring,
+                    concurrent runtime, admitted memory storage, or config
+                    knobs for reply queue capacity.
+  Depends on:       2
+
+Commit 4/5: connection: split transmission tasks
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ConnectionRuntime` for transmission mode, split the
+                    socket into a request reader and reply writer, reserve
+                    queue slots before write payload buffering, and submit
+                    jobs without waiting for export execution.
+  Invariant focus:  Only the reply writer writes transmission replies, the
+                    request reader does not wait for export completion, and
+                    queue slots survive until socket write completion or reply
+                    drop during shutdown.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/connection.rs
+                    crates/nbd-server/src/export.rs
+                    crates/nbd-server/tests/tcp_integration.rs
+  Preconditions:    Commit 3 has made connection completion handoff available
+                    to export runtime workers.
+  Postconditions:   `serve` runs transmission through `ConnectionRuntime`; the
+                    request reader and reply writer are joined on disconnect,
+                    EOF, or error; accepted work is drained or dropped through
+                    the reply path; and the Series 1 protocol suite still
+                    passes on the default serial runtime.
+  Verify:           make test-protocol
+                    cargo test -p nbd-server --test export_runtime
+  Risks:            Shutdown ordering is the main risk: dropped readers,
+                    pending completions, queued replies, and registry close
+                    must release every queue slot without double-writing or
+                    detaching accepted work.
+  Not included:     `ConcurrentExportRuntime`, admission runtime wiring,
+                    admitted memory storage, multi-thread Tokio runtime, or
+                    making reply queue capacity configurable.
+  Depends on:       3
+
+Commit 5/5: tests: cover connection runtime pipelining
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add targeted protocol/runtime tests that prove pipelined
+                    request submission, cookie-correct out-of-order completion
+                    handling, reply serialization, queue-depth backpressure,
+                    and disconnect cleanup for `ConnectionRuntime`.
+  Invariant focus:  The split connection path is validated by externally
+                    visible protocol behavior and by a controllable runtime
+                    that can complete accepted jobs out of order.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/connection.rs
+                    crates/nbd-server/tests/tcp_integration.rs
+                    crates/nbd-server/tests/support/nbd.rs
+  Preconditions:    Commit 4 has introduced the split connection runtime.
+  Postconditions:   Tests prove the request reader can submit later requests
+                    before earlier work completes, replies preserve NBD cookies
+                    under out-of-order completion, one connection writer
+                    serializes replies, queue-depth exhaustion backpressures
+                    reads before write payload buffering, and disconnect/EOF
+                    cleanup does not leak active export ownership. The
+                    controllable runtime coverage may live in private
+                    connection-module tests rather than exposing
+                    `ConnectionRuntime` as public API.
+  Verify:           make test-protocol
+                    cargo test -p nbd-server connection_runtime
+                    cargo test -p nbd-server --test export_runtime
+                    cargo fmt --all --check
+  Risks:            The controllable runtime harness must assert protocol
+                    behavior rather than implementation scheduling details.
+                    This standalone test commit is justified because the
+                    default serial runtime cannot produce out-of-order
+                    completions by itself.
+  Not included:     Concurrent runtime implementation, admission runtime
+                    wiring, admitted memory storage, Docker smoke, or making
+                    concurrent runtime the default.
+  Depends on:       4
 
 ## Series 4: Concurrent Runtime And Memory Synchronization
 
