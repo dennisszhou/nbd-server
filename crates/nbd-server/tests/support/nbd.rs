@@ -8,8 +8,8 @@ use nbd_protocol::constants::{
 };
 use nbd_protocol::handshake::encode_client_flags;
 use nbd_protocol::option::{
-    encode_go_request, parse_option_reply, parse_option_reply_header, OptionReply,
-    OPTION_REPLY_HEADER_BYTES,
+    encode_abort_request, encode_go_request, encode_option_request, parse_option_reply,
+    parse_option_reply_header, OptionReply, OPTION_REPLY_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
     encode_disconnect_request, encode_read_request, parse_simple_reply, SIMPLE_REPLY_BYTES,
@@ -92,18 +92,17 @@ pub struct RawNbdConnection {
 
 impl RawNbdConnection {
     pub async fn connect(addr: SocketAddr, export_name: &str) -> TestResult<Self> {
-        let mut stream = TcpStream::connect(addr).await?;
-
-        read_server_handshake(&mut stream).await?;
-        stream.write_all(&encode_client_flags(true)).await?;
-        stream
+        let mut option_client = RawNbdOptionClient::connect(addr).await?;
+        option_client
+            .stream
             .write_all(&encode_go_request(export_name, &[NBD_INFO_EXPORT])?)
             .await?;
 
-        let (export_size_bytes, transmission_flags) = read_go_replies(&mut stream).await?;
+        let (export_size_bytes, transmission_flags) =
+            read_go_replies(&mut option_client.stream).await?;
 
         Ok(Self {
-            stream,
+            stream: option_client.stream,
             export_size_bytes,
             transmission_flags,
         })
@@ -156,6 +155,40 @@ impl RawNbdConnection {
             .write_all(&encode_disconnect_request(cookie)?)
             .await?;
         Ok(self.stream.shutdown().await?)
+    }
+}
+
+pub struct RawNbdOptionClient {
+    stream: TcpStream,
+}
+
+impl RawNbdOptionClient {
+    pub async fn connect(addr: SocketAddr) -> TestResult<Self> {
+        let mut stream = TcpStream::connect(addr).await?;
+
+        read_server_handshake(&mut stream).await?;
+        stream.write_all(&encode_client_flags(true)).await?;
+
+        Ok(Self { stream })
+    }
+
+    pub async fn send_option(
+        &mut self,
+        option: nbd_protocol::wire::NbdOptionCode,
+        payload: &[u8],
+    ) -> TestResult<()> {
+        Ok(self
+            .stream
+            .write_all(&encode_option_request(option, payload)?)
+            .await?)
+    }
+
+    pub async fn send_abort(&mut self) -> TestResult<()> {
+        Ok(self.stream.write_all(&encode_abort_request(&[])?).await?)
+    }
+
+    pub async fn read_option_reply(&mut self) -> TestResult<OptionReply> {
+        read_option_reply(&mut self.stream).await
     }
 }
 

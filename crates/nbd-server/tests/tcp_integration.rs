@@ -1,11 +1,13 @@
 mod support;
 
 use nbd_protocol::constants::{
-    NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN,
+    NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT, NBD_REP_ERR_POLICY,
+    NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
 };
-use nbd_protocol::wire::NbdCookie;
+use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
+use nbd_protocol::OptionReply;
 use nbd_us_client::{ClientError, NbdClient};
-use support::nbd::{EngineProfile, RawNbdConnection, ServerFixture};
+use support::nbd::{EngineProfile, RawNbdConnection, RawNbdOptionClient, ServerFixture};
 
 #[tokio::test]
 async fn active_export_negotiates_over_tcp() {
@@ -168,6 +170,57 @@ async fn active_export_rejects_second_mounter_until_disconnect() {
 }
 
 #[tokio::test]
+async fn unsupported_option_returns_error_and_keeps_negotiation_open() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdOptionClient::connect(server.addr())
+        .await
+        .expect("connect raw option client");
+
+    let unsupported = NbdOptionCode::new(0xfeed_beef);
+    client
+        .send_option(unsupported, b"ignored")
+        .await
+        .expect("send unsupported option");
+
+    assert_option_error(
+        client
+            .read_option_reply()
+            .await
+            .expect("read unsupported option reply"),
+        unsupported,
+        NBD_REP_ERR_UNSUP,
+    );
+
+    client.send_abort().await.expect("send abort");
+    assert_option_ack(
+        client.read_option_reply().await.expect("read abort ack"),
+        NbdOptionCode::new(NBD_OPT_ABORT),
+    );
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn abort_option_is_acknowledged() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdOptionClient::connect(server.addr())
+        .await
+        .expect("connect raw option client");
+
+    client.send_abort().await.expect("send abort");
+    assert_option_ack(
+        client.read_option_reply().await.expect("read abort ack"),
+        NbdOptionCode::new(NBD_OPT_ABORT),
+    );
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
 async fn raw_protocol_helper_reads_with_explicit_cookie() {
     let fixture = ServerFixture::new(EngineProfile::MEMORY)
         .await
@@ -226,6 +279,31 @@ fn assert_policy_error(result: nbd_us_client::Result<NbdClient>) {
             ..
         }),
     ));
+}
+
+fn assert_option_ack(reply: OptionReply, expected_option: NbdOptionCode) {
+    match reply {
+        OptionReply::Ack { option } => {
+            assert_eq!(option, expected_option);
+        }
+        reply => panic!("expected NBD_REP_ACK, got {reply:?}"),
+    }
+}
+
+fn assert_option_error(
+    reply: OptionReply,
+    expected_option: NbdOptionCode,
+    expected_reply_type: u32,
+) {
+    match reply {
+        OptionReply::Error {
+            option, reply_type, ..
+        } => {
+            assert_eq!(option, expected_option);
+            assert_eq!(reply_type, expected_reply_type);
+        }
+        reply => panic!("expected option error, got {reply:?}"),
+    }
 }
 
 async fn reconnect_after_disconnect(addr: std::net::SocketAddr) -> NbdClient {
