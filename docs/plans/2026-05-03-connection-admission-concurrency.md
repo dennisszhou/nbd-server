@@ -599,8 +599,8 @@ runtime.submit(job)
 
 request task:
   wait for its already-registered ExportAdmissionCtl permit
-  call engine.execute(request)
-  drop admission permit
+  build AdmittedExportRequest from request and permit
+  call engine.execute_admitted(admitted_request)
   move ExportQueueSlot from ExportJob into ExportCompletion
   complete job ExportCompletion with ExportResult
   drop active job guard
@@ -658,14 +658,13 @@ the real correctness mechanism once concurrent runtime exists, because that
 would hide admission bugs and serialize compatible non-overlapping requests.
 
 The range locks that decide whether an operation may run belong to
-`ExportAdmissionCtl`, not to `MemoryExportEngine`. The memory engine still
-needs a data-race-safe representation for Rust memory safety, but that
-representation must not define request ordering.
+`ExportAdmissionCtl`, not to `MemoryExportEngine`.
 
 ```text
 ExportAdmissionCtl
   dynamic logical range-lock state
   active and waiting read/write/flush records
+  cacheline/storage-touch aware admitted ranges
   future resize barrier and extent update point
 
 MemoryExportEngine
@@ -674,23 +673,55 @@ MemoryExportEngine
   no range scheduling policy
 ```
 
-The first concurrent memory implementation should remove the coarse
-`Mutex<Vec<u8>>`. The simplest safe representation is byte-addressable atomic
-storage:
+The concurrent memory implementation should remove the coarse
+`Mutex<Vec<u8>>`, but it should not replace that mutex with per-byte atomics.
+Per-byte atomics make the proof easy but make large memory exports
+unrepresentative and unnecessarily slow. Instead, unsafe memory access is
+acceptable if the engine API makes admitted access a type-level capability.
 
 ```rust
-struct MemoryExportEngine {
-    data: Box<[AtomicU8]>,
+struct AdmittedExportRequest {
+    request: ExportRequest,
+    _access: EngineAccessGuard,
+}
+
+enum EngineAccessGuard {
+    Admission(AdmissionPermit),
+    Serial,
+}
+
+#[async_trait::async_trait]
+trait ExportEngine: Send + Sync {
+    async fn execute_admitted(
+        &self,
+        request: AdmittedExportRequest,
+    ) -> ExportResult;
 }
 ```
 
-Reads copy bytes with atomic loads. Writes copy bytes with atomic stores.
-`SeqCst` ordering is acceptable for the first implementation because the
-memory engine is a correctness and protocol test backend, not the future fast
-durable storage path. Admission remains the operation-level lock: overlapping
-read/write and write/write operations are excluded before the engine touches
-storage, while non-overlapping operations can proceed without an export-wide
-memory mutex.
+`AdmittedExportRequest` is not a scheduler and does not expose admission
+policy to the engine. It is an unforgeable capability proving that an export
+runtime has either:
+
+- acquired an `AdmissionPermit` for the exact storage range the request may
+  touch; or
+- is executing through the serial runtime's exclusive execution path.
+
+The constructor should stay private to the runtime/admission boundary. Once
+unsafe memory storage is introduced, safe callers must not be able to invoke
+memory access with a bare `ExportRequest`.
+
+If the memory backend touches cacheline-rounded, word-rounded, or otherwise
+expanded ranges internally, the `AdmissionOp` registered by the runtime must
+cover that expanded storage-touch range. Admission remains the operation-level
+lock: overlapping read/write and write/write operations are excluded before
+the engine touches storage, while non-overlapping operations can proceed
+without an export-wide memory mutex.
+
+The current crate forbids unsafe code. Introducing unsafe raw memory storage
+therefore requires either deliberately relaxing that crate-level policy with a
+small reviewed unsafe boundary, or moving the unsafe storage type into a small
+separate crate that documents the admitted-access safety contract.
 
 This separates two proofs:
 
@@ -700,14 +731,14 @@ ExportAdmissionCtl
   avoidance
 
 MemoryExportEngine storage
-  proves shared in-memory bytes can be read and written concurrently without a
-  Rust data race or a hidden semantic mutex
+  proves raw byte access is reachable only through an admitted request whose
+  guard excludes overlapping storage touches
 ```
 
 Tests should not depend on a memory-engine mutex for correctness. The
 concurrency proof should use admission instrumentation, a controllable engine,
-or the atomic memory backend so ordered range-lock behavior is observable
-without a coarse engine mutex masking it.
+or unsafe memory storage behind admitted access so ordered range-lock behavior
+is observable without a coarse engine mutex masking it.
 
 ## Configuration
 
@@ -761,6 +792,8 @@ or constructing an explicit multi-thread runtime in `main`.
 - `ExportRuntimeLifecycle` owns volatile runtime close state and accepted job
   settlement tracking.
 - `ExportEngine` owns data behavior.
+- `AdmittedExportRequest` owns the volatile engine-access capability proving
+  the request was admitted or is executing under serial exclusivity.
 - WAL sequence and durability remain future `WALManager` responsibilities.
 
 ## Derived State
@@ -796,6 +829,9 @@ No new durable or serving cache is introduced by this design. Future
 - `ConcurrentExportRuntime` moves request work off connection tasks before
   admission or engine execution can block.
 - `ExportEngine` never observes NBD cookies or writes NBD replies.
+- Once unsafe memory storage exists, `ExportEngine` does not expose a safe
+  raw `ExportRequest` execution path for memory access; callers execute
+  through an `AdmittedExportRequest`.
 - Every concurrent read, write, and flush holds an admission permit while its
   engine operation is executing.
 - Overlapping writes never execute concurrently.
@@ -804,6 +840,8 @@ No new durable or serving cache is introduced by this design. Future
 - Flush is an export-wide barrier in this slice.
 - Admission tickets are volatile and never used as WAL sequence numbers.
 - Admission ranges are dynamic operation ranges, not static memory chunks.
+- Admission ranges cover the full storage-touch range, including any
+  cacheline or word expansion required by an unsafe memory backend.
 - Admission waiter grants cannot be lost: registration and promotion happen
   under the same admission state mutex.
 - Dropping an admission permit releases the active operation and wakes waiters.
@@ -940,8 +978,9 @@ engine:
 
 `MemoryExportEngine` should have storage-safety regression tests:
 
-- concurrent non-overlapping writes through `ConcurrentExportRuntime` complete
-  without relying on an export-wide memory mutex;
+- unsafe/raw memory access is possible only through `AdmittedExportRequest`;
+- concurrent non-overlapping writes through `ConcurrentExportRuntime`
+  complete without relying on an export-wide memory mutex;
 - a read after an admitted write observes the completed write bytes;
 - overlapping memory operations are serialized by admission, not by storage;
 - flush waits for earlier writes even though the memory engine flush is a
@@ -990,9 +1029,13 @@ regression check before handoff.
 - Admission promotion must be state-based, not notification-based. A lost wake
   between register and permit release would deadlock an otherwise admissible
   request.
-- Replacing the memory mutex with atomic byte storage is intentionally simple
-  but not optimized. That is acceptable for the memory backend; durable storage
-  will need its own storage-concurrency design.
+- Unsafe memory storage is acceptable only if safe callers cannot reach raw
+  memory access without an admitted request. An informal "runtime promises to
+  call admission first" convention behind a safe `execute(ExportRequest)` API
+  would be unsound.
+- The admitted storage range must match every byte/cacheline/word the memory
+  engine may touch. If that geometry changes, admission range derivation must
+  change with it.
 - Concurrent runtime can expose ordering assumptions hidden by
   `SerialExportRuntime`. Admission tests need to cover waiting conflicts, not
   only active conflicts.

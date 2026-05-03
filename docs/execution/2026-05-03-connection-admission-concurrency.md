@@ -82,9 +82,9 @@ cargo fmt --all --check
 
 Not included: runtime API changes, admission unit tests, connection
 reader/writer split, connection reply queues, `ConcurrentExportRuntime`,
-memory-engine atomic storage, multi-thread Tokio runtime wiring, durable engine
-execution before a durable engine kind exists, userspace concurrent smoke, or
-Docker smoke.
+admitted memory-engine storage, multi-thread Tokio runtime wiring, durable
+engine execution before a durable engine kind exists, userspace concurrent
+smoke, or Docker smoke.
 
 Commit 1/6: docs/plans: add connection concurrency design
 
@@ -282,7 +282,7 @@ cargo fmt --all --check
 ```
 
 Not included: connection reader/writer split, connection reply queues,
-`ConcurrentExportRuntime`, memory-engine atomic storage, multi-thread Tokio
+`ConcurrentExportRuntime`, admitted memory-engine storage, multi-thread Tokio
 runtime wiring, userspace concurrent smoke, or Docker smoke.
 
 Commit 1/5: docs/execution: plan runtime API series
@@ -443,7 +443,7 @@ Commit 5/5: admission: add export admission control
                     ranges, and cancellation must not leave inert waiters that
                     block later work.
   Not included:     Wiring admission into `SerialExportRuntime`,
-                    `ConcurrentExportRuntime`, memory-engine atomic storage,
+                    `ConcurrentExportRuntime`, admitted memory-engine storage,
                     resize admission, WAL ordering, or durable-engine read
                     views.
   Depends on:       4
@@ -480,7 +480,7 @@ cargo test -p nbd-server --test export_runtime
 cargo fmt --all --check
 ```
 
-Not included: `ConcurrentExportRuntime`, memory-engine atomic storage,
+Not included: `ConcurrentExportRuntime`, admitted memory-engine storage,
 multi-thread Tokio runtime wiring, or concurrent-runtime smoke.
 
 ## Series 4: Concurrent Runtime And Memory Synchronization
