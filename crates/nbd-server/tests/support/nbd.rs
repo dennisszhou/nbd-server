@@ -12,7 +12,8 @@ use nbd_protocol::option::{
     parse_option_reply_header, OptionReply, OPTION_REPLY_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
-    encode_disconnect_request, encode_read_request, parse_simple_reply, SIMPLE_REPLY_BYTES,
+    encode_disconnect_request, encode_flush_request, encode_read_request, encode_request_header,
+    encode_write_request, parse_simple_reply, RequestHeader, SimpleReply, SIMPLE_REPLY_BYTES,
 };
 use nbd_protocol::wire::{NbdCookie, WireReader};
 use nbd_server::NbdServer;
@@ -123,11 +124,40 @@ impl RawNbdConnection {
             .await?)
     }
 
-    pub async fn read_successful_read(
+    pub async fn send_write(
+        &mut self,
+        cookie: NbdCookie,
+        offset: u64,
+        data: &[u8],
+    ) -> TestResult<()> {
+        Ok(self
+            .stream
+            .write_all(&encode_write_request(cookie, offset, data)?)
+            .await?)
+    }
+
+    pub async fn send_flush(&mut self, cookie: NbdCookie) -> TestResult<()> {
+        Ok(self
+            .stream
+            .write_all(&encode_flush_request(cookie)?)
+            .await?)
+    }
+
+    pub async fn send_request_header(&mut self, header: RequestHeader) -> TestResult<()> {
+        Ok(self
+            .stream
+            .write_all(&encode_request_header(header))
+            .await?)
+    }
+
+    pub async fn send_raw_bytes(&mut self, bytes: &[u8]) -> TestResult<()> {
+        Ok(self.stream.write_all(bytes).await?)
+    }
+
+    pub async fn read_simple_reply(
         &mut self,
         expected_cookie: NbdCookie,
-        expected_len: u32,
-    ) -> TestResult<Vec<u8>> {
+    ) -> TestResult<SimpleReply> {
         let mut header = [0; SIMPLE_REPLY_BYTES];
         self.stream.read_exact(&mut header).await?;
         let reply = parse_simple_reply(&header)?;
@@ -138,6 +168,16 @@ impl RawNbdConnection {
                 reply.cookie.raw()
             )));
         }
+
+        Ok(reply)
+    }
+
+    pub async fn read_successful_read(
+        &mut self,
+        expected_cookie: NbdCookie,
+        expected_len: u32,
+    ) -> TestResult<Vec<u8>> {
+        let reply = self.read_simple_reply(expected_cookie).await?;
         if reply.error != 0 {
             return Err(test_error(format!(
                 "expected successful read, got NBD error {}",
@@ -154,6 +194,10 @@ impl RawNbdConnection {
         self.stream
             .write_all(&encode_disconnect_request(cookie)?)
             .await?;
+        Ok(self.stream.shutdown().await?)
+    }
+
+    pub async fn shutdown_write(&mut self) -> TestResult<()> {
         Ok(self.stream.shutdown().await?)
     }
 }

@@ -1,11 +1,11 @@
 mod support;
 
 use nbd_protocol::constants::{
-    NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT, NBD_REP_ERR_POLICY,
-    NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
+    NBD_CMD_WRITE, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT,
+    NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
 };
-use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
-use nbd_protocol::OptionReply;
+use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode};
+use nbd_protocol::{OptionReply, RequestHeader};
 use nbd_us_client::{ClientError, NbdClient};
 use support::nbd::{EngineProfile, RawNbdConnection, RawNbdOptionClient, ServerFixture};
 
@@ -115,6 +115,33 @@ async fn out_of_bounds_reads_return_nbd_error() {
         client.read(7, 2).await,
         Err(ClientError::CommandError {
             command: "READ",
+            error: NBD_EINVAL,
+        }),
+    ));
+
+    client.disconnect().await.expect("disconnect");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn out_of_bounds_writes_return_nbd_error() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 8, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = NbdClient::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect client");
+
+    assert!(matches!(
+        client.write(7, b"xx").await,
+        Err(ClientError::CommandError {
+            command: "WRITE",
             error: NBD_EINVAL,
         }),
     ));
@@ -258,6 +285,161 @@ async fn raw_protocol_helper_reads_with_explicit_cookie() {
         .disconnect(NbdCookie::new(43))
         .await
         .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn raw_write_flush_and_read_replies_echo_cookies() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let write_cookie = NbdCookie::new(100);
+    client
+        .send_write(write_cookie, 2, b"abcd")
+        .await
+        .expect("send write");
+    assert!(client
+        .read_simple_reply(write_cookie)
+        .await
+        .expect("read write reply")
+        .is_success());
+
+    let flush_cookie = NbdCookie::new(101);
+    client.send_flush(flush_cookie).await.expect("send flush");
+    assert!(client
+        .read_simple_reply(flush_cookie)
+        .await
+        .expect("read flush reply")
+        .is_success());
+
+    let read_cookie = NbdCookie::new(102);
+    client
+        .send_read(read_cookie, 0, 8)
+        .await
+        .expect("send read");
+    assert_eq!(
+        client
+            .read_successful_read(read_cookie, 8)
+            .await
+            .expect("read reply"),
+        vec![0, 0, b'a', b'b', b'c', b'd', 0, 0],
+    );
+
+    client
+        .disconnect(NbdCookie::new(103))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn unsupported_transmission_command_returns_nbd_error() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let cookie = NbdCookie::new(200);
+    client
+        .send_request_header(RequestHeader {
+            flags: NbdCommandFlags::new(0),
+            command: NbdCommandType::new(99),
+            cookie,
+            offset: 0,
+            length: 0,
+        })
+        .await
+        .expect("send unsupported command");
+
+    let reply = client
+        .read_simple_reply(cookie)
+        .await
+        .expect("read unsupported command reply");
+    assert_eq!(reply.error, NBD_EINVAL);
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn connection_eof_releases_active_export() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    client
+        .shutdown_write()
+        .await
+        .expect("shutdown client write half");
+    drop(client);
+
+    let reopened = reconnect_after_disconnect(server.addr()).await;
+    reopened.disconnect().await.expect("disconnect reopened");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn malformed_write_payload_eof_releases_active_export() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    client
+        .send_request_header(RequestHeader {
+            flags: NbdCommandFlags::new(0),
+            command: NbdCommandType::new(NBD_CMD_WRITE),
+            cookie: NbdCookie::new(300),
+            offset: 0,
+            length: 4,
+        })
+        .await
+        .expect("send write header");
+    client
+        .send_raw_bytes(b"ab")
+        .await
+        .expect("send partial payload");
+    client
+        .shutdown_write()
+        .await
+        .expect("shutdown client write half");
+    drop(client);
+
+    let reopened = reconnect_after_disconnect(server.addr()).await;
+    reopened.disconnect().await.expect("disconnect reopened");
     server.shutdown().await.expect("shutdown server");
 }
 
