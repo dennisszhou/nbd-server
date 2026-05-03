@@ -2,7 +2,7 @@ use std::str;
 
 use crate::constants::{
     IHAVEOPT_MAGIC, MAX_STRING_BYTES, NBD_INFO_EXPORT, NBD_OPT_ABORT, NBD_OPT_GO, NBD_REP_ACK,
-    NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP, NBD_REP_INFO, OPTION_REPLY_MAGIC,
+    NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP, NBD_REP_INFO, OPTION_REPLY_MAGIC,
 };
 use crate::wire::{write_u16, write_u32, write_u64, NbdOptionCode, WireReader};
 use crate::{ProtocolError, Result};
@@ -332,6 +332,10 @@ pub fn encode_ack_reply(option: NbdOptionCode) -> Result<Vec<u8>> {
 
 pub fn encode_unsupported_option_reply(option: NbdOptionCode, message: &[u8]) -> Result<Vec<u8>> {
     encode_option_reply(option, NBD_REP_ERR_UNSUP, message)
+}
+
+pub fn encode_policy_option_reply(option: NbdOptionCode, message: &[u8]) -> Result<Vec<u8>> {
+    encode_option_reply(option, NBD_REP_ERR_POLICY, message)
 }
 
 pub fn encode_unknown_export_reply(option: NbdOptionCode, message: &[u8]) -> Result<Vec<u8>> {

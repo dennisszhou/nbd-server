@@ -4,9 +4,10 @@ use nbd_protocol::handshake::{
 };
 use nbd_protocol::option::{
     encode_abort_request, encode_ack_reply, encode_export_info_reply, encode_go_request,
-    encode_unknown_export_reply, encode_unsupported_option_reply, parse_option_reply,
-    parse_option_reply_header, parse_option_request, parse_option_request_header, OptionReply,
-    OptionRequest, MAX_OPTION_PAYLOAD_BYTES, OPTION_REPLY_HEADER_BYTES,
+    encode_policy_option_reply, encode_unknown_export_reply, encode_unsupported_option_reply,
+    parse_option_reply, parse_option_reply_header, parse_option_request,
+    parse_option_request_header, OptionReply, OptionRequest, MAX_OPTION_PAYLOAD_BYTES,
+    OPTION_REPLY_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
     encode_disconnect_request, encode_flush_request, encode_read_reply, encode_read_request,
@@ -27,6 +28,7 @@ fn known_wire_constants_match_the_nbd_protocol() {
     assert_eq!(constants::OPTION_REPLY_MAGIC, 0x0003_e889_0455_65a9);
     assert_eq!(constants::NBD_REQUEST_MAGIC, 0x2560_9513);
     assert_eq!(constants::NBD_SIMPLE_REPLY_MAGIC, 0x6744_6698);
+    assert_eq!(constants::NBD_REP_ERR_POLICY, (1 << 31) + 2);
 }
 
 #[test]
@@ -200,6 +202,16 @@ fn option_replies_match_fixed_newstyle_wire_layout() {
             option: NbdOptionCode::new(99),
             reply_type: constants::NBD_REP_ERR_UNSUP,
             message: b"unsupported".to_vec(),
+        },
+    );
+
+    let policy = encode_policy_option_reply(option, b"busy").unwrap();
+    assert_eq!(
+        parse_option_reply(&policy).unwrap(),
+        OptionReply::Error {
+            option,
+            reply_type: constants::NBD_REP_ERR_POLICY,
+            message: b"busy".to_vec(),
         },
     );
 

@@ -15,11 +15,11 @@ pub use handshake::{
 };
 pub use option::{
     encode_abort_request, encode_ack_reply, encode_export_info_reply, encode_go_request,
-    encode_option_reply, encode_option_request, encode_unknown_export_reply,
-    encode_unsupported_option_reply, parse_option_reply, parse_option_reply_header,
-    parse_option_request, parse_option_request_header, GoRequest, OptionReply, OptionReplyHeader,
-    OptionRequest, OptionRequestHeader, MAX_OPTION_PAYLOAD_BYTES, OPTION_REPLY_HEADER_BYTES,
-    OPTION_REQUEST_HEADER_BYTES,
+    encode_option_reply, encode_option_request, encode_policy_option_reply,
+    encode_unknown_export_reply, encode_unsupported_option_reply, parse_option_reply,
+    parse_option_reply_header, parse_option_request, parse_option_request_header, GoRequest,
+    OptionReply, OptionReplyHeader, OptionRequest, OptionRequestHeader, MAX_OPTION_PAYLOAD_BYTES,
+    OPTION_REPLY_HEADER_BYTES, OPTION_REQUEST_HEADER_BYTES,
 };
 pub use transmission::{
     encode_disconnect_request, encode_flush_request, encode_read_reply, encode_read_request,
