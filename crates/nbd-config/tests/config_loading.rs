@@ -1,6 +1,6 @@
 use nbd_config::{
     catalog_file_url_for_path, default_config_path_for_home, default_state_dir_for_home,
-    ConfigSource, NbdConfig,
+    ConfigSource, ExportEngineKind, ExportRuntimeKind, NbdConfig,
 };
 use std::env;
 use std::fs;
@@ -26,6 +26,8 @@ fn explicit_config_loads_from_requested_path() {
         config.catalog.url,
         catalog_file_url_for_path(catalog_path).unwrap()
     );
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(config.server.export_engine, ExportEngineKind::Memory);
 }
 
 #[test]
@@ -70,6 +72,8 @@ fn default_user_path_bootstraps_absolute_config() {
         catalog_file_url_for_path(fake_home.join(".nbd").join("catalog.db")).unwrap()
     );
     assert!(config.catalog.url.starts_with("file:"));
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(config.server.export_engine, ExportEngineKind::Memory);
 
     let loaded = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
     assert_eq!(loaded, config);
@@ -86,6 +90,25 @@ fn malformed_config_reports_error() {
         .expect_err("malformed config should fail");
 
     assert!(error.to_string().contains("failed to parse config"));
+}
+
+#[test]
+fn explicit_server_config_loads_backend_choices() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\nexport_engine = \"memory\"\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(config.server.export_engine, ExportEngineKind::Memory);
 }
 
 fn write_config(config_path: &Path, state_dir: &Path, catalog_path: &Path) {

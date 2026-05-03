@@ -20,6 +20,8 @@ const CATALOG_FILE: &str = "catalog.db";
 pub struct NbdConfig {
     pub catalog: CatalogConfig,
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 /// Catalog database configuration.
@@ -34,6 +36,51 @@ pub struct CatalogConfig {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub state_dir: PathBuf,
+}
+
+/// NBD server backend configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConfig {
+    #[serde(default)]
+    pub export_runtime: ExportRuntimeKind,
+    #[serde(default)]
+    pub export_engine: ExportEngineKind,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            export_runtime: ExportRuntimeKind::Serial,
+            export_engine: ExportEngineKind::Memory,
+        }
+    }
+}
+
+/// Export request execution policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportRuntimeKind {
+    Serial,
+}
+
+impl Default for ExportRuntimeKind {
+    fn default() -> Self {
+        Self::Serial
+    }
+}
+
+/// Export data backend policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportEngineKind {
+    Memory,
+}
+
+impl Default for ExportEngineKind {
+    fn default() -> Self {
+        Self::Memory
+    }
 }
 
 /// Where a configuration load should read from.
@@ -97,6 +144,7 @@ impl NbdConfig {
                 url: catalog_file_url_for_path(catalog_path)?,
             },
             runtime: RuntimeConfig { state_dir },
+            server: ServerConfig::default(),
         })
     }
 }

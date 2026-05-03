@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use nbd_config::{catalog_file_url_for_path, CatalogConfig, ConfigError, NbdConfig, RuntimeConfig};
+use nbd_config::{
+    catalog_file_url_for_path, CatalogConfig, ConfigError, NbdConfig, RuntimeConfig, ServerConfig,
+};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -41,6 +43,7 @@ impl TestRuntime {
             runtime: RuntimeConfig {
                 state_dir: state_dir.clone(),
             },
+            server: ServerConfig::default(),
         };
         let contents = toml::to_string_pretty(&config)
             .map_err(|source| TestRuntimeError::SerializeConfig { source })?;
