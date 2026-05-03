@@ -67,7 +67,9 @@ impl SerialExportRuntime {
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 let (request, completion, queue_slot) = job.into_parts();
-                completion.complete(engine.execute(request).await, queue_slot);
+                completion
+                    .complete(engine.execute(request).await, queue_slot)
+                    .await;
                 worker_lifecycle.finish_job();
             }
         });

@@ -1,5 +1,5 @@
 use crate::{
-    CompletedExport, ExportJob, ExportOwner, ExportQueueSlot, ExportReply, ExportRequest,
+    ExportCompletion, ExportJob, ExportOwner, ExportQueueSlot, ExportReply, ExportRequest,
     ExportResult, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
 };
 use nbd_control_plane::ExportName;
@@ -18,6 +18,7 @@ use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 const SUPPORTED_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
 
@@ -52,8 +53,12 @@ enum ConnectionReplyPayload {
 }
 
 impl ConnectionReply {
-    fn completed(cookie: NbdCookie, kind: ReplyKind, completed: CompletedExport) -> Self {
-        let (result, queue_slot) = completed.into_parts();
+    pub(crate) fn export_result(
+        cookie: NbdCookie,
+        kind: ReplyKind,
+        result: ExportResult,
+        queue_slot: ExportQueueSlot,
+    ) -> Self {
         Self {
             cookie,
             payload: ConnectionReplyPayload::Export {
@@ -244,52 +249,48 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
                 offset,
                 length,
             } => {
-                match execute_export(
+                let reply = match execute_export(
                     &runtime,
                     ExportRequest::Read {
                         offset,
                         len: length,
                     },
+                    cookie,
+                    ReplyKind::Read,
                 )
                 .await
                 {
-                    Ok(completed) => {
-                        write_connection_reply(
-                            stream,
-                            ConnectionReply::completed(cookie, ReplyKind::Read, completed),
-                        )
-                        .await?;
-                    }
-                    Err(_) => {
-                        write_connection_reply(
-                            stream,
-                            ConnectionReply::simple_error(cookie, NBD_EINVAL),
-                        )
-                        .await?;
-                    }
-                }
+                    Ok(reply) => reply,
+                    Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
+                };
+                write_connection_reply(stream, reply).await?;
             }
             TransmissionRequest::Write {
                 cookie,
                 offset,
                 data,
             } => {
-                let reply =
-                    match execute_export(&runtime, ExportRequest::Write { offset, data }).await {
-                        Ok(completed) => {
-                            ConnectionReply::completed(cookie, ReplyKind::Simple, completed)
-                        }
-                        Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
-                    };
+                let reply = match execute_export(
+                    &runtime,
+                    ExportRequest::Write { offset, data },
+                    cookie,
+                    ReplyKind::Simple,
+                )
+                .await
+                {
+                    Ok(reply) => reply,
+                    Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
+                };
                 write_connection_reply(stream, reply).await?;
             }
             TransmissionRequest::Flush { cookie } => {
-                let reply = match execute_export(&runtime, ExportRequest::Flush).await {
-                    Ok(completed) => {
-                        ConnectionReply::completed(cookie, ReplyKind::Simple, completed)
-                    }
-                    Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
-                };
+                let reply =
+                    match execute_export(&runtime, ExportRequest::Flush, cookie, ReplyKind::Simple)
+                        .await
+                    {
+                        Ok(reply) => reply,
+                        Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
+                    };
                 write_connection_reply(stream, reply).await?;
             }
             TransmissionRequest::Disconnect { .. } => return Ok(()),
@@ -330,11 +331,15 @@ where
 async fn execute_export(
     runtime: &ExportRuntimeHandle,
     request: ExportRequest,
-) -> Result<CompletedExport> {
+    cookie: NbdCookie,
+    kind: ReplyKind,
+) -> Result<ConnectionReply> {
     let queue_slot = runtime.reserve().await?;
-    let (job, receiver) = ExportJob::oneshot(request, queue_slot);
+    let (sender, mut receiver) = mpsc::channel(1);
+    let completion = ExportCompletion::connection(cookie, kind, sender);
+    let job = ExportJob::new(request, completion, queue_slot);
     runtime.submit(job).await?;
-    receiver.await.map_err(|_| ServerError::RuntimeClosed {
+    receiver.recv().await.ok_or(ServerError::RuntimeClosed {
         resource: "export runtime reply",
     })
 }
