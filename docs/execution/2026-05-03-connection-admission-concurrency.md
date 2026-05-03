@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 2 approved
+- current state: Series 2 finished; Series 3 pending review
 Completion:
 - execution complete: no
-- completed series: Series 1
-- next series: Series 2 in progress
+- completed series: Series 1, Series 2
+- next series: Series 3 pending review
 
 ## Goal
 
@@ -269,7 +269,7 @@ prove accepted-order conflicts, flush barriers, cancellation cleanup, and
 no-lost-wake behavior. The Series 1 protocol integration suite continues to
 pass.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
