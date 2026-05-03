@@ -487,3 +487,297 @@ where
             .map_err(|source| ServerError::io("write NBD error reply", source)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExportEngine, SerialExportRuntime};
+    use nbd_control_plane::{
+        CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
+        ExportState, Timestamp, WalSeq,
+    };
+    use nbd_protocol::constants::NBD_CMD_WRITE;
+    use nbd_protocol::transmission::{
+        encode_disconnect_request, encode_read_request, encode_request_header, parse_simple_reply,
+        RequestHeader, SIMPLE_REPLY_BYTES,
+    };
+    use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType};
+    use std::sync::Arc;
+    use tokio::io::{duplex, split, DuplexStream};
+    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+    #[tokio::test]
+    async fn connection_runtime_writes_out_of_order_completions_by_cookie() {
+        let (runtime, mut submitted, _reserve_started, _reserve_acquired) = controllable_runtime(2);
+        let (mut client, server_task) = spawn_connection(runtime, 2);
+        let first_cookie = NbdCookie::new(101);
+        let second_cookie = NbdCookie::new(102);
+
+        client
+            .write_all(&encode_read_request(first_cookie, 0, 4).expect("first read"))
+            .await
+            .expect("send first read");
+        client
+            .write_all(&encode_read_request(second_cookie, 4, 4).expect("second read"))
+            .await
+            .expect("send second read");
+
+        let first_job = submitted.recv().await.expect("first job");
+        let second_job = submitted.recv().await.expect("second job");
+
+        complete_job(
+            second_job,
+            ExportRequest::Read { offset: 4, len: 4 },
+            Ok(ExportReply::Read {
+                data: b"bbbb".to_vec(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            read_successful_read(&mut client, 4).await,
+            (second_cookie, b"bbbb".to_vec()),
+        );
+
+        complete_job(
+            first_job,
+            ExportRequest::Read { offset: 0, len: 4 },
+            Ok(ExportReply::Read {
+                data: b"aaaa".to_vec(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            read_successful_read(&mut client, 4).await,
+            (first_cookie, b"aaaa".to_vec()),
+        );
+
+        disconnect_and_join(client, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn connection_runtime_backpressures_before_write_payload() {
+        let (runtime, mut submitted, mut reserve_started, mut reserve_acquired) =
+            controllable_runtime(1);
+        let (mut client, server_task) = spawn_connection(runtime, 1);
+        let first_cookie = NbdCookie::new(201);
+        let write_cookie = NbdCookie::new(202);
+
+        client
+            .write_all(&encode_read_request(first_cookie, 0, 4).expect("first read"))
+            .await
+            .expect("send first read");
+        expect_event(&mut reserve_started).await;
+        expect_event(&mut reserve_acquired).await;
+        let first_job = submitted.recv().await.expect("first job");
+
+        client
+            .write_all(&encode_request_header(RequestHeader {
+                flags: NbdCommandFlags::new(0),
+                command: NbdCommandType::new(NBD_CMD_WRITE),
+                cookie: write_cookie,
+                offset: 8,
+                length: 4,
+            }))
+            .await
+            .expect("send write header");
+        expect_event(&mut reserve_started).await;
+        assert_no_event(&mut reserve_acquired, "second reserve should wait").await;
+        assert!(
+            submitted.try_recv().is_err(),
+            "write should not submit before queue depth is available",
+        );
+
+        complete_job(
+            first_job,
+            ExportRequest::Read { offset: 0, len: 4 },
+            Ok(ExportReply::Read {
+                data: b"aaaa".to_vec(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            read_successful_read(&mut client, 4).await,
+            (first_cookie, b"aaaa".to_vec()),
+        );
+
+        expect_event(&mut reserve_acquired).await;
+        assert!(
+            submitted.try_recv().is_err(),
+            "write should wait for payload after reserving queue depth",
+        );
+
+        client.write_all(b"zzzz").await.expect("send write payload");
+        let write_job = submitted.recv().await.expect("write job");
+        complete_job(
+            write_job,
+            ExportRequest::Write {
+                offset: 8,
+                data: b"zzzz".to_vec(),
+            },
+            Ok(ExportReply::Done),
+        )
+        .await;
+        assert_success_reply(&mut client, write_cookie).await;
+
+        disconnect_and_join(client, server_task).await;
+    }
+
+    async fn complete_job(job: ExportJob, expected: ExportRequest, result: ExportResult) {
+        let (request, completion, queue_slot) = job.into_parts();
+        assert_eq!(request, expected);
+        completion.complete(result, queue_slot).await;
+    }
+
+    async fn read_successful_read(client: &mut DuplexStream, len: usize) -> (NbdCookie, Vec<u8>) {
+        let reply = read_simple_reply(client).await;
+        assert_eq!(reply.error, 0);
+
+        let mut data = vec![0; len];
+        client
+            .read_exact(&mut data)
+            .await
+            .expect("read reply payload");
+        (reply.cookie, data)
+    }
+
+    async fn assert_success_reply(client: &mut DuplexStream, expected_cookie: NbdCookie) {
+        let reply = read_simple_reply(client).await;
+        assert_eq!(reply.cookie, expected_cookie);
+        assert_eq!(reply.error, 0);
+    }
+
+    async fn read_simple_reply(client: &mut DuplexStream) -> nbd_protocol::SimpleReply {
+        let mut bytes = [0; SIMPLE_REPLY_BYTES];
+        client.read_exact(&mut bytes).await.expect("read reply");
+        parse_simple_reply(&bytes).expect("simple reply")
+    }
+
+    async fn disconnect_and_join(mut client: DuplexStream, server_task: JoinHandle<Result<()>>) {
+        client
+            .write_all(&encode_disconnect_request(NbdCookie::new(999)).expect("disconnect"))
+            .await
+            .expect("send disconnect");
+        client.shutdown().await.expect("shutdown client");
+        server_task
+            .await
+            .expect("connection task")
+            .expect("connection runtime");
+    }
+
+    async fn expect_event(receiver: &mut UnboundedReceiver<()>) {
+        receiver.recv().await.expect("runtime event");
+    }
+
+    async fn assert_no_event(receiver: &mut UnboundedReceiver<()>, message: &str) {
+        for _ in 0..4 {
+            assert!(receiver.try_recv().is_err(), "{message}");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn spawn_connection(
+        runtime: ExportRuntimeHandle,
+        reply_capacity: usize,
+    ) -> (DuplexStream, JoinHandle<Result<()>>) {
+        let (client, server) = duplex(64 * 1024);
+        let (reader, writer) = split(server);
+        let task = tokio::spawn(
+            ConnectionRuntime {
+                runtime,
+                reply_capacity,
+            }
+            .run_io(reader, writer),
+        );
+        (client, task)
+    }
+
+    fn controllable_runtime(
+        capacity: usize,
+    ) -> (
+        ExportRuntimeHandle,
+        mpsc::Receiver<ExportJob>,
+        UnboundedReceiver<()>,
+        UnboundedReceiver<()>,
+    ) {
+        let meta = export_meta("disk-a", 4096);
+        let engine = Arc::new(NoopEngine);
+        let reservations = SerialExportRuntime::with_capacity(meta.clone(), engine, capacity);
+        let (submitted_sender, submitted_receiver) = mpsc::channel(8);
+        let (reserve_started_sender, reserve_started_receiver) = unbounded_channel();
+        let (reserve_acquired_sender, reserve_acquired_receiver) = unbounded_channel();
+
+        (
+            Arc::new(ControllableRuntime {
+                meta,
+                reservations,
+                submitted: submitted_sender,
+                reserve_started: reserve_started_sender,
+                reserve_acquired: reserve_acquired_sender,
+            }),
+            submitted_receiver,
+            reserve_started_receiver,
+            reserve_acquired_receiver,
+        )
+    }
+
+    #[derive(Clone)]
+    struct ControllableRuntime {
+        meta: ExportMeta,
+        reservations: SerialExportRuntime,
+        submitted: mpsc::Sender<ExportJob>,
+        reserve_started: UnboundedSender<()>,
+        reserve_acquired: UnboundedSender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::ExportRuntime for ControllableRuntime {
+        fn export_meta(&self) -> ExportMeta {
+            self.meta.clone()
+        }
+
+        async fn reserve(&self) -> Result<ExportQueueSlot> {
+            let _ = self.reserve_started.send(());
+            let queue_slot = self.reservations.reserve().await?;
+            let _ = self.reserve_acquired.send(());
+            Ok(queue_slot)
+        }
+
+        async fn submit(&self, job: ExportJob) -> Result<()> {
+            self.submitted
+                .send(job)
+                .await
+                .map_err(|_| ServerError::RuntimeClosed {
+                    resource: "controllable runtime",
+                })
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.reservations.close().await
+        }
+    }
+
+    struct NoopEngine;
+
+    #[async_trait::async_trait]
+    impl ExportEngine for NoopEngine {
+        async fn execute(&self, _request: ExportRequest) -> ExportResult {
+            Ok(ExportReply::Done)
+        }
+    }
+
+    fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
+        ExportMeta::new(
+            ExportId::new(format!("export-{name}")).expect("export id"),
+            ExportName::new(name).expect("export name"),
+            size_bytes,
+            4096,
+            ExportEngineKind::Memory,
+            ExportState::Active,
+            CommittedRoot::new(None, WalSeq::zero(), ExportGeneration::zero()),
+            Timestamp::new("created").expect("created timestamp"),
+            Timestamp::new("updated").expect("updated timestamp"),
+            None,
+        )
+        .expect("export meta")
+    }
+}
