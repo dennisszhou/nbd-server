@@ -3,7 +3,8 @@ Date: 2026-05-01
 Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 5 finished; initial integration complete
+- current state: Series 5 and runtime/registry follow-up finished; initial
+  integration complete
 Completion:
 - execution complete: yes
 
@@ -43,6 +44,7 @@ Docker and kernel-NBD validation stay behind the userspace TCP proof path.
 - `docs/plans/initial-integration/2026-05-01-catalog-sdk-v1.md`
 - `docs/plans/initial-integration/2026-05-01-in-memory-nbd-server.md`
 - `docs/plans/initial-integration/2026-05-02-docker-kernel-smoke.md`
+- `docs/plans/initial-integration/2026-05-02-export-runtime-registry.md`
 
 ## Why Split
 
@@ -928,3 +930,59 @@ make -n docker-attach
 git --no-pager diff --check HEAD~5..HEAD
 make docker-smoke
 ```
+
+Post-closeout follow-up: the kernel smoke script now writes a larger probe
+file, runs `sync`, drops Linux page cache in the privileged container, and
+compares the file through the mounted filesystem. This strengthens the
+readback check without changing the smoke test's intended scope.
+
+## Post-Completion Follow-Up: Export Runtime And Local Registry
+
+Depends on: completed initial integration through Series 5
+
+Design coverage:
+`docs/plans/initial-integration/2026-05-02-export-runtime-registry.md`
+
+Stable checkpoint: NBD connections open exports through `LocalExportRegistry`,
+active exports own a shared `ExportRuntime`, and decoded read/write/flush work
+flows through runtime jobs before replies are encoded on the socket path.
+
+Review focus: local active-export ownership, runtime/engine responsibility
+boundaries, socket/protocol separation, and keeping durable WAL/read-view work
+out of this follow-up.
+
+Approval: finished
+
+Closeout: this follow-up introduced the long-term runtime boundary behind the
+existing in-memory server. `NbdServer` now owns a `LocalExportRegistry`,
+connections call `registry.open(...)` during `NBD_OPT_GO`, competing active
+mounters receive `NBD_REP_ERR_POLICY`, and transmission requests submit
+`ExportJob`s to the active export runtime. `MemoryExportEngine` is the shared
+in-memory backend, while `MemoryExport` remains only as the compatibility name
+for the older direct export path.
+
+The stack also adds the small server backend config surface, the protocol
+policy-error encoder, a process-local registry with open/close accounting, a
+serial runtime with an opened metadata snapshot, and tests proving runtime
+execution, registry exclusion/reopen behavior, TCP protocol behavior, and
+kernel smoke readback.
+
+Verification:
+
+```text
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+make docker-smoke
+```
+
+Deferred follow-up: the long-term architecture now says logical export size
+belongs to export generations, but the implemented Prisma schema and catalog
+queries still store `size_bytes` on `exports`. The next catalog cleanup should
+move implemented size ownership to `export_generations` while preserving the
+serving-facing `ExportMeta.size_bytes()` API.
+
+Not included: WAL, `ExportReadView`, durable storage engines, compaction,
+range-aware `ExportAdmissionCtl`, split reader/writer connection runtime,
+auth-based same-owner multi-connection mounts, etcd leases, or cross-process
+writer fencing.
