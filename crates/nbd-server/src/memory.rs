@@ -1,18 +1,21 @@
-use crate::{Export, Result, ServerError};
+use crate::{Export, ExportEngine, ExportReply, ExportRequest, ExportResult, Result, ServerError};
 use nbd_control_plane::{ExportMeta, ExportName};
 use std::sync::Mutex;
 
 pub const MAX_MEMORY_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
-pub struct MemoryExport {
+pub struct MemoryExportEngine {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
     data: Mutex<Vec<u8>>,
 }
 
-impl MemoryExport {
+/// Compatibility name for the direct `ExportHandle` path.
+pub type MemoryExport = MemoryExportEngine;
+
+impl MemoryExportEngine {
     pub fn new(meta: &ExportMeta) -> Result<Self> {
         let size_bytes = meta.size_bytes();
         if size_bytes > MAX_MEMORY_EXPORT_BYTES {
@@ -67,24 +70,55 @@ impl MemoryExport {
             resource: "memory export data",
         })
     }
-}
 
-#[async_trait::async_trait]
-impl Export for MemoryExport {
-    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+    pub async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
         let start = self.validate_range("read", offset, u64::from(len))?;
         let end = start + len as usize;
         Ok(self.data()?[start..end].to_vec())
     }
 
-    async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    pub async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let start = self.validate_range("write", offset, data.len() as u64)?;
         let end = start + data.len();
         self.data()?[start..end].copy_from_slice(data);
         Ok(())
     }
 
-    async fn flush(&self) -> Result<()> {
+    pub async fn flush(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Export for MemoryExportEngine {
+    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+        Self::read(self, offset, len).await
+    }
+
+    async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        Self::write(self, offset, data).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        Self::flush(self).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ExportEngine for MemoryExportEngine {
+    async fn execute(&self, request: ExportRequest) -> ExportResult {
+        match request {
+            ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
+                data: self.read(offset, len).await?,
+            }),
+            ExportRequest::Write { offset, data } => {
+                self.write(offset, &data).await?;
+                Ok(ExportReply::Done)
+            }
+            ExportRequest::Flush => {
+                self.flush().await?;
+                Ok(ExportReply::Done)
+            }
+        }
     }
 }

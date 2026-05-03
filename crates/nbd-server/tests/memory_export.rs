@@ -2,7 +2,7 @@ use nbd_control_plane::{
     CommittedRoot, ExportGeneration, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
     WalSeq,
 };
-use nbd_server::{Export, MemoryExport, ServerError, MAX_MEMORY_EXPORT_BYTES};
+use nbd_server::{MemoryExport, ServerError, MAX_MEMORY_EXPORT_BYTES};
 
 #[tokio::test]
 async fn memory_export_reads_zeroes_then_written_bytes() {

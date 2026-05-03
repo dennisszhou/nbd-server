@@ -21,6 +21,9 @@ pub enum ServerError {
     LockPoisoned {
         resource: &'static str,
     },
+    RuntimeClosed {
+        resource: &'static str,
+    },
     Io {
         context: &'static str,
         message: String,
@@ -75,6 +78,7 @@ impl fmt::Display for ServerError {
                 "export {operation} range is out of bounds: offset={offset}, length={length}, size={size_bytes}",
             ),
             Self::LockPoisoned { resource } => write!(f, "lock poisoned for {resource}"),
+            Self::RuntimeClosed { resource } => write!(f, "{resource} is closed"),
             Self::Io { context, message } => write!(f, "{context}: {message}"),
             Self::Protocol { source } => write!(f, "{source}"),
             Self::Catalog { message } => write!(f, "{message}"),
