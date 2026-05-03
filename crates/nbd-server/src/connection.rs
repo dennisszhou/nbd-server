@@ -466,21 +466,25 @@ where
         ConnectionReplyPayload::Export {
             kind,
             result,
-            _queue_slot,
-        } => match (kind, result) {
-            (ReplyKind::Read, Ok(ExportReply::Read { data })) => writer
-                .write_all(&encode_read_reply(reply.cookie, &data))
-                .await
-                .map_err(|source| ServerError::io("write NBD read reply", source)),
-            (ReplyKind::Simple, Ok(ExportReply::Done)) => writer
-                .write_all(&encode_simple_reply(reply.cookie, 0))
-                .await
-                .map_err(|source| ServerError::io("write NBD simple reply", source)),
-            _ => writer
-                .write_all(&encode_simple_reply(reply.cookie, NBD_EINVAL))
-                .await
-                .map_err(|source| ServerError::io("write NBD error reply", source)),
-        },
+            _queue_slot: queue_slot,
+        } => {
+            let write_result = match (kind, result) {
+                (ReplyKind::Read, Ok(ExportReply::Read { data })) => writer
+                    .write_all(&encode_read_reply(reply.cookie, &data))
+                    .await
+                    .map_err(|source| ServerError::io("write NBD read reply", source)),
+                (ReplyKind::Simple, Ok(ExportReply::Done)) => writer
+                    .write_all(&encode_simple_reply(reply.cookie, 0))
+                    .await
+                    .map_err(|source| ServerError::io("write NBD simple reply", source)),
+                _ => writer
+                    .write_all(&encode_simple_reply(reply.cookie, NBD_EINVAL))
+                    .await
+                    .map_err(|source| ServerError::io("write NBD error reply", source)),
+            };
+            drop(queue_slot);
+            write_result
+        }
         ConnectionReplyPayload::SimpleError { error } => writer
             .write_all(&encode_simple_reply(reply.cookie, error))
             .await
@@ -491,7 +495,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExportEngine, SerialExportRuntime};
+    use crate::{ExportEngine, ExportRuntime, SerialExportRuntime};
     use nbd_control_plane::{
         CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
         ExportState, Timestamp, WalSeq,
@@ -620,6 +624,52 @@ mod tests {
         assert_success_reply(&mut client, write_cookie).await;
 
         disconnect_and_join(client, server_task).await;
+    }
+
+    #[tokio::test]
+    async fn reply_write_holds_queue_slot_until_socket_write_finishes() {
+        let meta = export_meta("disk-a", 4096);
+        let engine = Arc::new(NoopEngine);
+        let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
+        let queue_slot = runtime.reserve().await.expect("reserve queue slot");
+        let reply = ConnectionReply::export_result(
+            NbdCookie::new(301),
+            ReplyKind::Read,
+            Ok(ExportReply::Read {
+                data: vec![7; 1024],
+            }),
+            queue_slot,
+        );
+        let (mut writer, mut reader) = duplex(16);
+
+        let write_task =
+            tokio::spawn(async move { write_connection_reply(&mut writer, reply).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !write_task.is_finished(),
+            "small duplex buffer should block the reply write",
+        );
+
+        let waiter_runtime = runtime.clone();
+        let waiter =
+            tokio::spawn(async move { waiter_runtime.reserve().await.expect("reserve again") });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "reply write should hold queue depth until write_all finishes",
+        );
+
+        let mut bytes = vec![0; SIMPLE_REPLY_BYTES + 1024];
+        reader
+            .read_exact(&mut bytes)
+            .await
+            .expect("drain blocked reply");
+        write_task
+            .await
+            .expect("reply write task")
+            .expect("reply write");
+        let next_slot = waiter.await.expect("reservation task");
+        drop(next_slot);
     }
 
     async fn complete_job(job: ExportJob, expected: ExportRequest, result: ExportResult) {
