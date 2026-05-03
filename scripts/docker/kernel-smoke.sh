@@ -9,6 +9,7 @@ LISTEN="127.0.0.1:${PORT}"
 ROOT="$(mktemp -d /tmp/nbd-smoke.XXXXXX)"
 CONFIG="${ROOT}/config.toml"
 CATALOG="${ROOT}/catalog.db"
+PROBE_EXPECTED="${ROOT}/probe.expected"
 MOUNT_DIR="/mnt/nbd-smoke"
 SERVER_PID=""
 DEVICE_CONNECTED=0
@@ -111,9 +112,14 @@ mkfs.ext4 -F -E nodiscard "${DEVICE}"
 mount -t ext4 "${DEVICE}" "${MOUNT_DIR}"
 MOUNT_CREATED=1
 
-printf "nbd kernel smoke\n" >"${MOUNT_DIR}/probe.txt"
+: >"${PROBE_EXPECTED}"
+for i in $(seq 1 4096); do
+    printf "nbd kernel smoke line %04d\n" "${i}" >>"${PROBE_EXPECTED}"
+done
+cp "${PROBE_EXPECTED}" "${MOUNT_DIR}/probe.txt"
 sync
-test "$(cat "${MOUNT_DIR}/probe.txt")" = "nbd kernel smoke"
+echo 3 >/proc/sys/vm/drop_caches
+cmp "${PROBE_EXPECTED}" "${MOUNT_DIR}/probe.txt"
 
 umount "${MOUNT_DIR}"
 MOUNT_CREATED=0
