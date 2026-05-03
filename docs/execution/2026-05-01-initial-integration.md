@@ -976,10 +976,9 @@ cargo test --workspace
 make docker-smoke
 ```
 
-Deferred follow-up: the long-term architecture now says logical export size
-belongs to export generations, but the implemented Prisma schema and catalog
-queries still store `size_bytes` on `exports`. The next catalog cleanup should
-move implemented size ownership to `export_generations` while preserving the
+Completed follow-up: implemented logical export size now belongs to
+`export_generations`. The Prisma schema, initial migration, and SQLite catalog
+queries source `size_bytes` from the latest generation while preserving the
 serving-facing `ExportMeta.size_bytes()` API.
 
 Not included: WAL, `ExportReadView`, durable storage engines, compaction,

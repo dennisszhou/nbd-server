@@ -127,7 +127,6 @@ Conceptual fields:
 exports
   id             text primary key
   name           text not null unique
-  size_bytes     integer not null
   block_size     integer not null
   state          text not null
   created_at     text not null
@@ -142,6 +141,7 @@ export_generations
   id                  text primary key
   export_id           text not null references exports(id)
   generation          integer not null
+  size_bytes          integer not null
   root_node_id        text null
   checkpoint_wal_seq  integer not null
   created_at          text not null
@@ -156,6 +156,7 @@ exports.state = active
 exports.deleted_at = null
 
 export_generations.generation = 0
+export_generations.size_bytes = requested size
 export_generations.root_node_id = null
 export_generations.checkpoint_wal_seq = 0
 ```
@@ -315,7 +316,8 @@ SQLite database instead of touching operator or developer catalog state.
 - `inspect_export` can return deleted exports for operator visibility.
 - `list_exports` excludes deleted exports unless requested.
 - Every export has at least one export generation.
-- `size_bytes` and `block_size` must both be greater than zero.
+- `size_bytes` belongs to export generations and must be greater than zero.
+- `block_size` belongs to exports and must be greater than zero.
 - Create initializes generation `0` to the all-zero committed state in the same
   database transaction as the export row.
 - `export_generations` rows are append-only.

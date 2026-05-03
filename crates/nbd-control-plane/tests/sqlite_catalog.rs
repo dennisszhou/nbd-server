@@ -49,6 +49,38 @@ async fn duplicate_create_fails_clearly() {
 }
 
 #[tokio::test]
+async fn latest_generation_owns_export_size() {
+    let (_runtime, catalog) = migrated_catalog().await;
+
+    let created = catalog
+        .create_export(CreateExport::new(export_name("disk-a"), 1024, 4096).unwrap())
+        .await
+        .expect("create export");
+
+    sqlx::query(
+        r#"
+        INSERT INTO export_generations (
+          id, export_id, generation, size_bytes, root_node_id,
+          checkpoint_wal_seq, created_at
+        )
+        VALUES ('generation-1', ?, 1, 2048, NULL, 0, 'later')
+        "#,
+    )
+    .bind(created.id().as_str())
+    .execute(catalog.pool())
+    .await
+    .expect("insert newer generation");
+
+    let inspected = catalog
+        .inspect_export(InspectExport::new(export_name("disk-a")))
+        .await
+        .expect("inspect export");
+
+    assert_eq!(inspected.size_bytes(), 2048);
+    assert_eq!(inspected.committed().generation(), ExportGeneration::new(1));
+}
+
+#[tokio::test]
 async fn delete_hides_export_from_load_and_default_list() {
     let (_runtime, catalog) = migrated_catalog().await;
 
@@ -117,12 +149,27 @@ async fn list_exports_orders_active_exports_by_name() {
 async fn migration_rejects_zero_sized_exports() {
     let (_runtime, catalog) = migrated_catalog().await;
 
-    let error = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO exports (
-          id, name, size_bytes, block_size, state, created_at, updated_at
+          id, name, block_size, state, created_at, updated_at
         )
-        VALUES ('export-zero', 'zero', 0, 4096, 'active', 'now', 'now')
+        VALUES ('export-zero', 'zero', 4096, 'active', 'now', 'now')
+        "#,
+    )
+    .execute(catalog.pool())
+    .await
+    .expect("insert export row");
+
+    let error = sqlx::query(
+        r#"
+        INSERT INTO export_generations (
+          id, export_id, generation, size_bytes, root_node_id,
+          checkpoint_wal_seq, created_at
+        )
+        VALUES (
+          'generation-zero', 'export-zero', 0, 0, NULL, 0, 'now'
+        )
         "#,
     )
     .execute(catalog.pool())

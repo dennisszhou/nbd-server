@@ -54,7 +54,7 @@ impl SQLiteExportCatalog {
             SELECT
               e.id,
               e.name,
-              e.size_bytes,
+              g.size_bytes,
               e.block_size,
               e.state,
               e.created_at,
@@ -64,7 +64,7 @@ impl SQLiteExportCatalog {
               g.checkpoint_wal_seq,
               g.generation
             FROM exports e
-            LEFT JOIN export_generations g
+            JOIN export_generations g
               ON g.export_id = e.id
             WHERE e.name = ?
             ORDER BY g.generation DESC
@@ -97,14 +97,13 @@ impl ExportCatalog for SQLiteExportCatalog {
         sqlx::query(
             r#"
             INSERT INTO exports (
-              id, name, size_bytes, block_size, state, created_at, updated_at
+              id, name, block_size, state, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, 'active', ?, ?)
+            VALUES (?, ?, ?, 'active', ?, ?)
             "#,
         )
         .bind(export_id.as_str())
         .bind(request.name().as_str())
-        .bind(size_bytes)
         .bind(block_size)
         .bind(now.as_str())
         .bind(now.as_str())
@@ -123,14 +122,16 @@ impl ExportCatalog for SQLiteExportCatalog {
         sqlx::query(
             r#"
             INSERT INTO export_generations (
-              id, export_id, generation, root_node_id, checkpoint_wal_seq, created_at
+              id, export_id, generation, size_bytes, root_node_id,
+              checkpoint_wal_seq, created_at
             )
-            VALUES (?, ?, ?, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, NULL, ?, ?)
             "#,
         )
         .bind(generation_id)
         .bind(export_id.as_str())
         .bind(u64_to_i64("generation", generation.get())?)
+        .bind(size_bytes)
         .bind(u64_to_i64("checkpoint_wal_seq", checkpoint_wal_seq.get())?)
         .bind(now.as_str())
         .execute(&mut *tx)
@@ -208,7 +209,7 @@ impl ExportCatalog for SQLiteExportCatalog {
             SELECT
               e.id,
               e.name,
-              e.size_bytes,
+              g.size_bytes,
               e.block_size,
               e.state,
               e.created_at,
@@ -218,7 +219,7 @@ impl ExportCatalog for SQLiteExportCatalog {
               g.checkpoint_wal_seq,
               g.generation
             FROM exports e
-            LEFT JOIN export_generations g
+            JOIN export_generations g
               ON g.export_id = e.id
              AND g.generation = (
               SELECT MAX(g2.generation)

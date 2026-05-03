@@ -6,7 +6,6 @@ datasource db {
 model Export {
   id          String             @id
   name        String             @unique
-  sizeBytes   BigInt             @map("size_bytes")
   blockSize   BigInt             @map("block_size")
   state       String
   createdAt   String             @map("created_at")
@@ -21,6 +20,7 @@ model ExportGeneration {
   id               String @id
   exportId         String @map("export_id")
   generation       BigInt
+  sizeBytes        BigInt @map("size_bytes")
   rootNodeId       String? @map("root_node_id")
   checkpointWalSeq BigInt @map("checkpoint_wal_seq")
   createdAt        String @map("created_at")
