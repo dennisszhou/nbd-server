@@ -1,0 +1,276 @@
+use crate::{Result, ServerError};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+
+/// Logical byte range protected by export admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    start: u64,
+    len: u32,
+}
+
+impl ByteRange {
+    pub fn new(start: u64, len: u32) -> Self {
+        Self { start, len }
+    }
+
+    fn end(self) -> u64 {
+        self.start.saturating_add(u64::from(self.len))
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.start < other.end() && other.start < self.end()
+    }
+}
+
+/// Operation shape used by admission to decide read/write/flush ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionOp {
+    Read(ByteRange),
+    Write(ByteRange),
+    Flush,
+}
+
+impl AdmissionOp {
+    fn conflicts(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Flush, _) | (_, Self::Flush) => true,
+            (Self::Read(_), Self::Read(_)) => false,
+            (Self::Read(left), Self::Write(right))
+            | (Self::Write(left), Self::Read(right))
+            | (Self::Write(left), Self::Write(right)) => left.overlaps(right),
+        }
+    }
+}
+
+/// Volatile accepted-order ticket for an admission request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AdmissionTicket(u64);
+
+impl AdmissionTicket {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Per-export semantic admission controller.
+#[derive(Debug, Clone, Default)]
+pub struct ExportAdmissionCtl {
+    inner: Arc<AdmissionInner>,
+}
+
+impl ExportAdmissionCtl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, op: AdmissionOp) -> Result<AdmissionWaiter> {
+        let (grant, receiver) = oneshot::channel();
+        let ticket = {
+            let mut state = self.inner.state()?;
+            let ticket = state.next_ticket();
+            state
+                .waiting
+                .push_back(WaitingAdmission { ticket, op, grant });
+            promote(&self.inner, &mut state);
+            ticket
+        };
+
+        Ok(AdmissionWaiter {
+            inner: self.inner.clone(),
+            ticket,
+            op,
+            grant: Some(receiver),
+            registered: true,
+        })
+    }
+}
+
+/// Wait handle for a registered admission request.
+#[derive(Debug)]
+pub struct AdmissionWaiter {
+    inner: Arc<AdmissionInner>,
+    ticket: AdmissionTicket,
+    op: AdmissionOp,
+    grant: Option<oneshot::Receiver<AdmissionPermit>>,
+    registered: bool,
+}
+
+impl AdmissionWaiter {
+    pub fn ticket(&self) -> AdmissionTicket {
+        self.ticket
+    }
+
+    pub fn op(&self) -> AdmissionOp {
+        self.op
+    }
+
+    pub async fn wait(mut self) -> Result<AdmissionPermit> {
+        let grant = self
+            .grant
+            .take()
+            .expect("admission waiter grant taken once");
+        match grant.await {
+            Ok(permit) => {
+                self.registered = false;
+                Ok(permit)
+            }
+            Err(_) => {
+                self.registered = false;
+                Err(ServerError::RuntimeClosed {
+                    resource: "export admission",
+                })
+            }
+        }
+    }
+}
+
+impl Drop for AdmissionWaiter {
+    fn drop(&mut self) {
+        if self.registered {
+            self.inner.cancel(self.ticket);
+        }
+    }
+}
+
+/// RAII permit for an admitted operation.
+#[derive(Debug)]
+pub struct AdmissionPermit {
+    inner: Option<Arc<AdmissionInner>>,
+    ticket: AdmissionTicket,
+    op: AdmissionOp,
+}
+
+impl AdmissionPermit {
+    fn new(inner: Arc<AdmissionInner>, ticket: AdmissionTicket, op: AdmissionOp) -> Self {
+        Self {
+            inner: Some(inner),
+            ticket,
+            op,
+        }
+    }
+
+    pub fn ticket(&self) -> AdmissionTicket {
+        self.ticket
+    }
+
+    pub fn op(&self) -> AdmissionOp {
+        self.op
+    }
+
+    fn disarm(&mut self) {
+        self.inner = None;
+    }
+}
+
+impl Drop for AdmissionPermit {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.release(self.ticket);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct AdmissionInner {
+    state: Mutex<AdmissionState>,
+}
+
+impl AdmissionInner {
+    fn cancel(self: &Arc<Self>, ticket: AdmissionTicket) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.waiting.retain(|waiter| waiter.ticket != ticket);
+        promote(self, &mut state);
+    }
+
+    fn release(self: Arc<Self>, ticket: AdmissionTicket) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.active.retain(|active| active.ticket != ticket);
+        promote(&self, &mut state);
+    }
+
+    fn state(&self) -> Result<std::sync::MutexGuard<'_, AdmissionState>> {
+        self.state.lock().map_err(|_| ServerError::LockPoisoned {
+            resource: "export admission",
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct AdmissionState {
+    next_ticket: u64,
+    waiting: VecDeque<WaitingAdmission>,
+    active: Vec<ActiveAdmission>,
+}
+
+impl AdmissionState {
+    fn next_ticket(&mut self) -> AdmissionTicket {
+        let ticket = AdmissionTicket(self.next_ticket);
+        self.next_ticket += 1;
+        ticket
+    }
+}
+
+#[derive(Debug)]
+struct WaitingAdmission {
+    ticket: AdmissionTicket,
+    op: AdmissionOp,
+    grant: oneshot::Sender<AdmissionPermit>,
+}
+
+#[derive(Debug)]
+struct ActiveAdmission {
+    ticket: AdmissionTicket,
+    op: AdmissionOp,
+}
+
+fn promote(inner: &Arc<AdmissionInner>, state: &mut AdmissionState) {
+    promote_with_inner(inner.clone(), state);
+}
+
+fn promote_with_inner(inner: Arc<AdmissionInner>, state: &mut AdmissionState) {
+    let mut index = 0;
+    while index < state.waiting.len() {
+        if !is_admissible(state, index) {
+            index += 1;
+            continue;
+        }
+
+        let waiting = state
+            .waiting
+            .remove(index)
+            .expect("waiting admission index exists");
+        if waiting.grant.is_closed() {
+            continue;
+        }
+
+        state.active.push(ActiveAdmission {
+            ticket: waiting.ticket,
+            op: waiting.op,
+        });
+        let permit = AdmissionPermit::new(inner.clone(), waiting.ticket, waiting.op);
+        if let Err(mut permit) = waiting.grant.send(permit) {
+            permit.disarm();
+            state
+                .active
+                .retain(|active| active.ticket != waiting.ticket);
+        }
+    }
+}
+
+fn is_admissible(state: &AdmissionState, index: usize) -> bool {
+    let op = state.waiting[index].op;
+    let conflicts_active = state.active.iter().any(|active| active.op.conflicts(op));
+    let conflicts_earlier_waiter = state
+        .waiting
+        .iter()
+        .take(index)
+        .any(|waiting| waiting.op.conflicts(op));
+
+    !conflicts_active && !conflicts_earlier_waiter
+}

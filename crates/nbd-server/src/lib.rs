@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod admission;
 mod connection;
 
 pub mod error;
@@ -11,6 +12,9 @@ pub mod registry;
 pub mod runtime;
 pub mod server;
 
+pub use admission::{
+    AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
+};
 pub use error::{Result, ServerError};
 pub use export::{
     CompletedExport, Export, ExportCompletion, ExportEngine, ExportEngineHandle, ExportHandle,
