@@ -125,7 +125,7 @@ impl LocalExportRegistry {
             runtime
         };
 
-        drop(runtime);
+        runtime.close().await?;
         self.active()?.remove(name);
         Ok(())
     }

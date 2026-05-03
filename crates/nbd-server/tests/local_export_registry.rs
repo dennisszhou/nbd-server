@@ -35,6 +35,10 @@ async fn registry_rejects_second_unique_owner_until_close() {
         .close(&export_name("disk-a"), &owner_a)
         .await
         .expect("close first owner");
+    assert!(matches!(
+        first_runtime.reserve().await,
+        Err(ServerError::RuntimeClosed { resource }) if resource == "serial export runtime",
+    ));
     drop(first_runtime);
 
     let second_runtime = registry
