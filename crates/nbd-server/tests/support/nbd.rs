@@ -1,0 +1,260 @@
+use nbd_config::{ConfigSource, NbdConfig};
+use nbd_control_plane::{
+    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportMeta,
+    ExportName, SQLiteExportCatalog,
+};
+use nbd_protocol::constants::{
+    IHAVEOPT_MAGIC, INIT_PASSWD, NBD_FLAG_FIXED_NEWSTYLE, NBD_FLAG_NO_ZEROES, NBD_INFO_EXPORT,
+};
+use nbd_protocol::handshake::encode_client_flags;
+use nbd_protocol::option::{
+    encode_go_request, parse_option_reply, parse_option_reply_header, OptionReply,
+    OPTION_REPLY_HEADER_BYTES,
+};
+use nbd_protocol::transmission::{
+    encode_disconnect_request, encode_read_request, parse_simple_reply, SIMPLE_REPLY_BYTES,
+};
+use nbd_protocol::wire::{NbdCookie, WireReader};
+use nbd_server::NbdServer;
+use nbd_test_support::TestRuntime;
+use std::error::Error;
+use std::net::SocketAddr;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+
+const MIGRATION: &str =
+    include_str!("../../../../prisma/migrations/20260501000000_init/migration.sql");
+
+pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EngineProfile {
+    kind: ExportEngineKind,
+}
+
+impl EngineProfile {
+    pub const MEMORY: Self = Self {
+        kind: ExportEngineKind::Memory,
+    };
+
+    pub fn kind(self) -> ExportEngineKind {
+        self.kind
+    }
+}
+
+pub struct ServerFixture {
+    runtime: TestRuntime,
+    catalog: SQLiteExportCatalog,
+    engine: EngineProfile,
+}
+
+impl ServerFixture {
+    pub async fn new(engine: EngineProfile) -> TestResult<Self> {
+        let runtime = TestRuntime::new()?;
+        let catalog = migrated_catalog(&runtime).await?;
+
+        Ok(Self {
+            runtime,
+            catalog,
+            engine,
+        })
+    }
+
+    pub async fn create_export(
+        &self,
+        name: &str,
+        size_bytes: u64,
+        block_size: u64,
+    ) -> TestResult<ExportMeta> {
+        Ok(self
+            .catalog
+            .create_export(create_export(name, size_bytes, block_size, self.engine))
+            .await?)
+    }
+
+    pub async fn delete_export(&self, name: &str) -> TestResult<()> {
+        Ok(self
+            .catalog
+            .delete_export(DeleteExport::new(export_name(name)))
+            .await?)
+    }
+
+    pub async fn start_server(&self) -> TestResult<NbdServer> {
+        Ok(NbdServer::start(load_config(&self.runtime)?).await?)
+    }
+}
+
+pub struct RawNbdConnection {
+    stream: TcpStream,
+    export_size_bytes: u64,
+    transmission_flags: u16,
+}
+
+impl RawNbdConnection {
+    pub async fn connect(addr: SocketAddr, export_name: &str) -> TestResult<Self> {
+        let mut stream = TcpStream::connect(addr).await?;
+
+        read_server_handshake(&mut stream).await?;
+        stream.write_all(&encode_client_flags(true)).await?;
+        stream
+            .write_all(&encode_go_request(export_name, &[NBD_INFO_EXPORT])?)
+            .await?;
+
+        let (export_size_bytes, transmission_flags) = read_go_replies(&mut stream).await?;
+
+        Ok(Self {
+            stream,
+            export_size_bytes,
+            transmission_flags,
+        })
+    }
+
+    pub fn export_size_bytes(&self) -> u64 {
+        self.export_size_bytes
+    }
+
+    pub fn transmission_flags(&self) -> u16 {
+        self.transmission_flags
+    }
+
+    pub async fn send_read(&mut self, cookie: NbdCookie, offset: u64, len: u32) -> TestResult<()> {
+        Ok(self
+            .stream
+            .write_all(&encode_read_request(cookie, offset, len)?)
+            .await?)
+    }
+
+    pub async fn read_successful_read(
+        &mut self,
+        expected_cookie: NbdCookie,
+        expected_len: u32,
+    ) -> TestResult<Vec<u8>> {
+        let mut header = [0; SIMPLE_REPLY_BYTES];
+        self.stream.read_exact(&mut header).await?;
+        let reply = parse_simple_reply(&header)?;
+        if reply.cookie != expected_cookie {
+            return Err(test_error(format!(
+                "expected cookie {}, got {}",
+                expected_cookie.raw(),
+                reply.cookie.raw()
+            )));
+        }
+        if reply.error != 0 {
+            return Err(test_error(format!(
+                "expected successful read, got NBD error {}",
+                reply.error
+            )));
+        }
+
+        let mut data = vec![0; expected_len as usize];
+        self.stream.read_exact(&mut data).await?;
+        Ok(data)
+    }
+
+    pub async fn disconnect(mut self, cookie: NbdCookie) -> TestResult<()> {
+        self.stream
+            .write_all(&encode_disconnect_request(cookie)?)
+            .await?;
+        Ok(self.stream.shutdown().await?)
+    }
+}
+
+pub fn export_name(name: &str) -> ExportName {
+    ExportName::new(name).expect("valid export name")
+}
+
+fn create_export(
+    name: &str,
+    size_bytes: u64,
+    block_size: u64,
+    engine: EngineProfile,
+) -> CreateExport {
+    CreateExport::new(export_name(name), size_bytes, block_size, engine.kind())
+        .expect("valid create export request")
+}
+
+async fn migrated_catalog(runtime: &TestRuntime) -> TestResult<SQLiteExportCatalog> {
+    let url = CatalogUrl::parse(runtime.catalog_url())?;
+    let catalog = SQLiteExportCatalog::connect(&url).await?;
+
+    sqlx::raw_sql(MIGRATION).execute(catalog.pool()).await?;
+
+    Ok(catalog)
+}
+
+fn load_config(runtime: &TestRuntime) -> Result<NbdConfig, nbd_config::ConfigError> {
+    NbdConfig::load(ConfigSource::ExplicitPath(
+        runtime.config_path().to_path_buf(),
+    ))
+}
+
+async fn read_server_handshake(stream: &mut TcpStream) -> TestResult<()> {
+    let mut bytes = [0; 18];
+    stream.read_exact(&mut bytes).await?;
+
+    let mut reader = WireReader::new(&bytes);
+    let init = reader.read_u64()?;
+    if init != INIT_PASSWD {
+        return Err(test_error(format!(
+            "expected NBD init magic {INIT_PASSWD}, got {init}"
+        )));
+    }
+
+    let option_magic = reader.read_u64()?;
+    if option_magic != IHAVEOPT_MAGIC {
+        return Err(test_error(format!(
+            "expected NBD option magic {IHAVEOPT_MAGIC}, got {option_magic}"
+        )));
+    }
+
+    let flags = reader.read_u16()?;
+    if flags & NBD_FLAG_FIXED_NEWSTYLE == 0 || flags & NBD_FLAG_NO_ZEROES == 0 {
+        return Err(test_error(format!("unsupported server flags {flags}")));
+    }
+
+    Ok(())
+}
+
+async fn read_go_replies(stream: &mut TcpStream) -> TestResult<(u64, u16)> {
+    let mut export_info = None;
+    loop {
+        match read_option_reply(stream).await? {
+            OptionReply::InfoExport {
+                export_size_bytes,
+                transmission_flags,
+                ..
+            } => export_info = Some((export_size_bytes, transmission_flags)),
+            OptionReply::Ack { .. } => {
+                return export_info.ok_or_else(|| test_error("NBD_REP_ACK before NBD_INFO_EXPORT"));
+            }
+            OptionReply::Error {
+                reply_type,
+                message,
+                ..
+            } => {
+                return Err(test_error(format!(
+                    "NBD_OPT_GO failed with reply type {reply_type}: {}",
+                    String::from_utf8_lossy(&message)
+                )));
+            }
+            OptionReply::Other { .. } => {}
+        }
+    }
+}
+
+async fn read_option_reply(stream: &mut TcpStream) -> TestResult<OptionReply> {
+    let mut header = [0; OPTION_REPLY_HEADER_BYTES];
+    stream.read_exact(&mut header).await?;
+    let parsed_header = parse_option_reply_header(&header)?;
+
+    let mut bytes = header.to_vec();
+    let mut payload = vec![0; parsed_header.bounded_payload_len()?];
+    stream.read_exact(&mut payload).await?;
+    bytes.extend_from_slice(&payload);
+
+    Ok(parse_option_reply(&bytes)?)
+}
+
+fn test_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
+    Box::new(std::io::Error::other(message.into()))
+}

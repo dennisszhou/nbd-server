@@ -35,10 +35,15 @@ DOCKER_RUN_WORKSPACE_NAMED = $(DOCKER_RUN_NAMED) $(DOCKER_WORKSPACE_ARGS)
 DOCKER_RUN_WORKSPACE_READONLY = $(DOCKER_RUN_BASE) $(DOCKER_WORKSPACE_READONLY_ARGS)
 DOCKER_RUN = $(DOCKER_RUN_WORKSPACE) $(DOCKER_IMAGE)
 
-.PHONY: test fmt clippy build-tools docker-build docker-test docker-shell docker-kernel-shell docker-attach docker-smoke docker-stop kernel-smoke-inner
+.PHONY: test test-protocol fmt clippy build-tools docker-build docker-test \
+	docker-shell docker-kernel-shell docker-attach docker-smoke docker-stop \
+	kernel-smoke-inner
 
 test:
 	cargo test --workspace
+
+test-protocol:
+	cargo test -p nbd-server --test tcp_integration
 
 fmt:
 	cargo fmt --all
