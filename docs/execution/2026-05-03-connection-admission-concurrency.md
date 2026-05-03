@@ -3,9 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved for implementation
+- current state: Series 1 finished; Series 2 pending approval
 Completion:
 - execution complete: no
+- completed series: Series 1
+- next series: Series 2 pending approval
 
 ## Goal
 
@@ -69,7 +71,7 @@ assertions are valid for both serial and future concurrent runtimes. The shared
 harness exposes an engine-under-test profile so the same protocol scenarios can
 run against memory now and durable later without duplicating the suite.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
