@@ -7,6 +7,7 @@ mod connection;
 pub mod error;
 pub mod export;
 pub mod memory;
+pub mod registry;
 pub mod runtime;
 pub mod server;
 
@@ -16,6 +17,7 @@ pub use export::{
     ExportResult, ReplySink,
 };
 pub use memory::{MemoryExport, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
+pub use registry::{ExportOwner, LocalExportRegistry};
 pub use runtime::{
     ExportRuntime, ExportRuntimeHandle, SerialExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY,
 };

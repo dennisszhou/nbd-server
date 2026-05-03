@@ -12,6 +12,12 @@ pub enum ServerError {
         size_bytes: u64,
         max_size_bytes: u64,
     },
+    ExportBusy {
+        name: ExportName,
+    },
+    ExportOwnerMismatch {
+        name: ExportName,
+    },
     OutOfBounds {
         operation: &'static str,
         offset: u64,
@@ -68,6 +74,10 @@ impl fmt::Display for ServerError {
                 f,
                 "export `{name}` size {size_bytes} exceeds in-memory limit {max_size_bytes}",
             ),
+            Self::ExportBusy { name } => write!(f, "export `{name}` is already active"),
+            Self::ExportOwnerMismatch { name } => {
+                write!(f, "export `{name}` is owned by a different active owner")
+            }
             Self::OutOfBounds {
                 operation,
                 offset,
