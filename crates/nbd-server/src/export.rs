@@ -1,4 +1,4 @@
-use crate::Result;
+use crate::{runtime::ExportQueueSlot, Result};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -41,18 +41,34 @@ pub type ExportEngineHandle = Arc<dyn ExportEngine>;
 
 /// Per-request reply target owned by the connection path.
 #[derive(Debug)]
-pub struct ReplySink {
-    sender: oneshot::Sender<ExportResult>,
+pub struct ExportCompletion {
+    sender: oneshot::Sender<CompletedExport>,
 }
 
-impl ReplySink {
-    pub fn oneshot() -> (Self, oneshot::Receiver<ExportResult>) {
+impl ExportCompletion {
+    pub fn oneshot() -> (Self, oneshot::Receiver<CompletedExport>) {
         let (sender, receiver) = oneshot::channel();
         (Self { sender }, receiver)
     }
 
-    pub fn send(self, result: ExportResult) {
-        let _ = self.sender.send(result);
+    pub fn complete(self, result: ExportResult, queue_slot: ExportQueueSlot) {
+        let _ = self.sender.send(CompletedExport {
+            result,
+            _queue_slot: queue_slot,
+        });
+    }
+}
+
+/// Completed export work plus the queue slot it still occupies.
+#[derive(Debug)]
+pub struct CompletedExport {
+    result: ExportResult,
+    _queue_slot: ExportQueueSlot,
+}
+
+impl CompletedExport {
+    pub fn into_parts(self) -> (ExportResult, ExportQueueSlot) {
+        (self.result, self._queue_slot)
     }
 }
 
@@ -60,20 +76,32 @@ impl ReplySink {
 #[derive(Debug)]
 pub struct ExportJob {
     request: ExportRequest,
-    reply: ReplySink,
+    completion: ExportCompletion,
+    queue_slot: ExportQueueSlot,
 }
 
 impl ExportJob {
-    pub fn new(request: ExportRequest, reply: ReplySink) -> Self {
-        Self { request, reply }
+    pub fn new(
+        request: ExportRequest,
+        completion: ExportCompletion,
+        queue_slot: ExportQueueSlot,
+    ) -> Self {
+        Self {
+            request,
+            completion,
+            queue_slot,
+        }
     }
 
-    pub fn oneshot(request: ExportRequest) -> (Self, oneshot::Receiver<ExportResult>) {
-        let (reply, receiver) = ReplySink::oneshot();
-        (Self::new(request, reply), receiver)
+    pub fn oneshot(
+        request: ExportRequest,
+        queue_slot: ExportQueueSlot,
+    ) -> (Self, oneshot::Receiver<CompletedExport>) {
+        let (completion, receiver) = ExportCompletion::oneshot();
+        (Self::new(request, completion, queue_slot), receiver)
     }
 
-    pub fn into_parts(self) -> (ExportRequest, ReplySink) {
-        (self.request, self.reply)
+    pub fn into_parts(self) -> (ExportRequest, ExportCompletion, ExportQueueSlot) {
+        (self.request, self.completion, self.queue_slot)
     }
 }

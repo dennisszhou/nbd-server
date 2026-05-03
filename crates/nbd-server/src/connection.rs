@@ -1,6 +1,6 @@
 use crate::{
-    ExportJob, ExportOwner, ExportReply, ExportRequest, ExportRuntimeHandle, LocalExportRegistry,
-    Result, ServerError,
+    CompletedExport, ExportJob, ExportOwner, ExportReply, ExportRequest, ExportRuntimeHandle,
+    LocalExportRegistry, Result, ServerError,
 };
 use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
@@ -197,43 +197,61 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
                 cookie,
                 offset,
                 length,
-            } => match execute_export(
-                &runtime,
-                ExportRequest::Read {
-                    offset,
-                    len: length,
-                },
-            )
-            .await
-            {
-                Ok(ExportReply::Read { data }) => {
-                    stream
-                        .write_all(&encode_read_reply(cookie, &data))
-                        .await
-                        .map_err(|source| ServerError::io("write NBD read reply", source))?;
+            } => {
+                match execute_export(
+                    &runtime,
+                    ExportRequest::Read {
+                        offset,
+                        len: length,
+                    },
+                )
+                .await
+                {
+                    Ok(completed) => {
+                        let (result, _queue_slot) = completed.into_parts();
+                        match result {
+                            Ok(ExportReply::Read { data }) => {
+                                stream
+                                    .write_all(&encode_read_reply(cookie, &data))
+                                    .await
+                                    .map_err(|source| {
+                                        ServerError::io("write NBD read reply", source)
+                                    })?;
+                            }
+                            Err(_) | Ok(ExportReply::Done) => {
+                                stream
+                                    .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
+                                    .await
+                                    .map_err(|source| {
+                                        ServerError::io("write NBD read error", source)
+                                    })?;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        stream
+                            .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
+                            .await
+                            .map_err(|source| ServerError::io("write NBD read error", source))?;
+                    }
                 }
-                Err(_) => {
-                    stream
-                        .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
-                        .await
-                        .map_err(|source| ServerError::io("write NBD read error", source))?;
-                }
-                Ok(ExportReply::Done) => {
-                    stream
-                        .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
-                        .await
-                        .map_err(|source| ServerError::io("write NBD read error", source))?;
-                }
-            },
+            }
             TransmissionRequest::Write {
                 cookie,
                 offset,
                 data,
             } => {
-                let error =
+                let (error, _queue_slot) =
                     match execute_export(&runtime, ExportRequest::Write { offset, data }).await {
-                        Ok(ExportReply::Done) => 0,
-                        Ok(ExportReply::Read { .. }) | Err(_) => NBD_EINVAL,
+                        Ok(completed) => {
+                            let (result, queue_slot) = completed.into_parts();
+                            let error = match result {
+                                Ok(ExportReply::Done) => 0,
+                                Ok(ExportReply::Read { .. }) | Err(_) => NBD_EINVAL,
+                            };
+                            (error, Some(queue_slot))
+                        }
+                        Err(_) => (NBD_EINVAL, None),
                     };
                 stream
                     .write_all(&encode_simple_reply(cookie, error))
@@ -241,10 +259,18 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
                     .map_err(|source| ServerError::io("write NBD write reply", source))?;
             }
             TransmissionRequest::Flush { cookie } => {
-                let error = match execute_export(&runtime, ExportRequest::Flush).await {
-                    Ok(ExportReply::Done) => 0,
-                    Ok(ExportReply::Read { .. }) | Err(_) => NBD_EINVAL,
-                };
+                let (error, _queue_slot) =
+                    match execute_export(&runtime, ExportRequest::Flush).await {
+                        Ok(completed) => {
+                            let (result, queue_slot) = completed.into_parts();
+                            let error = match result {
+                                Ok(ExportReply::Done) => 0,
+                                Ok(ExportReply::Read { .. }) | Err(_) => NBD_EINVAL,
+                            };
+                            (error, Some(queue_slot))
+                        }
+                        Err(_) => (NBD_EINVAL, None),
+                    };
                 stream
                     .write_all(&encode_simple_reply(cookie, error))
                     .await
@@ -258,10 +284,11 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
 async fn execute_export(
     runtime: &ExportRuntimeHandle,
     request: ExportRequest,
-) -> Result<ExportReply> {
-    let (job, receiver) = ExportJob::oneshot(request);
+) -> Result<CompletedExport> {
+    let queue_slot = runtime.reserve().await?;
+    let (job, receiver) = ExportJob::oneshot(request, queue_slot);
     runtime.submit(job).await?;
     receiver.await.map_err(|_| ServerError::RuntimeClosed {
         resource: "export runtime reply",
-    })?
+    })
 }

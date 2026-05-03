@@ -13,8 +13,8 @@ pub mod server;
 
 pub use error::{Result, ServerError};
 pub use export::{
-    Export, ExportEngine, ExportEngineHandle, ExportHandle, ExportJob, ExportReply, ExportRequest,
-    ExportResult, ReplySink,
+    CompletedExport, Export, ExportCompletion, ExportEngine, ExportEngineHandle, ExportHandle,
+    ExportJob, ExportReply, ExportRequest, ExportResult,
 };
 pub use memory::{MemoryExport, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
 pub use registry::{ExportOwner, LocalExportRegistry};

@@ -66,12 +66,12 @@ async fn serial_runtime_queue_slot_reservation_releases_on_drop() {
 }
 
 async fn submit(runtime: &SerialExportRuntime, request: ExportRequest) -> ExportReply {
-    let (job, receiver) = ExportJob::oneshot(request);
+    let queue_slot = runtime.reserve().await.expect("reserve queue slot");
+    let (job, receiver) = ExportJob::oneshot(request, queue_slot);
     runtime.submit(job).await.expect("submit job");
-    receiver
-        .await
-        .expect("runtime reply")
-        .expect("export reply")
+    let completed = receiver.await.expect("runtime completion");
+    let (result, _queue_slot) = completed.into_parts();
+    result.expect("export reply")
 }
 
 fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
