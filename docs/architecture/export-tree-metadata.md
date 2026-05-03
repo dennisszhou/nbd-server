@@ -38,6 +38,7 @@ The exact database can evolve, but the model should preserve these concepts:
 exports
   id
   name
+  engine_kind
   block_size
   state
   created_at

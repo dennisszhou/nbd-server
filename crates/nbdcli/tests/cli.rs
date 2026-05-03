@@ -24,12 +24,14 @@ async fn cli_creates_inspects_lists_and_deletes_exports() {
     );
     assert_success(&create);
     assert!(stdout(&create).contains("created export disk-a"));
+    assert!(stdout(&create).contains("engine=memory"));
 
     let inspect = nbdcli(&runtime, &["inspect", "disk-a", "--json"]);
     assert_success(&inspect);
     let inspected = json_stdout(&inspect);
     assert_eq!(inspected["name"], "disk-a");
     assert_eq!(inspected["state"], "active");
+    assert_eq!(inspected["engine_kind"], "memory");
     assert_eq!(inspected["committed"]["generation"], 0);
     assert!(inspected["committed"]["root_node_id"].is_null());
 
@@ -38,6 +40,7 @@ async fn cli_creates_inspects_lists_and_deletes_exports() {
     let listed = json_stdout(&list);
     assert_eq!(listed.as_array().expect("list array").len(), 1);
     assert_eq!(listed[0]["name"], "disk-a");
+    assert_eq!(listed[0]["engine_kind"], "memory");
 
     let delete = nbdcli(&runtime, &["delete", "disk-a"]);
     assert_success(&delete);

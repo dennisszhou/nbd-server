@@ -3,8 +3,8 @@
 use clap::{Parser, Subcommand};
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
-    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportMeta, ExportName, InspectExport,
-    ListExports, SQLiteExportCatalog,
+    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportMeta,
+    ExportName, InspectExport, ListExports, SQLiteExportCatalog,
 };
 use std::error::Error;
 use std::path::PathBuf;
@@ -32,6 +32,9 @@ enum Command {
 
         #[arg(long, default_value_t = DEFAULT_BLOCK_SIZE)]
         block_size: u64,
+
+        #[arg(long, default_value_t = ExportEngineKind::Memory)]
+        engine: ExportEngineKind,
     },
     List {
         #[arg(long)]
@@ -69,14 +72,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             name,
             size,
             block_size,
+            engine,
         } => {
-            let request = CreateExport::new(ExportName::new(name)?, size, block_size)?;
+            let request = CreateExport::new(ExportName::new(name)?, size, block_size, engine)?;
             let meta = catalog.create_export(request).await?;
             println!(
-                "created export {} size={} block_size={}",
+                "created export {} size={} block_size={} engine={}",
                 meta.name(),
                 meta.size_bytes(),
-                meta.block_size()
+                meta.block_size(),
+                meta.engine_kind()
             );
         }
         Command::List {
@@ -125,11 +130,12 @@ fn load_config(path: Option<PathBuf>) -> Result<NbdConfig, Box<dyn Error>> {
 fn print_export_list(exports: &[ExportMeta]) {
     for export in exports {
         println!(
-            "{}\t{}\tsize={}\tblock_size={}\tgeneration={}",
+            "{}\t{}\tsize={}\tblock_size={}\tengine={}\tgeneration={}",
             export.name(),
             export.state(),
             export.size_bytes(),
             export.block_size(),
+            export.engine_kind(),
             export.committed().generation()
         );
     }
@@ -140,6 +146,7 @@ fn print_export(export: &ExportMeta) {
     println!("state: {}", export.state());
     println!("size: {}", export.size_bytes());
     println!("block_size: {}", export.block_size());
+    println!("engine: {}", export.engine_kind());
     println!("generation: {}", export.committed().generation());
     println!(
         "checkpoint_wal_seq: {}",

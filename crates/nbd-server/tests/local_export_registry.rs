@@ -1,5 +1,7 @@
 use nbd_config::ServerConfig;
-use nbd_control_plane::{CatalogUrl, CreateExport, ExportCatalog, ExportName, SQLiteExportCatalog};
+use nbd_control_plane::{
+    CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
+};
 use nbd_server::{ExportOwner, LocalExportRegistry, ServerError, MAX_MEMORY_EXPORT_BYTES};
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
@@ -12,7 +14,7 @@ async fn registry_rejects_second_unique_owner_until_close() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 4096, 4096).unwrap())
+        .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create export");
     let registry = LocalExportRegistry::new(Arc::new(catalog), ServerConfig::default());
@@ -51,9 +53,7 @@ async fn failed_open_removes_opening_reservation() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(
-            CreateExport::new(export_name("huge"), MAX_MEMORY_EXPORT_BYTES + 1, 4096).unwrap(),
-        )
+        .create_export(create_export("huge", MAX_MEMORY_EXPORT_BYTES + 1, 4096))
         .await
         .expect("create export");
     let registry = LocalExportRegistry::new(Arc::new(catalog), ServerConfig::default());
@@ -90,4 +90,14 @@ async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
 
 fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
+}
+
+fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {
+    CreateExport::new(
+        export_name(name),
+        size_bytes,
+        block_size,
+        ExportEngineKind::Memory,
+    )
+    .expect("valid create export request")
 }

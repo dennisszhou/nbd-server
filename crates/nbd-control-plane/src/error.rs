@@ -16,6 +16,7 @@ pub enum CatalogError {
     ExportNotFound { name: ExportName },
     ExportDeleted { name: ExportName },
     InvalidExportState { state: String },
+    InvalidExportEngineKind { engine_kind: String },
     Database { message: String },
 }
 
@@ -81,6 +82,9 @@ impl fmt::Display for CatalogError {
             }
             Self::InvalidExportState { state } => {
                 write!(f, "invalid export state `{state}`")
+            }
+            Self::InvalidExportEngineKind { engine_kind } => {
+                write!(f, "invalid export engine kind `{engine_kind}`")
             }
             Self::Database { message } => f.write_str(message),
         }

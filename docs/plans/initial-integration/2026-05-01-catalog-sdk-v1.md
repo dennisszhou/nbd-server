@@ -127,6 +127,7 @@ Conceptual fields:
 exports
   id             text primary key
   name           text not null unique
+  engine_kind    text not null
   block_size     integer not null
   state          text not null
   created_at     text not null
@@ -154,6 +155,7 @@ Initial values for create are inserted transactionally:
 ```text
 exports.state = active
 exports.deleted_at = null
+exports.engine_kind = requested engine kind
 
 export_generations.generation = 0
 export_generations.size_bytes = requested size
@@ -173,6 +175,16 @@ deleted
 
 Rust should parse state into an enum at the SDK boundary.
 
+`engine_kind` should be represented as text with values:
+
+```text
+memory
+```
+
+Rust should parse engine kind into an enum at the SDK boundary. This value is
+export metadata, not process config: changing the NBD server config must not
+reinterpret an existing export's backend.
+
 The latest committed root for an export is the row with the highest
 `generation` in `export_generations`. Generation rows are append-only; future
 compaction should publish a new generation instead of mutating an existing
@@ -188,6 +200,7 @@ struct CreateExport {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
+    engine_kind: ExportEngineKind,
 }
 
 struct DeleteExport {
@@ -207,6 +220,7 @@ struct ExportMeta {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
+    engine_kind: ExportEngineKind,
     state: ExportState,
     committed: CommittedRoot,
     created_at: Timestamp,
@@ -251,7 +265,7 @@ trait ExportCatalog {
 Initial commands:
 
 ```text
-nbdcli create <name> --size <bytes> [--block-size <bytes>]
+nbdcli create <name> --size <bytes> [--block-size <bytes>] [--engine <kind>]
 nbdcli list [--include-deleted] [--json]
 nbdcli inspect <name> [--json]
 nbdcli delete <name>
@@ -261,6 +275,7 @@ Defaults:
 
 ```text
 --block-size 4096
+--engine memory
 ```
 
 Global option:
@@ -318,6 +333,7 @@ SQLite database instead of touching operator or developer catalog state.
 - Every export has at least one export generation.
 - `size_bytes` belongs to export generations and must be greater than zero.
 - `block_size` belongs to exports and must be greater than zero.
+- `engine_kind` belongs to exports and must be a known catalog value.
 - Create initializes generation `0` to the all-zero committed state in the same
   database transaction as the export row.
 - `export_generations` rows are append-only.

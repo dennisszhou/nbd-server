@@ -6,6 +6,7 @@ datasource db {
 model Export {
   id          String             @id
   name        String             @unique
+  engineKind  String             @map("engine_kind")
   blockSize   BigInt             @map("block_size")
   state       String
   createdAt   String             @map("created_at")

@@ -1,6 +1,7 @@
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
-    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportName, SQLiteExportCatalog,
+    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportName,
+    SQLiteExportCatalog,
 };
 use nbd_protocol::constants::{
     NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN,
@@ -17,7 +18,7 @@ async fn active_export_negotiates_over_tcp() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 4096, 4096).unwrap())
+        .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create export");
 
@@ -44,7 +45,7 @@ async fn client_reads_writes_flushes_and_disconnects() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 4096, 4096).unwrap())
+        .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create export");
 
@@ -72,11 +73,11 @@ async fn different_exports_have_independent_in_memory_contents() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 4096, 4096).unwrap())
+        .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create disk-a");
     catalog
-        .create_export(CreateExport::new(export_name("disk-b"), 4096, 4096).unwrap())
+        .create_export(create_export("disk-b", 4096, 4096))
         .await
         .expect("create disk-b");
 
@@ -107,7 +108,7 @@ async fn out_of_bounds_reads_return_nbd_error() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 8, 4096).unwrap())
+        .create_export(create_export("disk-a", 8, 4096))
         .await
         .expect("create export");
 
@@ -135,7 +136,7 @@ async fn missing_or_deleted_exports_fail_during_go() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("deleted"), 4096, 4096).unwrap())
+        .create_export(create_export("deleted", 4096, 4096))
         .await
         .expect("create export");
     catalog
@@ -158,7 +159,7 @@ async fn active_export_rejects_second_mounter_until_disconnect() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 4096, 4096).unwrap())
+        .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create export");
 
@@ -200,6 +201,16 @@ fn load_config(runtime: &TestRuntime) -> Result<NbdConfig, nbd_config::ConfigErr
 
 fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
+}
+
+fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {
+    CreateExport::new(
+        export_name(name),
+        size_bytes,
+        block_size,
+        ExportEngineKind::Memory,
+    )
+    .expect("valid create export request")
 }
 
 fn assert_unknown_export(result: nbd_us_client::Result<NbdClient>) {

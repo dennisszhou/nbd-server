@@ -2,8 +2,8 @@
 
 use crate::{
     CatalogError, CatalogProvider, CatalogUrl, CommittedRoot, CreateExport, DeleteExport,
-    ExportCatalog, ExportGeneration, ExportId, ExportMeta, ExportName, ExportState, InspectExport,
-    ListExports, NodeId, Result, Timestamp, WalSeq,
+    ExportCatalog, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
+    ExportState, InspectExport, ListExports, NodeId, Result, Timestamp, WalSeq,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
@@ -56,6 +56,7 @@ impl SQLiteExportCatalog {
               e.name,
               g.size_bytes,
               e.block_size,
+              e.engine_kind,
               e.state,
               e.created_at,
               e.updated_at,
@@ -97,13 +98,14 @@ impl ExportCatalog for SQLiteExportCatalog {
         sqlx::query(
             r#"
             INSERT INTO exports (
-              id, name, block_size, state, created_at, updated_at
+              id, name, engine_kind, block_size, state, created_at, updated_at
             )
-            VALUES (?, ?, ?, 'active', ?, ?)
+            VALUES (?, ?, ?, ?, 'active', ?, ?)
             "#,
         )
         .bind(export_id.as_str())
         .bind(request.name().as_str())
+        .bind(request.engine_kind().to_string())
         .bind(block_size)
         .bind(now.as_str())
         .bind(now.as_str())
@@ -145,6 +147,7 @@ impl ExportCatalog for SQLiteExportCatalog {
             request.name().clone(),
             request.size_bytes(),
             request.block_size(),
+            request.engine_kind(),
             ExportState::Active,
             CommittedRoot::empty(),
             now.clone(),
@@ -211,6 +214,7 @@ impl ExportCatalog for SQLiteExportCatalog {
               e.name,
               g.size_bytes,
               e.block_size,
+              e.engine_kind,
               e.state,
               e.created_at,
               e.updated_at,
@@ -241,6 +245,7 @@ impl ExportCatalog for SQLiteExportCatalog {
 
 fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
     let state: String = row.try_get("state").map_err(map_sqlx_error)?;
+    let engine_kind: String = row.try_get("engine_kind").map_err(map_sqlx_error)?;
     let root_node_id: Option<String> = row.try_get("root_node_id").map_err(map_sqlx_error)?;
     let deleted_at: Option<String> = row.try_get("deleted_at").map_err(map_sqlx_error)?;
 
@@ -255,6 +260,7 @@ fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
             "block_size",
             row.try_get("block_size").map_err(map_sqlx_error)?,
         )?,
+        engine_kind.parse::<ExportEngineKind>()?,
         state.parse()?,
         CommittedRoot::new(
             root_node_id.map(NodeId::new).transpose()?,

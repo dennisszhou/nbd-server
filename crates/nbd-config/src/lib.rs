@@ -38,14 +38,12 @@ pub struct RuntimeConfig {
     pub state_dir: PathBuf,
 }
 
-/// NBD server backend configuration.
+/// NBD server runtime policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default)]
     pub export_runtime: ExportRuntimeKind,
-    #[serde(default)]
-    pub export_engine: ExportEngineKind,
 }
 
 /// Export request execution policy.
@@ -54,14 +52,6 @@ pub struct ServerConfig {
 pub enum ExportRuntimeKind {
     #[default]
     Serial,
-}
-
-/// Export data backend policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ExportEngineKind {
-    #[default]
-    Memory,
 }
 
 /// Where a configuration load should read from.

@@ -27,7 +27,7 @@ Introduce a small v0 runtime model that:
 - keeps `MemoryExport` as a compatibility adapter for the current
   `ExportHandle` path until connection adoption switches to `ExportRuntime`;
 - enforces one active mounter per export for now;
-- adds config hooks for choosing export runtime and export engine.
+- adds a config hook for choosing export runtime.
 
 # Constraints
 
@@ -62,8 +62,9 @@ After this slice:
 - `ExportRuntime` owns a bounded queue and a worker task for one active export.
 - `MemoryExportEngine` is the first `ExportEngine`.
 - one active mounter per export is enforced by the local active map.
-- config can choose the v0 runtime and engine, both defaulting to serial and
-  memory behavior.
+- config can choose the v0 runtime, which defaults to serial behavior.
+- the catalog chooses the export engine through `ExportMeta.engine_kind`,
+  which defaults to memory at create time.
 
 # Proposed Approach
 
@@ -107,7 +108,8 @@ connection reply queue.
 
 This design keeps source-of-truth responsibilities narrow:
 
-- `ExportCatalog` remains durable export metadata truth.
+- `ExportCatalog` remains durable export metadata truth, including
+  `engine_kind`.
 - `LocalExportRegistry.active` is process-local active export lifecycle truth.
 - `ExportRuntime` owns accepted export jobs and execution policy for one active
   export.
@@ -118,8 +120,8 @@ This design keeps source-of-truth responsibilities narrow:
   connection path still exists.
 - `NbdConnection` owns wire state: cookies, request parsing, and reply encoding.
 
-Config selects the runtime and engine used for a newly opened export. It does
-not mutate an already active export.
+Config selects the runtime used for a newly opened export. The catalog selects
+the engine kind. Neither mutates an already active export.
 
 # Data Model / API Shape
 
@@ -130,7 +132,6 @@ Add a server config section with defaults:
 ```toml
 [server]
 export_runtime = "serial"
-export_engine = "memory"
 ```
 
 Conceptual Rust shape:
@@ -141,21 +142,17 @@ Conceptual Rust shape:
 pub struct ServerConfig {
     #[serde(default)]
     pub export_runtime: ExportRuntimeKind,
-    #[serde(default)]
-    pub export_engine: ExportEngineKind,
 }
 
 pub enum ExportRuntimeKind {
     Serial,
 }
-
-pub enum ExportEngineKind {
-    Memory,
-}
 ```
 
-Future config values can add `range_admission`, `durable`, `local_wal`, or S3
-specific engine settings without changing the connection-facing API.
+Future config values can add runtime policy such as `range_admission` or worker
+pool sizing without changing the connection-facing API. Export backend
+selection stays in the catalog so changing process config cannot reinterpret an
+existing export's data.
 
 ## Request And Reply Types
 
@@ -204,6 +201,9 @@ trait ExportEngine: Send + Sync {
 
 `MemoryExportEngine` owns the current in-memory byte vector and implements
 `ExportEngine`.
+
+`LocalExportRegistry` selects the concrete engine by matching
+`ExportMeta.engine_kind`. The only v0 kind is `memory`.
 
 During the migration, `MemoryExport` remains as the compatibility type used by
 the old `ExportHandle` path. It should delegate to `MemoryExportEngine` so

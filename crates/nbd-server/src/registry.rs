@@ -2,8 +2,8 @@ use crate::{
     ExportEngineHandle, ExportRuntimeHandle, MemoryExportEngine, Result, SerialExportRuntime,
     ServerError,
 };
-use nbd_config::{ExportEngineKind, ExportRuntimeKind, ServerConfig};
-use nbd_control_plane::{ExportCatalog, ExportName};
+use nbd_config::{ExportRuntimeKind, ServerConfig};
+use nbd_control_plane::{ExportCatalog, ExportEngineKind, ExportName};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -136,7 +136,7 @@ impl LocalExportRegistry {
             .load_export(name)
             .await
             .map_err(ServerError::catalog)?;
-        let engine: ExportEngineHandle = match self.config.export_engine {
+        let engine: ExportEngineHandle = match meta.engine_kind() {
             ExportEngineKind::Memory => Arc::new(MemoryExportEngine::new(&meta)?),
         };
         let runtime: ExportRuntimeHandle = match self.config.export_runtime {

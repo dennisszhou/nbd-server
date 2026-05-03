@@ -1,6 +1,7 @@
 use nbd_control_plane::{
-    CatalogError, CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportGeneration,
-    ExportName, ExportState, InspectExport, ListExports, SQLiteExportCatalog, WalSeq,
+    CatalogError, CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind,
+    ExportGeneration, ExportName, ExportState, InspectExport, ListExports, SQLiteExportCatalog,
+    WalSeq,
 };
 use nbd_test_support::TestRuntime;
 
@@ -12,13 +13,14 @@ async fn create_export_initializes_generation_zero() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     let created = catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 1024 * 1024, 4096).unwrap())
+        .create_export(create_export("disk-a", 1024 * 1024, 4096))
         .await
         .expect("create export");
 
     assert_eq!(created.name().as_str(), "disk-a");
     assert_eq!(created.size_bytes(), 1024 * 1024);
     assert_eq!(created.block_size(), 4096);
+    assert_eq!(created.engine_kind(), ExportEngineKind::Memory);
     assert_eq!(created.state(), ExportState::Active);
     assert!(created.committed().root_node_id().is_none());
     assert_eq!(created.committed().generation(), ExportGeneration::zero());
@@ -36,12 +38,12 @@ async fn duplicate_create_fails_clearly() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 1024, 4096).unwrap())
+        .create_export(create_export("disk-a", 1024, 4096))
         .await
         .expect("create export");
 
     let error = catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 1024, 4096).unwrap())
+        .create_export(create_export("disk-a", 1024, 4096))
         .await
         .unwrap_err();
 
@@ -53,7 +55,7 @@ async fn latest_generation_owns_export_size() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     let created = catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 1024, 4096).unwrap())
+        .create_export(create_export("disk-a", 1024, 4096))
         .await
         .expect("create export");
 
@@ -85,7 +87,7 @@ async fn delete_hides_export_from_load_and_default_list() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 1024, 4096).unwrap())
+        .create_export(create_export("disk-a", 1024, 4096))
         .await
         .expect("create export");
     catalog
@@ -126,11 +128,11 @@ async fn list_exports_orders_active_exports_by_name() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     catalog
-        .create_export(CreateExport::new(export_name("disk-b"), 1024, 4096).unwrap())
+        .create_export(create_export("disk-b", 1024, 4096))
         .await
         .expect("create disk-b");
     catalog
-        .create_export(CreateExport::new(export_name("disk-a"), 1024, 4096).unwrap())
+        .create_export(create_export("disk-a", 1024, 4096))
         .await
         .expect("create disk-a");
 
@@ -152,9 +154,9 @@ async fn migration_rejects_zero_sized_exports() {
     sqlx::query(
         r#"
         INSERT INTO exports (
-          id, name, block_size, state, created_at, updated_at
+          id, name, engine_kind, block_size, state, created_at, updated_at
         )
-        VALUES ('export-zero', 'zero', 4096, 'active', 'now', 'now')
+        VALUES ('export-zero', 'zero', 'memory', 4096, 'active', 'now', 'now')
         "#,
     )
     .execute(catalog.pool())
@@ -196,4 +198,14 @@ async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
 
 fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
+}
+
+fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {
+    CreateExport::new(
+        export_name(name),
+        size_bytes,
+        block_size,
+        ExportEngineKind::Memory,
+    )
+    .expect("valid create export request")
 }

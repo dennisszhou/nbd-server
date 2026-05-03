@@ -43,6 +43,7 @@ The catalog owns:
 exports
   id
   name
+  engine_kind
   block_size
   state
   created_at
@@ -90,6 +91,7 @@ struct ExportMeta {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
+    engine_kind: ExportEngineKind,
     state: ExportState,
     committed: CommittedRoot,
     created_at: Timestamp,
@@ -116,6 +118,7 @@ struct CreateExport {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
+    engine_kind: ExportEngineKind,
 }
 
 struct CloneExport {
@@ -196,6 +199,7 @@ checkpoint:
 insert exports row:
   state = active
   deleted_at = null
+  engine_kind = requested engine kind
 
 insert export_generations row:
   generation = 0

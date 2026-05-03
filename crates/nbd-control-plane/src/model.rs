@@ -30,6 +30,12 @@ pub enum ExportState {
     Deleted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportEngineKind {
+    Memory,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommittedRoot {
     root_node_id: Option<NodeId>,
@@ -42,6 +48,7 @@ pub struct CreateExport {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
+    engine_kind: ExportEngineKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +72,7 @@ pub struct ExportMeta {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
+    engine_kind: ExportEngineKind,
     state: ExportState,
     committed: CommittedRoot,
     created_at: Timestamp,
@@ -184,7 +192,12 @@ impl CommittedRoot {
 }
 
 impl CreateExport {
-    pub fn new(name: ExportName, size_bytes: u64, block_size: u64) -> Result<Self> {
+    pub fn new(
+        name: ExportName,
+        size_bytes: u64,
+        block_size: u64,
+        engine_kind: ExportEngineKind,
+    ) -> Result<Self> {
         validate_non_zero("size_bytes", size_bytes)?;
         validate_non_zero("block_size", block_size)?;
 
@@ -192,6 +205,7 @@ impl CreateExport {
             name,
             size_bytes,
             block_size,
+            engine_kind,
         })
     }
 
@@ -205,6 +219,10 @@ impl CreateExport {
 
     pub fn block_size(&self) -> u64 {
         self.block_size
+    }
+
+    pub fn engine_kind(&self) -> ExportEngineKind {
+        self.engine_kind
     }
 }
 
@@ -253,6 +271,7 @@ impl ExportMeta {
         name: ExportName,
         size_bytes: u64,
         block_size: u64,
+        engine_kind: ExportEngineKind,
         state: ExportState,
         committed: CommittedRoot,
         created_at: Timestamp,
@@ -267,6 +286,7 @@ impl ExportMeta {
             name,
             size_bytes,
             block_size,
+            engine_kind,
             state,
             committed,
             created_at,
@@ -289,6 +309,10 @@ impl ExportMeta {
 
     pub fn block_size(&self) -> u64 {
         self.block_size
+    }
+
+    pub fn engine_kind(&self) -> ExportEngineKind {
+        self.engine_kind
     }
 
     pub fn state(&self) -> ExportState {
@@ -326,6 +350,19 @@ impl FromStr for ExportState {
     }
 }
 
+impl FromStr for ExportEngineKind {
+    type Err = CatalogError;
+
+    fn from_str(engine_kind: &str) -> Result<Self> {
+        match engine_kind {
+            "memory" => Ok(Self::Memory),
+            engine_kind => Err(CatalogError::InvalidExportEngineKind {
+                engine_kind: engine_kind.to_owned(),
+            }),
+        }
+    }
+}
+
 impl fmt::Display for ExportId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -355,6 +392,14 @@ impl fmt::Display for ExportState {
         match self {
             Self::Active => f.write_str("active"),
             Self::Deleted => f.write_str("deleted"),
+        }
+    }
+}
+
+impl fmt::Display for ExportEngineKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory => f.write_str("memory"),
         }
     }
 }

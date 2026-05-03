@@ -1,6 +1,6 @@
 use nbd_control_plane::{
-    CommittedRoot, ExportGeneration, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
-    WalSeq,
+    CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
+    ExportState, Timestamp, WalSeq,
 };
 use nbd_server::{
     ExportJob, ExportReply, ExportRequest, ExportRuntime, MemoryExportEngine, SerialExportRuntime,
@@ -58,6 +58,7 @@ fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
         ExportName::new(name).expect("export name"),
         size_bytes,
         4096,
+        ExportEngineKind::Memory,
         ExportState::Active,
         CommittedRoot::new(None, WalSeq::zero(), ExportGeneration::zero()),
         Timestamp::new("created").expect("created timestamp"),

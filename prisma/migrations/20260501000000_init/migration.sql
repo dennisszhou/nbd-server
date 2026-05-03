@@ -1,6 +1,7 @@
 CREATE TABLE "exports" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "name" TEXT NOT NULL,
+    "engine_kind" TEXT NOT NULL CHECK ("engine_kind" IN ('memory')),
     "block_size" INTEGER NOT NULL,
     "state" TEXT NOT NULL CHECK ("state" IN ('active', 'deleted')),
     "created_at" TEXT NOT NULL,
