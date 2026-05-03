@@ -18,6 +18,7 @@ use nbd_protocol::transmission::{
 use nbd_protocol::wire::{NbdCookie, WireReader};
 use nbd_server::NbdServer;
 use nbd_test_support::TestRuntime;
+use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -89,6 +90,39 @@ pub struct RawNbdConnection {
     stream: TcpStream,
     export_size_bytes: u64,
     transmission_flags: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawNbdReply {
+    Simple(SimpleReply),
+    Read {
+        cookie: NbdCookie,
+        error: u32,
+        data: Vec<u8>,
+    },
+}
+
+impl RawNbdReply {
+    pub fn cookie(&self) -> NbdCookie {
+        match self {
+            Self::Simple(reply) => reply.cookie,
+            Self::Read { cookie, .. } => *cookie,
+        }
+    }
+
+    pub fn error(&self) -> u32 {
+        match self {
+            Self::Simple(reply) => reply.error,
+            Self::Read { error, .. } => *error,
+        }
+    }
+
+    pub fn read_data(&self) -> Option<&[u8]> {
+        match self {
+            Self::Read { data, .. } => Some(data),
+            Self::Simple(_) => None,
+        }
+    }
 }
 
 impl RawNbdConnection {
@@ -172,22 +206,55 @@ impl RawNbdConnection {
         Ok(reply)
     }
 
+    pub async fn read_reply(
+        &mut self,
+        read_lengths: &HashMap<NbdCookie, u32>,
+    ) -> TestResult<RawNbdReply> {
+        let mut header = [0; SIMPLE_REPLY_BYTES];
+        self.stream.read_exact(&mut header).await?;
+        let reply = parse_simple_reply(&header)?;
+
+        if reply.error == 0 {
+            if let Some(length) = read_lengths.get(&reply.cookie) {
+                let mut data = vec![0; *length as usize];
+                self.stream.read_exact(&mut data).await?;
+                return Ok(RawNbdReply::Read {
+                    cookie: reply.cookie,
+                    error: reply.error,
+                    data,
+                });
+            }
+        }
+
+        Ok(RawNbdReply::Simple(reply))
+    }
+
     pub async fn read_successful_read(
         &mut self,
         expected_cookie: NbdCookie,
         expected_len: u32,
     ) -> TestResult<Vec<u8>> {
-        let reply = self.read_simple_reply(expected_cookie).await?;
-        if reply.error != 0 {
+        let mut read_lengths = HashMap::new();
+        read_lengths.insert(expected_cookie, expected_len);
+        let reply = self.read_reply(&read_lengths).await?;
+        if reply.cookie() != expected_cookie {
+            return Err(test_error(format!(
+                "expected cookie {}, got {}",
+                expected_cookie.raw(),
+                reply.cookie().raw()
+            )));
+        }
+        if reply.error() != 0 {
             return Err(test_error(format!(
                 "expected successful read, got NBD error {}",
-                reply.error
+                reply.error()
             )));
         }
 
-        let mut data = vec![0; expected_len as usize];
-        self.stream.read_exact(&mut data).await?;
-        Ok(data)
+        reply
+            .read_data()
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| test_error("expected read payload"))
     }
 
     pub async fn disconnect(mut self, cookie: NbdCookie) -> TestResult<()> {

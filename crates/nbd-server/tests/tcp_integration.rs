@@ -7,7 +7,10 @@ use nbd_protocol::constants::{
 use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode};
 use nbd_protocol::{OptionReply, RequestHeader};
 use nbd_us_client::{ClientError, NbdClient};
-use support::nbd::{EngineProfile, RawNbdConnection, RawNbdOptionClient, ServerFixture};
+use std::collections::HashMap;
+use support::nbd::{
+    EngineProfile, RawNbdConnection, RawNbdOptionClient, RawNbdReply, ServerFixture,
+};
 
 #[tokio::test]
 async fn active_export_negotiates_over_tcp() {
@@ -443,6 +446,199 @@ async fn malformed_write_payload_eof_releases_active_export() {
     server.shutdown().await.expect("shutdown server");
 }
 
+#[tokio::test]
+async fn pipelined_read_write_read_visibility_allows_independent_read() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let first_read = NbdCookie::new(400);
+    let write = NbdCookie::new(401);
+    let second_read = NbdCookie::new(402);
+    let independent_read = NbdCookie::new(403);
+
+    client
+        .send_read(first_read, 0, 4)
+        .await
+        .expect("send first read");
+    client
+        .send_write(write, 0, b"aaaa")
+        .await
+        .expect("send write");
+    client
+        .send_read(second_read, 0, 4)
+        .await
+        .expect("send second read");
+    client
+        .send_read(independent_read, 4, 4)
+        .await
+        .expect("send independent read");
+
+    let replies = collect_replies(
+        &mut client,
+        &[(first_read, 4), (second_read, 4), (independent_read, 4)],
+        4,
+    )
+    .await;
+    assert_read_data(&replies, first_read, &[0; 4]);
+    assert_simple_success(&replies, write);
+    assert_read_data(&replies, second_read, b"aaaa");
+    assert_read_data(&replies, independent_read, &[0; 4]);
+
+    client
+        .disconnect(NbdCookie::new(404))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn pipelined_independent_read_between_write_and_conflicting_read() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let first_read = NbdCookie::new(410);
+    let write = NbdCookie::new(411);
+    let independent_read = NbdCookie::new(412);
+    let conflicting_read = NbdCookie::new(413);
+
+    client
+        .send_read(first_read, 0, 4)
+        .await
+        .expect("send first read");
+    client
+        .send_write(write, 0, b"bbbb")
+        .await
+        .expect("send write");
+    client
+        .send_read(independent_read, 4, 4)
+        .await
+        .expect("send independent read");
+    client
+        .send_read(conflicting_read, 0, 4)
+        .await
+        .expect("send conflicting read");
+
+    let replies = collect_replies(
+        &mut client,
+        &[
+            (first_read, 4),
+            (independent_read, 4),
+            (conflicting_read, 4),
+        ],
+        4,
+    )
+    .await;
+    assert_read_data(&replies, first_read, &[0; 4]);
+    assert_simple_success(&replies, write);
+    assert_read_data(&replies, independent_read, &[0; 4]);
+    assert_read_data(&replies, conflicting_read, b"bbbb");
+
+    client
+        .disconnect(NbdCookie::new(414))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn pipelined_overlapping_writes_are_visible_to_later_read() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let first_write = NbdCookie::new(420);
+    let second_write = NbdCookie::new(421);
+    let read = NbdCookie::new(422);
+
+    client
+        .send_write(first_write, 0, b"cccc")
+        .await
+        .expect("send first write");
+    client
+        .send_write(second_write, 0, b"dddd")
+        .await
+        .expect("send second write");
+    client.send_read(read, 0, 4).await.expect("send read");
+
+    let replies = collect_replies(&mut client, &[(read, 4)], 3).await;
+    assert_simple_success(&replies, first_write);
+    assert_simple_success(&replies, second_write);
+    assert_read_data(&replies, read, b"dddd");
+
+    client
+        .disconnect(NbdCookie::new(423))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn pipelined_flush_preserves_prior_write_visibility() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let write = NbdCookie::new(430);
+    let flush = NbdCookie::new(431);
+    let read = NbdCookie::new(432);
+
+    client
+        .send_write(write, 0, b"eeee")
+        .await
+        .expect("send write");
+    client.send_flush(flush).await.expect("send flush");
+    client.send_read(read, 0, 4).await.expect("send read");
+
+    let replies = collect_replies(&mut client, &[(read, 4)], 3).await;
+    assert_simple_success(&replies, write);
+    assert_simple_success(&replies, flush);
+    assert_read_data(&replies, read, b"eeee");
+
+    client
+        .disconnect(NbdCookie::new(433))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
 fn assert_unknown_export(result: nbd_us_client::Result<NbdClient>) {
     assert!(matches!(
         result,
@@ -461,6 +657,53 @@ fn assert_policy_error(result: nbd_us_client::Result<NbdClient>) {
             ..
         }),
     ));
+}
+
+async fn collect_replies(
+    client: &mut RawNbdConnection,
+    read_lengths: &[(NbdCookie, u32)],
+    count: usize,
+) -> HashMap<NbdCookie, RawNbdReply> {
+    let read_lengths = read_lengths.iter().copied().collect::<HashMap<_, _>>();
+    let mut replies = HashMap::new();
+    for _ in 0..count {
+        let reply = client
+            .read_reply(&read_lengths)
+            .await
+            .expect("read pipelined reply");
+        let cookie = reply.cookie();
+        assert!(
+            replies.insert(cookie, reply).is_none(),
+            "duplicate reply for cookie {}",
+            cookie.raw()
+        );
+    }
+    replies
+}
+
+fn assert_simple_success(replies: &HashMap<NbdCookie, RawNbdReply>, cookie: NbdCookie) {
+    let reply = replies
+        .get(&cookie)
+        .unwrap_or_else(|| panic!("missing reply for cookie {}", cookie.raw()));
+    assert_eq!(reply.error(), 0);
+    assert!(
+        reply.read_data().is_none(),
+        "expected simple reply for cookie {}",
+        cookie.raw()
+    );
+}
+
+fn assert_read_data(replies: &HashMap<NbdCookie, RawNbdReply>, cookie: NbdCookie, expected: &[u8]) {
+    let reply = replies
+        .get(&cookie)
+        .unwrap_or_else(|| panic!("missing reply for cookie {}", cookie.raw()));
+    assert_eq!(reply.error(), 0);
+    assert_eq!(
+        reply.read_data(),
+        Some(expected),
+        "read payload mismatch for cookie {}",
+        cookie.raw()
+    );
 }
 
 fn assert_option_ack(reply: OptionReply, expected_option: NbdOptionCode) {
