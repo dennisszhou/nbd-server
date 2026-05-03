@@ -1,6 +1,7 @@
+use crate::export::ExportCompletionSink;
 use crate::{
-    ExportCompletion, ExportJob, ExportOwner, ExportQueueSlot, ExportReply, ExportRequest,
-    ExportResult, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
+    CompletedExport, ExportCompletion, ExportJob, ExportOwner, ExportQueueSlot, ExportReply,
+    ExportRequest, ExportResult, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
     DEFAULT_EXPORT_QUEUE_CAPACITY,
 };
 use nbd_control_plane::ExportName;
@@ -64,6 +65,13 @@ enum ConnectionReplyPayload {
     },
 }
 
+#[derive(Debug)]
+struct ConnectionExportCompletion {
+    cookie: NbdCookie,
+    kind: ReplyKind,
+    replies: mpsc::Sender<ConnectionReply>,
+}
+
 impl ConnectionReply {
     pub(crate) fn export_result(
         cookie: NbdCookie,
@@ -86,6 +94,25 @@ impl ConnectionReply {
             cookie,
             payload: ConnectionReplyPayload::SimpleError { error },
         }
+    }
+}
+
+impl ConnectionExportCompletion {
+    fn new(cookie: NbdCookie, kind: ReplyKind, replies: mpsc::Sender<ConnectionReply>) -> Self {
+        Self {
+            cookie,
+            kind,
+            replies,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExportCompletionSink for ConnectionExportCompletion {
+    async fn complete(self: Box<Self>, completed: CompletedExport) {
+        let (result, queue_slot) = completed.into_parts();
+        let reply = ConnectionReply::export_result(self.cookie, self.kind, result, queue_slot);
+        let _ = self.replies.send(reply).await;
     }
 }
 
@@ -355,7 +382,11 @@ where
             }
         };
 
-        let completion = ExportCompletion::connection(cookie, kind, replies.clone());
+        let completion = ExportCompletion::sink(ConnectionExportCompletion::new(
+            cookie,
+            kind,
+            replies.clone(),
+        ));
         let job = ExportJob::new(request, completion, queue_slot);
         if let Err(error) = runtime.submit(job).await {
             return RequestReaderExit::drain(

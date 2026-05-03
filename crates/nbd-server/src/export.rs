@@ -1,11 +1,7 @@
-use crate::{
-    connection::{ConnectionReply, ReplyKind},
-    runtime::ExportQueueSlot,
-    Result,
-};
-use nbd_protocol::wire::NbdCookie;
+use crate::{runtime::ExportQueueSlot, Result};
+use std::fmt;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 /// Byte-oriented export boundary used by protocol handling.
 #[async_trait::async_trait]
@@ -44,23 +40,19 @@ pub trait ExportEngine: Send + Sync {
 
 pub type ExportEngineHandle = Arc<dyn ExportEngine>;
 
+#[async_trait::async_trait]
+pub(crate) trait ExportCompletionSink: Send {
+    async fn complete(self: Box<Self>, completed: CompletedExport);
+}
+
 /// Per-request reply target owned by the connection path.
-#[derive(Debug)]
 pub struct ExportCompletion {
     target: ExportCompletionTarget,
 }
 
-#[derive(Debug)]
 enum ExportCompletionTarget {
     OneShot(oneshot::Sender<CompletedExport>),
-    Connection(ConnectionExportCompletion),
-}
-
-#[derive(Debug)]
-struct ConnectionExportCompletion {
-    cookie: NbdCookie,
-    kind: ReplyKind,
-    replies: mpsc::Sender<ConnectionReply>,
+    Sink(Box<dyn ExportCompletionSink>),
 }
 
 impl ExportCompletion {
@@ -74,37 +66,39 @@ impl ExportCompletion {
         )
     }
 
-    pub(crate) fn connection(
-        cookie: NbdCookie,
-        kind: ReplyKind,
-        replies: mpsc::Sender<ConnectionReply>,
-    ) -> Self {
+    pub(crate) fn sink(sink: impl ExportCompletionSink + 'static) -> Self {
         Self {
-            target: ExportCompletionTarget::Connection(ConnectionExportCompletion {
-                cookie,
-                kind,
-                replies,
-            }),
+            target: ExportCompletionTarget::Sink(Box::new(sink)),
         }
     }
 
     pub async fn complete(self, result: ExportResult, queue_slot: ExportQueueSlot) {
+        let completed = CompletedExport {
+            result,
+            _queue_slot: queue_slot,
+        };
         match self.target {
             ExportCompletionTarget::OneShot(sender) => {
-                let _ = sender.send(CompletedExport {
-                    result,
-                    _queue_slot: queue_slot,
-                });
+                let _ = sender.send(completed);
             }
-            ExportCompletionTarget::Connection(completion) => {
-                let reply = ConnectionReply::export_result(
-                    completion.cookie,
-                    completion.kind,
-                    result,
-                    queue_slot,
-                );
-                let _ = completion.replies.send(reply).await;
-            }
+            ExportCompletionTarget::Sink(sink) => sink.complete(completed).await,
+        }
+    }
+}
+
+impl fmt::Debug for ExportCompletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExportCompletion")
+            .field("target", &self.target.kind())
+            .finish()
+    }
+}
+
+impl ExportCompletionTarget {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::OneShot(_) => "oneshot",
+            Self::Sink(_) => "sink",
         }
     }
 }
@@ -160,7 +154,6 @@ impl ExportJob {
 mod tests {
     use super::*;
     use crate::{
-        connection::{ConnectionReply, ReplyKind},
         memory::MemoryExportEngine,
         runtime::{ExportRuntime, SerialExportRuntime},
     };
@@ -168,6 +161,7 @@ mod tests {
         CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
         ExportState, Timestamp, WalSeq,
     };
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn connection_completion_holds_slot_until_reply_drop() {
@@ -177,7 +171,7 @@ mod tests {
         let queue_slot = runtime.reserve().await.expect("reserve queue slot");
         let (sender, mut receiver) = mpsc::channel(1);
 
-        ExportCompletion::connection(NbdCookie::new(7), ReplyKind::Simple, sender)
+        ExportCompletion::sink(TestCompletionSink { sender })
             .complete(Ok(ExportReply::Done), queue_slot)
             .await;
 
@@ -212,17 +206,16 @@ mod tests {
         let (sender, mut receiver) = mpsc::channel(1);
 
         sender
-            .send(ConnectionReply::export_result(
-                NbdCookie::new(10),
-                ReplyKind::Simple,
-                Ok(ExportReply::Done),
-                queued_slot,
-            ))
+            .send(CompletedExport {
+                result: Ok(ExportReply::Done),
+                _queue_slot: queued_slot,
+            })
             .await
             .expect("fill reply queue");
 
-        let completion =
-            ExportCompletion::connection(NbdCookie::new(11), ReplyKind::Simple, sender.clone());
+        let completion = ExportCompletion::sink(TestCompletionSink {
+            sender: sender.clone(),
+        });
         let complete_task = tokio::spawn(async move {
             completion
                 .complete(Ok(ExportReply::Done), pending_slot)
@@ -271,5 +264,16 @@ mod tests {
             None,
         )
         .expect("export meta")
+    }
+
+    struct TestCompletionSink {
+        sender: mpsc::Sender<CompletedExport>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExportCompletionSink for TestCompletionSink {
+        async fn complete(self: Box<Self>, completed: CompletedExport) {
+            let _ = self.sender.send(completed).await;
+        }
     }
 }
