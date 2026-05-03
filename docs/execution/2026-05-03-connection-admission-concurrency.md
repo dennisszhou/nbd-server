@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 1 finished; Series 2 pending approval
+- current state: Series 2 approved
 Completion:
 - execution complete: no
 - completed series: Series 1
-- next series: Series 2 pending approval
+- next series: Series 2 in progress
 
 ## Goal
 
@@ -269,7 +269,7 @@ prove accepted-order conflicts, flush barriers, cancellation cleanup, and
 no-lost-wake behavior. The Series 1 protocol integration suite continues to
 pass.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
@@ -277,13 +277,176 @@ Verification plan:
 cargo test -p nbd-server --test export_runtime
 cargo test -p nbd-server admission
 cargo test -p nbd-server --test local_export_registry
-cargo test -p nbd-server --test tcp_integration
+make test-protocol
 cargo fmt --all --check
 ```
 
 Not included: connection reader/writer split, connection reply queues,
 `ConcurrentExportRuntime`, memory-engine atomic storage, multi-thread Tokio
 runtime wiring, userspace concurrent smoke, or Docker smoke.
+
+Commit 1/5: docs/execution: plan runtime API series
+
+  Type:             docs
+  Required:         yes
+  Summary:          Record the approved Series 2 commit contract for live
+                    export queue slots, export completions, serial runtime
+                    close/drain behavior, and the admission primitive.
+  Invariant focus:  Series 2 scope is explicit before concurrency-facing
+                    runtime API changes start.
+  Test level:       none
+  Review gate:      structures
+  Files:            docs/execution/2026-05-03-connection-admission-concurrency.md
+  Preconditions:    Series 1 is finished and the overall execution doc remains
+                    approved.
+  Postconditions:   The current execution artifact constrains the Series 2
+                    implementation stack and keeps Series 3/4 work out of
+                    scope.
+  Verify:           git diff --cached --check
+  Risks:            Low; this is execution planning only. It must not be
+                    mistaken for implementation approval.
+  Not included:     Runtime, admission, connection, or memory-engine code.
+  Depends on:       Series 1
+
+Commit 2/5: runtime: reserve export queue slots
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ExportQueueSlot`, extend `ExportRuntime` with
+                    `reserve`, and make `SerialExportRuntime` provide bounded
+                    per-export queue-depth capacity through that API.
+  Invariant focus:  Export queue depth is a runtime-owned reservation contract,
+                    separate from admission and engine execution.
+  Test level:       unit
+  Review gate:      structures
+  Files:            crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/tests/export_runtime.rs
+  Preconditions:    Commit 1 has landed the Series 2 execution contract.
+  Postconditions:   Callers can reserve and drop queue slots explicitly; a
+                    dropped slot releases capacity; queue-depth exhaustion
+                    backpressures later reservations; the serial runtime still
+                    executes existing jobs one at a time.
+  Verify:           cargo test -p nbd-server --test export_runtime
+  Risks:            The slot API must not conflate queue-depth permits with
+                    admission permits or with the serial worker's internal
+                    execution order.
+  Not included:     Carrying slots through job completion, connection reply
+                    queues, admission, close/drain, or concurrent execution.
+  Depends on:       1
+
+Commit 3/5: export: complete jobs with queue slots
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Replace the one-shot-only `ReplySink` with
+                    `ExportCompletion`, make `ExportJob` carry an
+                    `ExportQueueSlot`, and return a completed export envelope
+                    that keeps the slot alive through the current serial wire
+                    reply path.
+  Invariant focus:  Accepted jobs own queue-depth slots until the request has a
+                    completion owner; the export runtime and engine still do
+                    not know about NBD cookies or socket writes.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/export.rs
+                    crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/src/connection.rs
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/tests/export_runtime.rs
+                    crates/nbd-server/tests/tcp_integration.rs
+  Preconditions:    Commit 2 has introduced live runtime queue-slot
+                    reservation.
+  Postconditions:   Current connection handling reserves a slot before
+                    submission, builds jobs with that slot, receives exactly
+                    one completion result per accepted job, and drops the slot
+                    only after the existing sequential reply write completes
+                    or the reply result is dropped. The completion target is
+                    one-shot only in this series.
+  Verify:           cargo test -p nbd-server --test export_runtime
+                    make test-protocol
+  Risks:            This touches the protocol execution path without yet
+                    splitting reader and writer tasks, so the change must
+                    preserve all Series 1 wire behavior.
+  Not included:     `ConnectionReply`, bounded per-connection reply queues,
+                    connection completion targets, admission, close/drain, or
+                    concurrent execution.
+  Depends on:       2
+
+Commit 4/5: runtime: drain serial runtime on close
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ExportRuntime.close`, make the serial runtime reject
+                    new reservations/submissions after close starts, track
+                    accepted jobs until completion handoff, and have
+                    `LocalExportRegistry.close` await that drain before
+                    removing the active export record.
+  Invariant focus:  Local export close does not remove the active runtime while
+                    accepted serial jobs can still mutate the engine.
+  Test level:       functional
+  Review gate:      structures
+  Files:            crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/src/registry.rs
+                    crates/nbd-server/src/error.rs
+                    crates/nbd-server/tests/export_runtime.rs
+                    crates/nbd-server/tests/local_export_registry.rs
+  Preconditions:    Commit 3 has made accepted jobs and completion handoff
+                    explicit.
+  Postconditions:   Closing a local export transitions the runtime into a
+                    closed state, later reservations and submissions fail with
+                    `RuntimeClosed`, accepted jobs are allowed to hand off
+                    exactly one completion, and registry removal happens only
+                    after the runtime drain completes.
+  Verify:           cargo test -p nbd-server --test export_runtime
+                    cargo test -p nbd-server --test local_export_registry
+                    make test-protocol
+  Risks:            Close must not hold the registry mutex while waiting for
+                    runtime drain, and runtime drain must account for every
+                    accepted job on success, failure, and dropped-completion
+                    paths.
+  Not included:     Connection task join order, connection reply queue drain,
+                    canceling in-flight connection replies, admission, or
+                    concurrent runtime task tracking.
+  Depends on:       3
+
+Commit 5/5: admission: add export admission control
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ExportAdmissionCtl` with accepted-order
+                    read/write/flush permits, RAII permit release, waiter
+                    cancellation cleanup, and state-based promotion tests.
+  Invariant focus:  Admission order is assigned at registration, compatible
+                    work can be admitted concurrently, conflicting work cannot
+                    pass earlier conflicting waiters, and waiter grants cannot
+                    be lost.
+  Test level:       unit
+  Review gate:      structures
+  Files:            crates/nbd-server/src/admission.rs (new)
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/tests/admission.rs (new)
+  Preconditions:    Commit 4 has established the runtime lifecycle foundation
+                    that will later own admission.
+  Postconditions:   Admission tests prove read/write conflicts,
+                    non-overlapping compatibility, later reads waiting behind
+                    earlier writes, flush barriers, waiter cancellation, permit
+                    drop wakeups, and the read-registering-while-write-releases
+                    no-lost-wake case.
+  Verify:           cargo test -p nbd-server admission
+                    cargo test -p nbd-server --test export_runtime
+                    cargo test -p nbd-server --test local_export_registry
+                    make test-protocol
+                    cargo fmt --all --check
+  Risks:            The O(n) queue must preserve accepted-order conflict
+                    semantics without becoming strict FIFO for non-conflicting
+                    ranges, and cancellation must not leave inert waiters that
+                    block later work.
+  Not included:     Wiring admission into `SerialExportRuntime`,
+                    `ConcurrentExportRuntime`, memory-engine atomic storage,
+                    resize admission, WAL ordering, or durable-engine read
+                    views.
+  Depends on:       4
 
 ## Series 3: Connection Runtime Split
 
