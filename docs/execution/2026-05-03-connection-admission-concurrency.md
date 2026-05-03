@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 2 finished; Series 3 approved for implementation
+- current state: Series 3 finished; Series 4 pending review
 Completion:
 - execution complete: no
-- completed series: Series 1, Series 2
-- next series: Series 3 in progress
+- completed series: Series 1, Series 2, Series 3
+- next series: Series 4 pending review
 
 ## Goal
 
@@ -470,19 +470,26 @@ disconnect cleanup while the export runtime remains serial by default. The
 Series 1 protocol integration suite continues to pass without weakening
 coverage.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
 ```text
 make test-protocol
 cargo test -p nbd-server connection_runtime
+cargo test -p nbd-server connection::tests
 cargo test -p nbd-server --test export_runtime
 cargo fmt --all --check
 ```
 
 Not included: `ConcurrentExportRuntime`, admitted memory-engine storage,
 multi-thread Tokio runtime wiring, or concurrent-runtime smoke.
+
+Closeout notes: review follow-up landed an explicit queue-slot lifetime fix for
+socket writes and a cleanup that keeps connection-specific completion sinks out
+of `export.rs`. `ExportCompletion` now targets an opaque completion sink;
+`ConnectionRuntime` owns the sink that carries NBD cookies, reply kind, and the
+bounded reply queue.
 
 Commit 1/5: docs/execution: plan connection runtime series
 
