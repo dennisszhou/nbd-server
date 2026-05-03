@@ -39,7 +39,7 @@ pub struct RuntimeConfig {
 }
 
 /// NBD server backend configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default)]
@@ -48,39 +48,20 @@ pub struct ServerConfig {
     pub export_engine: ExportEngineKind,
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            export_runtime: ExportRuntimeKind::Serial,
-            export_engine: ExportEngineKind::Memory,
-        }
-    }
-}
-
 /// Export request execution policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportRuntimeKind {
+    #[default]
     Serial,
 }
 
-impl Default for ExportRuntimeKind {
-    fn default() -> Self {
-        Self::Serial
-    }
-}
-
 /// Export data backend policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportEngineKind {
+    #[default]
     Memory,
-}
-
-impl Default for ExportEngineKind {
-    fn default() -> Self {
-        Self::Memory
-    }
 }
 
 /// Where a configuration load should read from.
