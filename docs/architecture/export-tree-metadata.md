@@ -38,7 +38,6 @@ The exact database can evolve, but the model should preserve these concepts:
 exports
   id
   name
-  size_bytes
   block_size
   state
   created_at
@@ -51,6 +50,7 @@ export_generations
   generation
   root_node_id
   checkpoint_wal_seq
+  size_bytes
   created_at
 
   unique(export_id, generation)
@@ -159,12 +159,14 @@ The identifying tuple for a committed export view is:
 root_node_id
 checkpoint_wal_seq
 generation
+size_bytes
 ```
 
 `root_node_id` identifies the immutable tree root. `checkpoint_wal_seq`
 identifies which prefix of the export's WAL is represented by that root.
 `generation` identifies the committed-root version used for ordering and
-debugging.
+debugging. `size_bytes` identifies the logical device size for that committed
+serving view.
 
 The prototype may keep all old roots and blobs. Future GC can add root history,
 pinning, and retention policy.

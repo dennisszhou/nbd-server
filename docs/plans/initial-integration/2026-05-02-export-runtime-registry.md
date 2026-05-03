@@ -222,6 +222,8 @@ struct ExportJob {
 
 #[async_trait::async_trait]
 trait ExportRuntime: Send + Sync {
+    fn export_meta(&self) -> ExportMeta;
+
     async fn submit(&self, job: ExportJob) -> Result<()>;
 }
 ```
@@ -230,6 +232,7 @@ The v0 implementation is a serial runtime:
 
 ```text
 SerialExportRuntime
+  open-time ExportMeta snapshot
   bounded mpsc queue
   one worker task
   optional no-op admission point
@@ -247,6 +250,11 @@ recv ExportJob
 
 The connection sees only `submit`. It never calls `MemoryExportEngine` and does
 not own export scheduling.
+
+`ExportRuntime.export_meta` exposes the metadata snapshot opened by the runtime.
+The NBD option path uses that snapshot to send `NBD_INFO_EXPORT` without
+loading catalog metadata directly. Future resize support should treat this as a
+generation-backed serving snapshot, not freely mutable metadata.
 
 ## Local Export Registry
 
@@ -328,6 +336,9 @@ open(name, owner)
 `NbdServer` can still construct the current `SQLiteExportCatalog` from
 `CatalogUrl`, but `LocalExportRegistry` should depend on the `ExportCatalog`
 trait so a future Postgres catalog does not change the registry API.
+
+The runtime owns the opened `ExportMeta` snapshot. `LocalExportRegistry` does
+not hold a separate metadata copy.
 
 Close flow:
 

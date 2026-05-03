@@ -43,7 +43,6 @@ The catalog owns:
 exports
   id
   name
-  size_bytes
   block_size
   state
   created_at
@@ -56,6 +55,7 @@ export_generations
   generation
   root_node_id
   checkpoint_wal_seq
+  size_bytes
   created_at
 
   unique(export_id, generation)
@@ -247,7 +247,9 @@ the same immutable nodes and blobs.
 # Root And Checkpoint Publication
 
 `publish_checkpoint` is called after compaction has written any new blobs and
-inserted the corresponding immutable tree metadata.
+inserted the corresponding immutable tree metadata. Publication must preserve
+the size from the generation it compacted unless compaction explicitly observes
+and incorporates a newer resize generation.
 
 Publication appends a new export generation in a single catalog transaction:
 
@@ -261,12 +263,18 @@ begin transaction
     generation = previous_generation + 1
     root_node_id = new_root_node_id
     checkpoint_wal_seq = compacted_through
+    size_bytes = compacted_generation.size_bytes
 commit
 ```
 
 Callers do not pass `expected_generation`. The catalog owns loading the latest
 generation. The architecture relies on a single checkpoint publisher per export
 until writer fencing or multi-publisher compaction is designed.
+
+Future resize should append an export generation with the new `size_bytes`.
+If resize and compaction can run concurrently, checkpoint publication must avoid
+publishing a generation that rolls the size backward. That conflict policy needs
+a dedicated resize design before online resize is implemented.
 
 # Close-Time Compaction
 
