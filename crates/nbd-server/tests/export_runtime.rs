@@ -9,8 +9,11 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn serial_runtime_executes_accepted_jobs() {
-    let engine = Arc::new(MemoryExportEngine::new(&export_meta("disk-a", 4096)).unwrap());
-    let runtime = SerialExportRuntime::new(engine);
+    let meta = export_meta("disk-a", 4096);
+    let engine = Arc::new(MemoryExportEngine::new(&meta).unwrap());
+    let runtime = SerialExportRuntime::new(meta.clone(), engine);
+
+    assert_eq!(runtime.export_meta(), meta);
 
     assert_eq!(
         submit(&runtime, ExportRequest::Read { offset: 0, len: 4 },).await,

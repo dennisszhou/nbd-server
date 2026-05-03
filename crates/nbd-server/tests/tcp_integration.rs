@@ -3,7 +3,7 @@ use nbd_control_plane::{
     CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportName, SQLiteExportCatalog,
 };
 use nbd_protocol::constants::{
-    NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_REP_ERR_UNKNOWN,
+    NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN,
 };
 use nbd_server::NbdServer;
 use nbd_test_support::TestRuntime;
@@ -153,6 +153,31 @@ async fn missing_or_deleted_exports_fail_during_go() {
     server.shutdown().await.expect("shutdown server");
 }
 
+#[tokio::test]
+async fn active_export_rejects_second_mounter_until_disconnect() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(CreateExport::new(export_name("disk-a"), 4096, 4096).unwrap())
+        .await
+        .expect("create export");
+
+    let server = NbdServer::start(load_config(&runtime).expect("load config"))
+        .await
+        .expect("start server");
+    let first = NbdClient::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect first mounter");
+
+    assert_policy_error(NbdClient::connect(server.addr(), "disk-a").await);
+
+    first.disconnect().await.expect("disconnect first");
+
+    let reopened = reconnect_after_disconnect(server.addr()).await;
+    reopened.disconnect().await.expect("disconnect reopened");
+    server.shutdown().await.expect("shutdown server");
+}
+
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -185,4 +210,29 @@ fn assert_unknown_export(result: nbd_us_client::Result<NbdClient>) {
             ..
         }),
     ));
+}
+
+fn assert_policy_error(result: nbd_us_client::Result<NbdClient>) {
+    assert!(matches!(
+        result,
+        Err(ClientError::OptionError {
+            reply_type: NBD_REP_ERR_POLICY,
+            ..
+        }),
+    ));
+}
+
+async fn reconnect_after_disconnect(addr: std::net::SocketAddr) -> NbdClient {
+    for _ in 0..10 {
+        match NbdClient::connect(addr, "disk-a").await {
+            Ok(client) => return client,
+            Err(ClientError::OptionError {
+                reply_type: NBD_REP_ERR_POLICY,
+                ..
+            }) => tokio::task::yield_now().await,
+            Err(error) => panic!("unexpected reconnect error: {error}"),
+        }
+    }
+
+    panic!("export remained busy after disconnect");
 }

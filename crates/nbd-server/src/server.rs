@@ -1,7 +1,8 @@
-use crate::{connection, Result, ServerError};
+use crate::{connection, LocalExportRegistry, Result, ServerError};
 use nbd_config::NbdConfig;
 use nbd_control_plane::{CatalogUrl, SQLiteExportCatalog};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -22,6 +23,10 @@ impl NbdServer {
         let catalog = SQLiteExportCatalog::connect(&catalog_url)
             .await
             .map_err(ServerError::catalog)?;
+        let registry = Arc::new(LocalExportRegistry::new(
+            Arc::new(catalog),
+            config.server.clone(),
+        ));
         let listener = TcpListener::bind(listen)
             .await
             .map_err(|source| ServerError::io("bind NBD server", source))?;
@@ -38,9 +43,9 @@ impl NbdServer {
                         let Ok((stream, _peer)) = accepted else {
                             break;
                         };
-                        let catalog = catalog.clone();
+                        let registry = registry.clone();
                         tokio::spawn(async move {
-                            let _ = connection::serve(stream, catalog).await;
+                            let _ = connection::serve(stream, registry).await;
                         });
                     }
                 }
