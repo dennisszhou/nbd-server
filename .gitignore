@@ -1,2 +1,21 @@
-target/
+# Rust build output.
+/target/
+
+# Local scratch files used by agent and developer workflows.
 .tmp/
+
+# Local environment and database files.
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Node/Prisma tool installs and logs.
+node_modules/
+npm-debug.log*
+
+# OS/editor noise.
+.DS_Store
