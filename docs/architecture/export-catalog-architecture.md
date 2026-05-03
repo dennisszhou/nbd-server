@@ -6,7 +6,7 @@ Status: draft
 
 The system needs a durable metadata source for export lifecycle, committed tree
 roots, WAL checkpoints, and immutable tree metadata. This metadata is shared by
-`ExportLifecycleManager`, `ExportOpener`, `CommittedTreeReader`, and
+`ExportLifecycleManager`, `LocalExportRegistry`, `CommittedTreeReader`, and
 `CompactionManager`.
 
 The API should avoid long parameter lists. Callers should pass structured

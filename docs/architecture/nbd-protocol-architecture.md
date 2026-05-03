@@ -207,7 +207,7 @@ Handling:
 
 ```text
 parse export name and info requests
-  -> ExportOpener.open(export_name)
+  -> LocalExportRegistry.open(export_name, export_owner)
   -> on failure, send fixed-newstyle option error reply
   -> on success, send NBD_REP_INFO for NBD_INFO_EXPORT
   -> send final NBD_REP_ACK
@@ -418,7 +418,8 @@ Initial mapping:
 ```text
 out of bounds / invalid flags / malformed request -> NBD_EINVAL
 missing or deleted export during NBD_OPT_GO       -> NBD_REP_ERR_UNKNOWN
-permission or policy failure                     -> NBD_EPERM / option error
+busy export during NBD_OPT_GO                    -> NBD_REP_ERR_POLICY
+permission or policy failure                     -> NBD_EPERM / option policy
 storage or WAL I/O failure                       -> NBD_EIO
 server shutdown                                  -> NBD_ESHUTDOWN
 unsupported option                               -> NBD_REP_ERR_UNSUP
@@ -480,5 +481,6 @@ export admission/order boundary.
 - Whether to include standalone `NBD_OPT_INFO` before it is required.
 - Whether `NBD_OPT_GO` should ignore all info requests except
   `NBD_INFO_EXPORT`, or reject malformed/duplicated requests more strictly.
-- Whether the long-term export ordering owner should be called `ExportRuntime`,
-  `ExportAdmissionCtl`, or another name in code.
+- How much of the long-term `ConnectionRuntime` split should land before
+  durable export support. The current plan of record names the export-owned
+  ordering and workqueue boundary `ExportRuntime`.

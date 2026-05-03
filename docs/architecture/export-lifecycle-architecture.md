@@ -115,8 +115,8 @@ cannot mark the export deleted while open is moving toward serving.
 If `begin_open` acquires the lease and then discovers the export is missing or
 deleted, it must release the lease before returning failure.
 
-If initialization or WAL replay fails after `begin_open` succeeds, the opener
-must unregister the local record and release the lease before returning
+If initialization or WAL replay fails after `begin_open` succeeds, the open
+path must unregister the local record and release the lease before returning
 failure.
 
 # Delete Flow

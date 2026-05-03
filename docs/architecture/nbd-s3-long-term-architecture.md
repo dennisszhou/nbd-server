@@ -132,12 +132,12 @@ inline.
 Replies are serialized per connection. A slow connection must not block reply
 writes for other connections.
 
-## ExportOpener
+## Open Path
 
-Bridges NBD negotiation to the data path. It loads export metadata from
-`ExportLifecycleManager`, initializes per-export components, replays WAL into
-`ExportReadView`, registers the opened export with `LocalExportRegistry`, and
-returns an `Export` handle.
+`LocalExportRegistry.open` is the connection-facing open boundary. It bridges
+NBD negotiation to the data path by coordinating lifecycle checks, active local
+state, runtime construction, engine construction, and future WAL/read-view
+recovery. This is not a separate component in the plan of record.
 
 ## Export
 
@@ -154,8 +154,11 @@ impl Export {
 }
 ```
 
-`Export` orchestrates admission, WAL, cache, and committed backing reads. It
-does not own low-level scheduling, WAL format, object I/O, or catalog schema.
+The broad architecture's `Export` means the active serving boundary for one
+opened export. In code, this can be split into `ExportRuntime` plus
+`ExportEngine`: the runtime owns request queueing, admission, and execution
+policy, while the engine owns data behavior. The boundary does not own WAL
+format, object I/O, or catalog schema.
 
 ## ExportAdmissionCtl
 

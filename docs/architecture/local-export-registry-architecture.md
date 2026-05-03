@@ -190,8 +190,8 @@ NBD_OPT_GO(export_name)
 
 Registering the local record before replay lets the renewal worker refresh the
 lease while potentially slow recovery work is running. If initialization or WAL
-replay fails after `begin_open` succeeds, the opener must unregister the local
-record and release the lease before returning failure.
+replay fails after `begin_open` succeeds, the open path must unregister the
+local record and release the lease before returning failure.
 
 The long-term system may support multiple connections per export only when they
 belong to the same authenticated client/host. That requires auth to
@@ -270,7 +270,10 @@ that the export must not continue serving writes after its lease has expired.
 - `LocalExportRegistry` is process-local active export lifecycle truth.
 - `ExportCatalog` remains durable export metadata truth.
 - Etcd per-export leases are cross-process lifecycle exclusion truth.
-- Register happens only after the export is successfully initialized.
+- A local record may be registered as `Opening` after lease acquisition and
+  before export initialization.
+- `Opening` transitions to `Active` only after initialization succeeds.
+- Failed initialization unregisters the local record and releases the lease.
 - Unregister happens on close/shutdown.
 - Closing exports remain registered until close cleanup finishes.
 - `nbdcli delete` fails if it cannot acquire the per-export lease.
