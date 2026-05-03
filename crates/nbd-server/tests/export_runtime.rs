@@ -43,6 +43,28 @@ async fn serial_runtime_executes_accepted_jobs() {
     );
 }
 
+#[tokio::test]
+async fn serial_runtime_queue_slot_reservation_releases_on_drop() {
+    let meta = export_meta("disk-a", 4096);
+    let engine = Arc::new(MemoryExportEngine::new(&meta).unwrap());
+    let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
+
+    let first_slot = runtime.reserve().await.expect("reserve first slot");
+    let waiter_runtime = runtime.clone();
+    let waiter =
+        tokio::spawn(async move { waiter_runtime.reserve().await.expect("reserve second slot") });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "second reservation should wait while queue depth is exhausted",
+    );
+
+    drop(first_slot);
+    let second_slot = waiter.await.expect("reservation task");
+    drop(second_slot);
+}
+
 async fn submit(runtime: &SerialExportRuntime, request: ExportRequest) -> ExportReply {
     let (job, receiver) = ExportJob::oneshot(request);
     runtime.submit(job).await.expect("submit job");

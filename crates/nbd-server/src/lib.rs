@@ -19,6 +19,7 @@ pub use export::{
 pub use memory::{MemoryExport, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
 pub use registry::{ExportOwner, LocalExportRegistry};
 pub use runtime::{
-    ExportRuntime, ExportRuntimeHandle, SerialExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY,
+    ExportQueueSlot, ExportRuntime, ExportRuntimeHandle, SerialExportRuntime,
+    DEFAULT_EXPORT_QUEUE_CAPACITY,
 };
 pub use server::NbdServer;
