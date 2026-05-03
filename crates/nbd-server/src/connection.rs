@@ -1,6 +1,6 @@
 use crate::{
-    CompletedExport, ExportJob, ExportOwner, ExportReply, ExportRequest, ExportRuntimeHandle,
-    LocalExportRegistry, Result, ServerError,
+    CompletedExport, ExportJob, ExportOwner, ExportQueueSlot, ExportReply, ExportRequest,
+    ExportResult, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
 };
 use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
@@ -14,9 +14,9 @@ use nbd_protocol::transmission::{
     encode_read_reply, encode_simple_reply, parse_request, parse_request_header,
     TransmissionRequest, MAX_IO_BYTES, REQUEST_HEADER_BYTES,
 };
-use nbd_protocol::wire::NbdOptionCode;
+use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 const SUPPORTED_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
@@ -25,6 +25,51 @@ struct ConnectionExport {
     name: ExportName,
     owner: ExportOwner,
     runtime: ExportRuntimeHandle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplyKind {
+    Read,
+    Simple,
+}
+
+#[derive(Debug)]
+pub(crate) struct ConnectionReply {
+    cookie: NbdCookie,
+    payload: ConnectionReplyPayload,
+}
+
+#[derive(Debug)]
+enum ConnectionReplyPayload {
+    Export {
+        kind: ReplyKind,
+        result: ExportResult,
+        _queue_slot: ExportQueueSlot,
+    },
+    SimpleError {
+        error: u32,
+    },
+}
+
+impl ConnectionReply {
+    fn completed(cookie: NbdCookie, kind: ReplyKind, completed: CompletedExport) -> Self {
+        let (result, queue_slot) = completed.into_parts();
+        Self {
+            cookie,
+            payload: ConnectionReplyPayload::Export {
+                kind,
+                result,
+                _queue_slot: queue_slot,
+            },
+        }
+    }
+
+    fn simple_error(cookie: NbdCookie, error: u32) -> Self {
+        Self {
+            cookie,
+            payload: ConnectionReplyPayload::SimpleError { error },
+        }
+    }
 }
 
 pub async fn serve(mut stream: TcpStream, registry: Arc<LocalExportRegistry>) -> Result<()> {
@@ -178,10 +223,11 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
         let payload_len = match header.payload_len(MAX_IO_BYTES) {
             Ok(payload_len) => payload_len,
             Err(error) => {
-                stream
-                    .write_all(&encode_simple_reply(header.cookie, NBD_EINVAL))
-                    .await
-                    .map_err(|source| ServerError::io("write NBD request error", source))?;
+                write_connection_reply(
+                    stream,
+                    ConnectionReply::simple_error(header.cookie, NBD_EINVAL),
+                )
+                .await?;
                 return Err(error.into());
             }
         };
@@ -208,31 +254,18 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
                 .await
                 {
                     Ok(completed) => {
-                        let (result, _queue_slot) = completed.into_parts();
-                        match result {
-                            Ok(ExportReply::Read { data }) => {
-                                stream
-                                    .write_all(&encode_read_reply(cookie, &data))
-                                    .await
-                                    .map_err(|source| {
-                                        ServerError::io("write NBD read reply", source)
-                                    })?;
-                            }
-                            Err(_) | Ok(ExportReply::Done) => {
-                                stream
-                                    .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
-                                    .await
-                                    .map_err(|source| {
-                                        ServerError::io("write NBD read error", source)
-                                    })?;
-                            }
-                        }
+                        write_connection_reply(
+                            stream,
+                            ConnectionReply::completed(cookie, ReplyKind::Read, completed),
+                        )
+                        .await?;
                     }
                     Err(_) => {
-                        stream
-                            .write_all(&encode_simple_reply(cookie, NBD_EINVAL))
-                            .await
-                            .map_err(|source| ServerError::io("write NBD read error", source))?;
+                        write_connection_reply(
+                            stream,
+                            ConnectionReply::simple_error(cookie, NBD_EINVAL),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -241,43 +274,56 @@ async fn handle_transmission(stream: &mut TcpStream, runtime: ExportRuntimeHandl
                 offset,
                 data,
             } => {
-                let (error, _queue_slot) =
+                let reply =
                     match execute_export(&runtime, ExportRequest::Write { offset, data }).await {
                         Ok(completed) => {
-                            let (result, queue_slot) = completed.into_parts();
-                            let error = match result {
-                                Ok(ExportReply::Done) => 0,
-                                Ok(ExportReply::Read { .. }) | Err(_) => NBD_EINVAL,
-                            };
-                            (error, Some(queue_slot))
+                            ConnectionReply::completed(cookie, ReplyKind::Simple, completed)
                         }
-                        Err(_) => (NBD_EINVAL, None),
+                        Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
                     };
-                stream
-                    .write_all(&encode_simple_reply(cookie, error))
-                    .await
-                    .map_err(|source| ServerError::io("write NBD write reply", source))?;
+                write_connection_reply(stream, reply).await?;
             }
             TransmissionRequest::Flush { cookie } => {
-                let (error, _queue_slot) =
-                    match execute_export(&runtime, ExportRequest::Flush).await {
-                        Ok(completed) => {
-                            let (result, queue_slot) = completed.into_parts();
-                            let error = match result {
-                                Ok(ExportReply::Done) => 0,
-                                Ok(ExportReply::Read { .. }) | Err(_) => NBD_EINVAL,
-                            };
-                            (error, Some(queue_slot))
-                        }
-                        Err(_) => (NBD_EINVAL, None),
-                    };
-                stream
-                    .write_all(&encode_simple_reply(cookie, error))
-                    .await
-                    .map_err(|source| ServerError::io("write NBD flush reply", source))?;
+                let reply = match execute_export(&runtime, ExportRequest::Flush).await {
+                    Ok(completed) => {
+                        ConnectionReply::completed(cookie, ReplyKind::Simple, completed)
+                    }
+                    Err(_) => ConnectionReply::simple_error(cookie, NBD_EINVAL),
+                };
+                write_connection_reply(stream, reply).await?;
             }
             TransmissionRequest::Disconnect { .. } => return Ok(()),
         }
+    }
+}
+
+pub(crate) async fn write_connection_reply<W>(writer: &mut W, reply: ConnectionReply) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match reply.payload {
+        ConnectionReplyPayload::Export {
+            kind,
+            result,
+            _queue_slot,
+        } => match (kind, result) {
+            (ReplyKind::Read, Ok(ExportReply::Read { data })) => writer
+                .write_all(&encode_read_reply(reply.cookie, &data))
+                .await
+                .map_err(|source| ServerError::io("write NBD read reply", source)),
+            (ReplyKind::Simple, Ok(ExportReply::Done)) => writer
+                .write_all(&encode_simple_reply(reply.cookie, 0))
+                .await
+                .map_err(|source| ServerError::io("write NBD simple reply", source)),
+            _ => writer
+                .write_all(&encode_simple_reply(reply.cookie, NBD_EINVAL))
+                .await
+                .map_err(|source| ServerError::io("write NBD error reply", source)),
+        },
+        ConnectionReplyPayload::SimpleError { error } => writer
+            .write_all(&encode_simple_reply(reply.cookie, error))
+            .await
+            .map_err(|source| ServerError::io("write NBD error reply", source)),
     }
 }
 
