@@ -20,9 +20,6 @@ pub struct Timestamp(String);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct WalSeq(u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ExportGeneration(u64);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExportState {
@@ -36,11 +33,19 @@ pub enum ExportEngineKind {
     Memory,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportLayoutKind {
+    MemoryEmpty,
+    SimpleMutableTree,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommittedRoot {
+pub struct ExportHead {
+    layout_kind: ExportLayoutKind,
     root_node_id: Option<NodeId>,
+    size_bytes: u64,
     checkpoint_wal_seq: WalSeq,
-    generation: ExportGeneration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,11 +75,10 @@ pub struct ListExports {
 pub struct ExportMeta {
     id: ExportId,
     name: ExportName,
-    size_bytes: u64,
     block_size: u64,
     engine_kind: ExportEngineKind,
     state: ExportState,
-    committed: CommittedRoot,
+    head: ExportHead,
     created_at: Timestamp,
     updated_at: Timestamp,
     deleted_at: Option<Timestamp>,
@@ -147,47 +151,52 @@ impl WalSeq {
     }
 }
 
-impl ExportGeneration {
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub const fn zero() -> Self {
-        Self(0)
-    }
-
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl CommittedRoot {
+impl ExportHead {
     pub fn new(
+        layout_kind: ExportLayoutKind,
         root_node_id: Option<NodeId>,
+        size_bytes: u64,
         checkpoint_wal_seq: WalSeq,
-        generation: ExportGeneration,
-    ) -> Self {
-        Self {
-            root_node_id,
-            checkpoint_wal_seq,
-            generation,
+    ) -> Result<Self> {
+        validate_non_zero("size_bytes", size_bytes)?;
+        if layout_kind == ExportLayoutKind::MemoryEmpty && root_node_id.is_some() {
+            return Err(CatalogError::invalid_field(
+                "root_node_id",
+                "memory_empty export heads must not have a root node",
+            ));
         }
+
+        Ok(Self {
+            layout_kind,
+            root_node_id,
+            size_bytes,
+            checkpoint_wal_seq,
+        })
     }
 
-    pub fn empty() -> Self {
-        Self::new(None, WalSeq::zero(), ExportGeneration::zero())
+    pub fn memory_empty(size_bytes: u64) -> Result<Self> {
+        Self::new(
+            ExportLayoutKind::MemoryEmpty,
+            None,
+            size_bytes,
+            WalSeq::zero(),
+        )
+    }
+
+    pub fn layout_kind(&self) -> ExportLayoutKind {
+        self.layout_kind
     }
 
     pub fn root_node_id(&self) -> Option<&NodeId> {
         self.root_node_id.as_ref()
     }
 
-    pub fn checkpoint_wal_seq(&self) -> WalSeq {
-        self.checkpoint_wal_seq
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
     }
 
-    pub fn generation(&self) -> ExportGeneration {
-        self.generation
+    pub fn checkpoint_wal_seq(&self) -> WalSeq {
+        self.checkpoint_wal_seq
     }
 }
 
@@ -269,26 +278,23 @@ impl ExportMeta {
     pub fn new(
         id: ExportId,
         name: ExportName,
-        size_bytes: u64,
         block_size: u64,
         engine_kind: ExportEngineKind,
         state: ExportState,
-        committed: CommittedRoot,
+        head: ExportHead,
         created_at: Timestamp,
         updated_at: Timestamp,
         deleted_at: Option<Timestamp>,
     ) -> Result<Self> {
-        validate_non_zero("size_bytes", size_bytes)?;
         validate_non_zero("block_size", block_size)?;
 
         Ok(Self {
             id,
             name,
-            size_bytes,
             block_size,
             engine_kind,
             state,
-            committed,
+            head,
             created_at,
             updated_at,
             deleted_at,
@@ -304,7 +310,7 @@ impl ExportMeta {
     }
 
     pub fn size_bytes(&self) -> u64 {
-        self.size_bytes
+        self.head.size_bytes()
     }
 
     pub fn block_size(&self) -> u64 {
@@ -319,8 +325,8 @@ impl ExportMeta {
         self.state
     }
 
-    pub fn committed(&self) -> &CommittedRoot {
-        &self.committed
+    pub fn head(&self) -> &ExportHead {
+        &self.head
     }
 
     pub fn created_at(&self) -> &Timestamp {
@@ -359,6 +365,21 @@ impl FromStr for ExportEngineKind {
             engine_kind => Err(CatalogError::InvalidExportEngineKind {
                 engine_kind: engine_kind.to_owned(),
             }),
+        }
+    }
+}
+
+impl FromStr for ExportLayoutKind {
+    type Err = CatalogError;
+
+    fn from_str(layout_kind: &str) -> Result<Self> {
+        match layout_kind {
+            "memory_empty" => Ok(Self::MemoryEmpty),
+            "simple_mutable_tree" => Ok(Self::SimpleMutableTree),
+            layout_kind => Err(CatalogError::invalid_field(
+                "layout_kind",
+                format!("invalid export layout kind `{layout_kind}`"),
+            )),
         }
     }
 }
@@ -404,13 +425,16 @@ impl fmt::Display for ExportEngineKind {
     }
 }
 
-impl fmt::Display for WalSeq {
+impl fmt::Display for ExportLayoutKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get())
+        match self {
+            Self::MemoryEmpty => f.write_str("memory_empty"),
+            Self::SimpleMutableTree => f.write_str("simple_mutable_tree"),
+        }
     }
 }
 
-impl fmt::Display for ExportGeneration {
+impl fmt::Display for WalSeq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.get())
     }

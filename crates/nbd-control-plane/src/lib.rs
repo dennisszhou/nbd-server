@@ -10,7 +10,7 @@ pub mod sqlite;
 pub use catalog_url::{CatalogProvider, CatalogUrl};
 pub use error::{CatalogError, Result};
 pub use model::{
-    CommittedRoot, CreateExport, DeleteExport, ExportEngineKind, ExportGeneration, ExportId,
+    CreateExport, DeleteExport, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
     ExportMeta, ExportName, ExportState, InspectExport, ListExports, NodeId, Timestamp, WalSeq,
 };
 pub use sqlite::SQLiteExportCatalog;

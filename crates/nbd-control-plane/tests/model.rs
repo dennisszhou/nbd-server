@@ -1,5 +1,5 @@
 use nbd_control_plane::{
-    CatalogProvider, CatalogUrl, CommittedRoot, CreateExport, ExportEngineKind, ExportGeneration,
+    CatalogProvider, CatalogUrl, CreateExport, ExportEngineKind, ExportHead, ExportLayoutKind,
     ExportName, ExportState, ListExports, WalSeq,
 };
 use std::str::FromStr;
@@ -55,12 +55,14 @@ fn export_names_must_not_be_empty_or_contain_nul() {
 }
 
 #[test]
-fn committed_root_can_represent_empty_generation_zero() {
-    let root = CommittedRoot::empty();
+fn export_head_can_represent_empty_memory() {
+    let head = ExportHead::memory_empty(4096).expect("memory head");
 
-    assert!(root.root_node_id().is_none());
-    assert_eq!(root.checkpoint_wal_seq(), WalSeq::zero());
-    assert_eq!(root.generation(), ExportGeneration::zero());
+    assert_eq!(head.layout_kind(), ExportLayoutKind::MemoryEmpty);
+    assert!(head.root_node_id().is_none());
+    assert_eq!(head.size_bytes(), 4096);
+    assert_eq!(head.checkpoint_wal_seq(), WalSeq::zero());
+    assert!(ExportHead::memory_empty(0).is_err());
 }
 
 #[test]
@@ -86,6 +88,24 @@ fn export_engine_kind_round_trips_catalog_values() {
     );
     assert_eq!(ExportEngineKind::Memory.to_string(), "memory");
     assert!(ExportEngineKind::from_str("durable").is_err());
+}
+
+#[test]
+fn export_layout_kind_round_trips_catalog_values() {
+    assert_eq!(
+        ExportLayoutKind::from_str("memory_empty").unwrap(),
+        ExportLayoutKind::MemoryEmpty
+    );
+    assert_eq!(
+        ExportLayoutKind::from_str("simple_mutable_tree").unwrap(),
+        ExportLayoutKind::SimpleMutableTree
+    );
+    assert_eq!(ExportLayoutKind::MemoryEmpty.to_string(), "memory_empty");
+    assert_eq!(
+        ExportLayoutKind::SimpleMutableTree.to_string(),
+        "simple_mutable_tree"
+    );
+    assert!(ExportLayoutKind::from_str("generation").is_err());
 }
 
 #[test]

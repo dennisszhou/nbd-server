@@ -203,9 +203,7 @@ impl ExportEngine for MemoryExportEngine {
 mod tests {
     use super::*;
     use crate::{ExportAdmissionCtl, ExportEngine};
-    use nbd_control_plane::{
-        CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportState, Timestamp, WalSeq,
-    };
+    use nbd_control_plane::{ExportEngineKind, ExportHead, ExportId, ExportState, Timestamp};
     use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -336,11 +334,10 @@ mod tests {
         ExportMeta::new(
             ExportId::new(format!("export-{name}")).expect("export id"),
             ExportName::new(name).expect("export name"),
-            size_bytes,
             4096,
             ExportEngineKind::Memory,
             ExportState::Active,
-            CommittedRoot::new(None, WalSeq::zero(), ExportGeneration::zero()),
+            ExportHead::memory_empty(size_bytes).expect("memory head"),
             Timestamp::new("created").expect("created timestamp"),
             Timestamp::new("updated").expect("updated timestamp"),
             None,

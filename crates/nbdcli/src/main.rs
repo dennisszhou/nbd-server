@@ -130,13 +130,13 @@ fn load_config(path: Option<PathBuf>) -> Result<NbdConfig, Box<dyn Error>> {
 fn print_export_list(exports: &[ExportMeta]) {
     for export in exports {
         println!(
-            "{}\t{}\tsize={}\tblock_size={}\tengine={}\tgeneration={}",
+            "{}\t{}\tsize={}\tblock_size={}\tengine={}\tlayout={}",
             export.name(),
             export.state(),
             export.size_bytes(),
             export.block_size(),
             export.engine_kind(),
-            export.committed().generation()
+            export.head().layout_kind()
         );
     }
 }
@@ -147,12 +147,9 @@ fn print_export(export: &ExportMeta) {
     println!("size: {}", export.size_bytes());
     println!("block_size: {}", export.block_size());
     println!("engine: {}", export.engine_kind());
-    println!("generation: {}", export.committed().generation());
-    println!(
-        "checkpoint_wal_seq: {}",
-        export.committed().checkpoint_wal_seq()
-    );
-    match export.committed().root_node_id() {
+    println!("layout: {}", export.head().layout_kind());
+    println!("checkpoint_wal_seq: {}", export.head().checkpoint_wal_seq());
+    match export.head().root_node_id() {
         Some(root_node_id) => println!("root_node_id: {root_node_id}"),
         None => println!("root_node_id: <empty>"),
     }

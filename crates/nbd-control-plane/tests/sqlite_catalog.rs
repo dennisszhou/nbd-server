@@ -1,6 +1,6 @@
 use nbd_control_plane::{
     CatalogError, CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind,
-    ExportGeneration, ExportName, ExportState, InspectExport, ListExports, SQLiteExportCatalog,
+    ExportLayoutKind, ExportName, ExportState, InspectExport, ListExports, SQLiteExportCatalog,
     WalSeq,
 };
 use nbd_test_support::TestRuntime;
@@ -9,7 +9,7 @@ const MIGRATION: &str =
     include_str!("../../../prisma/migrations/20260501000000_init/migration.sql");
 
 #[tokio::test]
-async fn create_export_initializes_generation_zero() {
+async fn create_export_initializes_memory_head() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     let created = catalog
@@ -22,9 +22,10 @@ async fn create_export_initializes_generation_zero() {
     assert_eq!(created.block_size(), 4096);
     assert_eq!(created.engine_kind(), ExportEngineKind::Memory);
     assert_eq!(created.state(), ExportState::Active);
-    assert!(created.committed().root_node_id().is_none());
-    assert_eq!(created.committed().generation(), ExportGeneration::zero());
-    assert_eq!(created.committed().checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().layout_kind(), ExportLayoutKind::MemoryEmpty);
+    assert!(created.head().root_node_id().is_none());
+    assert_eq!(created.head().size_bytes(), 1024 * 1024);
+    assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
 
     let inspected = catalog
         .inspect_export(InspectExport::new(export_name("disk-a")))
@@ -51,7 +52,7 @@ async fn duplicate_create_fails_clearly() {
 }
 
 #[tokio::test]
-async fn latest_generation_owns_export_size() {
+async fn latest_generation_still_feeds_export_head_before_cutover() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     let created = catalog
@@ -79,7 +80,11 @@ async fn latest_generation_owns_export_size() {
         .expect("inspect export");
 
     assert_eq!(inspected.size_bytes(), 2048);
-    assert_eq!(inspected.committed().generation(), ExportGeneration::new(1));
+    assert_eq!(inspected.head().size_bytes(), 2048);
+    assert_eq!(
+        inspected.head().layout_kind(),
+        ExportLayoutKind::MemoryEmpty
+    );
 }
 
 #[tokio::test]
@@ -107,7 +112,10 @@ async fn delete_hides_export_from_load_and_default_list() {
         .expect("inspect deleted export");
     assert_eq!(inspected.state(), ExportState::Deleted);
     assert!(inspected.deleted_at().is_some());
-    assert_eq!(inspected.committed().generation(), ExportGeneration::zero());
+    assert_eq!(
+        inspected.head().layout_kind(),
+        ExportLayoutKind::MemoryEmpty
+    );
 
     assert!(catalog
         .list_exports(ListExports::active_only())

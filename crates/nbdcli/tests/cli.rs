@@ -32,8 +32,10 @@ async fn cli_creates_inspects_lists_and_deletes_exports() {
     assert_eq!(inspected["name"], "disk-a");
     assert_eq!(inspected["state"], "active");
     assert_eq!(inspected["engine_kind"], "memory");
-    assert_eq!(inspected["committed"]["generation"], 0);
-    assert!(inspected["committed"]["root_node_id"].is_null());
+    assert_eq!(inspected["head"]["layout_kind"], "memory_empty");
+    assert_eq!(inspected["head"]["size_bytes"], 1048576);
+    assert_eq!(inspected["head"]["checkpoint_wal_seq"], 0);
+    assert!(inspected["head"]["root_node_id"].is_null());
 
     let list = nbdcli(&runtime, &["list", "--json"]);
     assert_success(&list);

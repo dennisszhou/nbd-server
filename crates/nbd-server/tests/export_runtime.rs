@@ -1,6 +1,5 @@
 use nbd_control_plane::{
-    CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
-    ExportState, Timestamp, WalSeq,
+    ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
 };
 use nbd_server::{
     AdmittedExportRequest, ConcurrentExportRuntime, ExportAdmissionProfileHandle, ExportEngine,
@@ -402,11 +401,10 @@ fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
     ExportMeta::new(
         ExportId::new(format!("export-{name}")).expect("export id"),
         ExportName::new(name).expect("export name"),
-        size_bytes,
         4096,
         ExportEngineKind::Memory,
         ExportState::Active,
-        CommittedRoot::new(None, WalSeq::zero(), ExportGeneration::zero()),
+        ExportHead::memory_empty(size_bytes).expect("memory head"),
         Timestamp::new("created").expect("created timestamp"),
         Timestamp::new("updated").expect("updated timestamp"),
         None,

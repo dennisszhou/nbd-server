@@ -1,9 +1,9 @@
 //! SQLite implementation of the export catalog.
 
 use crate::{
-    CatalogError, CatalogProvider, CatalogUrl, CommittedRoot, CreateExport, DeleteExport,
-    ExportCatalog, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
-    ExportState, InspectExport, ListExports, NodeId, Result, Timestamp, WalSeq,
+    CatalogError, CatalogProvider, CatalogUrl, CreateExport, DeleteExport, ExportCatalog,
+    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta, ExportName, ExportState,
+    InspectExport, ListExports, NodeId, Result, Timestamp, WalSeq,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
@@ -62,8 +62,7 @@ impl SQLiteExportCatalog {
               e.updated_at,
               e.deleted_at,
               g.root_node_id,
-              g.checkpoint_wal_seq,
-              g.generation
+              g.checkpoint_wal_seq
             FROM exports e
             JOIN export_generations g
               ON g.export_id = e.id
@@ -90,7 +89,6 @@ impl ExportCatalog for SQLiteExportCatalog {
         let now = current_timestamp()?;
         let size_bytes = u64_to_i64("size_bytes", request.size_bytes())?;
         let block_size = u64_to_i64("block_size", request.block_size())?;
-        let generation = ExportGeneration::zero();
         let checkpoint_wal_seq = WalSeq::zero();
 
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -132,7 +130,7 @@ impl ExportCatalog for SQLiteExportCatalog {
         )
         .bind(generation_id)
         .bind(export_id.as_str())
-        .bind(u64_to_i64("generation", generation.get())?)
+        .bind(0_i64)
         .bind(size_bytes)
         .bind(u64_to_i64("checkpoint_wal_seq", checkpoint_wal_seq.get())?)
         .bind(now.as_str())
@@ -145,11 +143,10 @@ impl ExportCatalog for SQLiteExportCatalog {
         ExportMeta::new(
             export_id,
             request.name().clone(),
-            request.size_bytes(),
             request.block_size(),
             request.engine_kind(),
             ExportState::Active,
-            CommittedRoot::empty(),
+            ExportHead::memory_empty(request.size_bytes())?,
             now.clone(),
             now,
             None,
@@ -220,8 +217,7 @@ impl ExportCatalog for SQLiteExportCatalog {
               e.updated_at,
               e.deleted_at,
               g.root_node_id,
-              g.checkpoint_wal_seq,
-              g.generation
+              g.checkpoint_wal_seq
             FROM exports e
             JOIN export_generations g
               ON g.export_id = e.id
@@ -253,26 +249,23 @@ fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
         ExportId::new(row.try_get::<String, _>("id").map_err(map_sqlx_error)?)?,
         ExportName::new(row.try_get::<String, _>("name").map_err(map_sqlx_error)?)?,
         i64_to_u64(
-            "size_bytes",
-            row.try_get("size_bytes").map_err(map_sqlx_error)?,
-        )?,
-        i64_to_u64(
             "block_size",
             row.try_get("block_size").map_err(map_sqlx_error)?,
         )?,
         engine_kind.parse::<ExportEngineKind>()?,
         state.parse()?,
-        CommittedRoot::new(
+        ExportHead::new(
+            ExportLayoutKind::MemoryEmpty,
             root_node_id.map(NodeId::new).transpose()?,
+            i64_to_u64(
+                "size_bytes",
+                row.try_get("size_bytes").map_err(map_sqlx_error)?,
+            )?,
             WalSeq::new(i64_to_u64(
                 "checkpoint_wal_seq",
                 row.try_get("checkpoint_wal_seq").map_err(map_sqlx_error)?,
             )?),
-            ExportGeneration::new(i64_to_u64(
-                "generation",
-                row.try_get("generation").map_err(map_sqlx_error)?,
-            )?),
-        ),
+        )?,
         Timestamp::new(
             row.try_get::<String, _>("created_at")
                 .map_err(map_sqlx_error)?,
