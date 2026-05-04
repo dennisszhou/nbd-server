@@ -13,6 +13,8 @@ model Export {
   updatedAt   String             @map("updated_at")
   deletedAt   String?            @map("deleted_at")
   generations ExportGeneration[]
+  head        ExportHead?
+  treeNodes   TreeNode[]
 
   @@map("exports")
 }
@@ -29,4 +31,57 @@ model ExportGeneration {
 
   @@unique([exportId, generation])
   @@map("export_generations")
+}
+
+model ExportHead {
+  exportId         String    @id @map("export_id")
+  layoutKind       String    @map("layout_kind")
+  rootNodeId       String?   @map("root_node_id")
+  sizeBytes        BigInt    @map("size_bytes")
+  checkpointWalSeq BigInt    @map("checkpoint_wal_seq")
+  updatedAt        String    @map("updated_at")
+  export           Export    @relation(fields: [exportId], references: [id], onDelete: Restrict)
+  rootNode         TreeNode? @relation("ExportHeadRoot", fields: [rootNodeId], references: [id], onDelete: Restrict)
+
+  @@map("export_heads")
+}
+
+model TreeNode {
+  id             String        @id
+  layoutKind     String        @map("layout_kind")
+  ownerExportId  String?       @map("owner_export_id")
+  kind           String
+  level          BigInt
+  spanStartBytes BigInt        @map("span_start_bytes")
+  spanLenBytes   BigInt        @map("span_len_bytes")
+  createdAt      String        @map("created_at")
+  ownerExport    Export?       @relation(fields: [ownerExportId], references: [id], onDelete: Restrict)
+  exportHeads    ExportHead[]  @relation("ExportHeadRoot")
+  childEdges     TreeEdge[]    @relation("TreeEdgeParent")
+  parentEdges    TreeEdge[]    @relation("TreeEdgeChild")
+  leafRef        TreeLeafRef?
+
+  @@map("tree_nodes")
+}
+
+model TreeEdge {
+  parentNodeId String   @map("parent_node_id")
+  slot         BigInt
+  childNodeId  String   @map("child_node_id")
+  parentNode   TreeNode @relation("TreeEdgeParent", fields: [parentNodeId], references: [id], onDelete: Restrict)
+  childNode    TreeNode @relation("TreeEdgeChild", fields: [childNodeId], references: [id], onDelete: Restrict)
+
+  @@id([parentNodeId, slot])
+  @@map("tree_edges")
+}
+
+model TreeLeafRef {
+  nodeId      String   @id @map("node_id")
+  storageKind String   @map("storage_kind")
+  storageKey  String   @map("storage_key")
+  lenBytes    BigInt   @map("len_bytes")
+  createdAt   String   @map("created_at")
+  node        TreeNode @relation(fields: [nodeId], references: [id], onDelete: Restrict)
+
+  @@map("tree_leaf_refs")
 }
