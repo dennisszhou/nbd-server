@@ -1,13 +1,13 @@
 Title: Simple Durable Engine Execution
 Date: 2026-05-04
-Status: approved
+Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved for commit planning
+- current state: Series 1 finished; Series 2 pending approval
 Completion:
 - execution complete: no
-- completed series: none
-- next series: Series 1, after approval
+- completed series: Series 1
+- next series: Series 2, pending review and approval
 
 ## Goal
 
@@ -73,7 +73,7 @@ through head-oriented naming instead of generation-oriented serving APIs; tests
 and server fixtures apply the current migration set consistently; memory
 export behavior remains unchanged.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
