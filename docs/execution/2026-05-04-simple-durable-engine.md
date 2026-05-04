@@ -1,13 +1,14 @@
 Title: Simple Durable Engine Execution
 Date: 2026-05-04
-Status: in_progress
+Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 3 finished; Series 4 approved
+- current state: Series 4 finished; simple durable engine execution complete
 Completion:
-- execution complete: no
-- completed series: Series 1, Series 2, and Series 3
-- next series: Series 4, approved
+- execution complete: yes
+- completed series: Series 1, Series 2, Series 3, and Series 4
+- next series: none; WAL durable engine work should start a new design and
+  execution artifact
 
 ## Goal
 
@@ -196,7 +197,7 @@ barrier no-op; protocol integration proves write/read behavior and data
 survival across server restart; memory remains the default create engine and
 existing Docker smoke still passes.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
@@ -217,12 +218,22 @@ time-based WAL retention, compaction, immutable COW roots, clone, S3, GC,
 online resize, dynamic blob sizing, or atomic all-or-nothing semantics across
 multi-chunk write failures.
 
+Closeout notes: review found no blocking findings. Verification passed:
+`cargo fmt --all --check`, `make test-protocol`, `cargo test --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `make docker-smoke`,
+and `KERNEL_SMOKE_ENGINE=memory make docker-smoke`. Userspace protocol tests
+prove simple durable sparse reads, writes, flush, and restart persistence.
+Docker kernel smoke now defaults to `simple_durable`, writes through a mounted
+kernel NBD device, restarts the server, reconnects, remounts, and verifies the
+file survived. The memory override remains available and skips the reattach
+phase because memory exports are intentionally volatile after connection close.
+
 ## Completion
 
-Execution is complete when Series 4 is finished, the execution doc has a
-truthful closeout, and the repository has protocol evidence that opt-in simple
-durable exports persist written data across server restart while default
-memory behavior and Docker smoke remain intact.
+Execution is complete. Series 4 finished with protocol evidence that opt-in
+simple durable exports persist written data across server restart, Docker
+kernel evidence that simple durable survives reconnect/remount, and explicit
+memory-smoke coverage that the default volatile engine path remains available.
 
 Deferred follow-up:
 
