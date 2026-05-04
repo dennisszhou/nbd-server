@@ -111,12 +111,12 @@ accept/listen
   -> per-connection reply serialization
 ```
 
-Multiple connections to one export share the same export ordering domain but
-keep independent reply paths:
+Multiple connections to one active serving domain share the same export
+ordering domain but keep independent reply paths:
 
 ```text
 connection A ─┐
-connection B ─┼─> export X admission/work -> reply queue A/B/C
+connection B ─┼─> (owner, export) admission/work -> reply queue A/B/C
 connection C ─┘
 ```
 
@@ -448,21 +448,27 @@ the negotiated transmission flags make those command flags meaningful.
 
 The first implementation should not advertise `NBD_FLAG_CAN_MULTI_CONN`.
 
-Long term, multiple connections for one export are allowed only when they
-belong to the same authenticated client/host and share the same active export
-state. The auth and host differentiation needed for that are out of scope for
-the first implementation.
+Long term, multiple connections for one serving domain are allowed only when
+they belong to the same authenticated client/host and share the same active
+export state. The auth and host differentiation needed for that are out of
+scope for the first implementation.
+
+The long-term serving domain key is `(owner, export)`: owner namespace first,
+export name inside that namespace. The filesystem and backing stores may use
+the same ordering, so protocol multi-connection policy must decide owner
+identity before joining or creating a serving domain.
 
 The default is conservative: one active writable NBD connection per export.
 
 Multiple transport connections still use separate per-connection inbound and
 outbound ownership. Runtime ordering should be correct for multiple
-same-owner connections sharing one active export before the server advertises
-multi-connection support. Future authentication and client identity policy
-decides which connections are same-owner; separate-client acceptance is out of
-scope until that policy exists. If future authenticated multi-connection
-support is enabled, all connections serving the same export must route through
-the same export admission/order boundary.
+same-owner connections sharing one `(owner, export)` serving domain before the
+server advertises multi-connection support. Future authentication and client
+identity policy decides which connections are same-owner; separate-client
+acceptance is out of scope until that policy exists. If future authenticated
+multi-connection support is enabled, all connections serving the same
+`(owner, export)` domain must route through the same export admission/order
+boundary.
 
 # Invariants
 
@@ -470,7 +476,8 @@ the same export admission/order boundary.
 - The NBD layer dispatches to `Export`; it does not know storage internals.
 - One connection has one inbound protocol owner and one outbound reply owner.
 - A slow connection's reply path must not block writes to other connections.
-- All requests for the same export enter the same export ordering domain.
+- All requests for the same active serving domain enter the same export
+  ordering domain.
 - `NBD_OPT_GO` is the only supported path into transmission mode.
 - The server advertises only transmission flags it satisfies.
 - A successful read reply contains exactly the requested bytes.

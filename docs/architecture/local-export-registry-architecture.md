@@ -193,14 +193,18 @@ lease while potentially slow recovery work is running. If initialization or WAL
 replay fails after `begin_open` succeeds, the open path must unregister the
 local record and release the lease before returning failure.
 
-The long-term system may support multiple connections per export only when they
-belong to the same authenticated client/host. That requires auth to
-differentiate hosts and is out of scope for the first implementation.
+The long-term system may support multiple connections for the same active
+serving domain only when they belong to the same authenticated client/host.
+That requires auth to differentiate hosts and is out of scope for the first
+implementation.
 
-The first implementation should allow only one active writable connection per
-export. Runtime and admission boundaries should still be written so multiple
-same-owner connections can share one active export ordering domain once the
-registry has a real client identity to compare.
+The long-term serving domain key is `(owner, export)`: owner namespace first,
+export name inside that namespace. Filesystem and backing-store layout may use
+the same ordering. Until `owner` is backed by real client identity, the first
+implementation should allow only one active writable connection per export.
+Runtime and admission boundaries should still be written so multiple
+same-owner connections can share one `(owner, export)` ordering domain once
+the registry has a real client identity to compare.
 
 # Close Flow
 

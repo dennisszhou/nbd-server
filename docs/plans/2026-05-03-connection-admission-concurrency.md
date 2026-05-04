@@ -71,9 +71,9 @@ Define a small, implementable runtime design that:
   compaction, or checkpoint publication.
 - Implementing cross-process serving leases or writer fencing.
 - Implementing authentication, client identity, or advertising
-  `NBD_FLAG_CAN_MULTI_CONN`. Runtime ordering should still be correct for
-  multiple same-owner connections sharing one active export once the registry
-  can identify them.
+  `NBD_FLAG_CAN_MULTI_CONN`. Series 5 assumes one active serving domain for an
+  export. Future work may make `ExportOwner` a real client/backing-store
+  namespace and key serving domains by `(owner, export)`.
 - Adding a general-purpose workqueue framework before there are multiple real
   queue classes in code.
 - Changing the catalog schema.
@@ -543,8 +543,29 @@ checkpointing, or recovery.
 ## Concurrent Export Runtime
 
 `ConcurrentExportRuntime` is another implementation of the export runtime
-boundary. This slice should evolve `ExportRuntime` so connections can reserve
-shared export queue depth before reading or buffering a full request body.
+boundary. `ExportRuntime` already exposes `reserve`, `submit`, and `close`;
+Series 5 adds a concurrent implementation behind that existing connection
+boundary.
+
+Current state before Series 5:
+
+- `ConnectionRuntime` already splits request reads from reply writes.
+- `SerialExportRuntime` already acquires admission before engine execution.
+- `MemoryExportEngine` already reaches storage only through admitted execution.
+- `ServerConfig` currently exposes only `export_runtime = "serial"`.
+- The binary still starts Tokio with `current_thread`.
+- `LocalExportRegistry` can share one runtime for repeated opens with the same
+  `ExportOwner`, but the NBD protocol path currently creates a unique owner per
+  connection.
+
+That last point is important. `ExportOwner` is currently a synthetic active
+export lease token, not a proven client identity or durable storage namespace.
+Series 5 should keep the runtime and registry correct for same-owner sharing
+inside one active serving domain, but it should not silently invent production
+client identity. Protocol-level multi-connection serving remains out of scope
+until authentication or another same-client identity policy can decide when
+multiple sockets belong to the same `(owner, export)` serving and backing-store
+domain.
 
 Conceptual shape:
 
@@ -590,8 +611,9 @@ struct ExportQueueSlot {
 `reserve` waits only for shared export queue-depth capacity.
 `submit(job)` enqueues a job that already owns an `ExportQueueSlot`. Neither
 call waits for admission, engine execution, or reply writing.
-`close()` stops new reservations and waits for already accepted jobs to finish,
-fail, or be canceled according to the runtime shutdown policy.
+`close()` stops new reservations and waits for already accepted jobs to finish
+or fail. Series 5 drains accepted jobs rather than aborting admission waiters
+or engine tasks during close.
 
 Both runtime implementations register admission before calling the engine.
 `SerialExportRuntime` still executes queued jobs one at a time, but it uses the
@@ -606,12 +628,34 @@ for the lifetime of the accepted request. The slot is moved into the
 connection reply after engine completion and released only after the reply
 writer finishes the socket write or drops the reply during shutdown. This
 makes queue depth the shared outstanding request budget for one active export
-across same-owner connections.
+across every holder of the same active runtime. The current production
+protocol path still creates one unique owner per connection.
 
 If the connection drops the request before submission, dropping the
 `ExportQueueSlot` releases queue depth. If submission fails because the runtime
 closed, the slot is also dropped and the connection path may encode the
 appropriate shutdown/error reply when the socket is still usable.
+
+`submit` must not turn request-local admission errors into connection-level
+submit failures. Once a runtime accepts a job, that job owns exactly one
+completion, even when admission rejects the request as out of bounds. The safe
+ordering is:
+
+```text
+try to enter runtime lifecycle
+  if lifecycle is closed, drop job and return RuntimeClosed
+derive AdmissionOp from ExportAdmissionProfile
+  on error, spawn completion task with Err(error) and lifecycle guard
+register AdmissionWaiter
+  on error, spawn completion task with Err(error) and lifecycle guard
+spawn request task with AdmissionWaiter and lifecycle guard
+```
+
+After `submit` returns `Ok(())`, the runtime owns completion for that job.
+`submit` returns `Err(RuntimeClosed)` only when the runtime rejects the job
+before acceptance. This preserves the current protocol behavior where invalid
+read/write ranges produce request replies rather than tearing down the
+connection.
 
 Runtime flow:
 
@@ -620,9 +664,11 @@ reserve()
   -> acquire shared ExportQueueSlot
 
 runtime.submit(job)
-  derive AdmissionOp from ExportAdmissionProfile
-  register job with ExportAdmissionCtl
   register active job guard
+  derive AdmissionOp from ExportAdmissionProfile
+    if this fails, complete job with Err(error)
+  register job with ExportAdmissionCtl
+    if this fails, complete job with Err(error)
   spawn request task with AdmissionWaiter and active job guard
 
 request task:
@@ -646,8 +692,8 @@ LocalExportRegistry.close
   runtime.close()
     close queue_depth semaphore
     reject later reserve/submit calls with RuntimeClosed
-    cancel or neutralize admission waiters for jobs that will not start
-    allow started writes to finish engine execution
+    let already accepted waiting and executing jobs drain
+    allow started engine execution to finish
     wait until active_jobs == 0
   remove active export record
 ```
@@ -673,13 +719,11 @@ position before spawning and simply awaits its own `AdmissionWaiter`. When an
 active permit is dropped, `ExportAdmissionCtl` wakes compatible waiters, and
 those already-spawned tasks resume.
 
-`SerialExportRuntime` remains useful. It has no admission controller in the
-current implementation, but the admitted engine boundary adds one before
-unsafe memory access is introduced. Tests should continue to cover it because
-it is the simplest runtime and a useful comparison point for concurrent
-behavior. A later cleanup may collapse the serial runtime into the concurrent
-runtime with queue depth one, but that is not part of this design's risky
-transition.
+`SerialExportRuntime` remains useful. It already uses the admitted engine path,
+but it remains the simplest runtime and a useful comparison point for
+concurrent behavior. A later cleanup may collapse the serial runtime into the
+concurrent runtime with queue depth one, but that is not part of this design's
+risky transition.
 
 ## Memory Engine Synchronization
 
@@ -755,10 +799,9 @@ the operation-level lock: overlapping read/write and write/write operations
 are excluded before the engine touches storage, while non-overlapping
 operations can proceed without an export-wide memory mutex.
 
-The current crate forbids unsafe code. Introducing unsafe raw memory storage
-therefore requires either deliberately relaxing that crate-level policy with a
-small reviewed unsafe boundary, or moving the unsafe storage type into a small
-separate crate that documents the admitted-access safety contract.
+After Series 4, the server crate denies unsafe code by default and allows it
+only for the memory module's admitted byte-storage boundary. Series 5 should
+not expand that unsafe surface.
 
 This separates two proofs:
 
@@ -797,22 +840,22 @@ Runtime sizing should be process config, not catalog metadata:
 [server]
 export_runtime = "concurrent"
 export_queue_depth = 128
-tokio_worker_threads = "auto"
 
 [server.connection]
 reply_queue_capacity = 128
 ```
 
 Exact serde structure can stay small in the first implementation. The important
-boundary is that these are process scheduling limits. They must not change the
-meaning of an existing export's stored data.
+boundary is that these are process scheduling limits. They must be nonzero,
+must not change the meaning of an existing export's stored data, and should be
+applied to newly opened exports only.
 
 `export_queue_depth` is not an OS-thread count. It is accepted outstanding
-request budget. Actual OS-thread parallelism comes from the Tokio runtime. The
-current server binary uses Tokio's `current_thread` runtime; the concurrent
-runtime can prove async ordering on that runtime, but true parallel engine
-execution requires switching the server binary to Tokio's multi-thread runtime
-or constructing an explicit multi-thread runtime in `main`.
+request budget. Actual OS-thread parallelism comes from the Tokio runtime.
+Series 5 should switch the server binary to Tokio's multi-thread runtime and
+enable the `rt-multi-thread` feature for the normal server dependency. Dynamic
+`tokio_worker_threads` config is deferred because runtime worker count must be
+known before the async runtime is constructed.
 
 # Data Model / API Shape
 
@@ -822,6 +865,8 @@ or constructing an explicit multi-thread runtime in `main`.
 - `LocalExportRegistry.active` remains process-local active export lifecycle
   truth.
 - `ConnectionRuntime` owns per-connection protocol state and reply state.
+- `ServerConfig` owns process-local runtime policy for newly opened exports and
+  connections.
 - `ExportAdmissionCtl` owns volatile per-export admission order, dynamic range
   locks, active permit state, current extent size, and the future extent update
   point.
@@ -858,9 +903,13 @@ No new durable or serving cache is introduced by this design. Future
 - Only the connection reply writer writes transmission replies to its socket.
 - The connection request reader never calls `ExportEngine` directly.
 - The connection request reader does not wait for export execution to finish.
-- Export queue depth is shared across connections for one active export.
+- Export queue depth is shared across connections for the active serving
+  domain. In Series 5 that domain is the one active export runtime; future
+  storage-isolated domains may be keyed by `(owner, export)`.
 - Connection readers reserve export queue depth before reading write payloads.
 - Connection readers pause when the export runtime has no queue-depth capacity.
+- Export queue depth and reply queue capacity are configured as nonzero
+  process limits for newly opened exports and connections.
 - `ExportRuntime.submit(job)` means accepted into the runtime, not completed.
 - `ExportRuntime.close()` rejects new reservations and waits for accepted jobs
   to settle before the active export is removed from `LocalExportRegistry`.
@@ -901,6 +950,10 @@ No new durable or serving cache is introduced by this design. Future
   by queue depth.
 - Spawned request tasks are tracked by the export runtime lifecycle; they are
   not detached mutations after local export close.
+- Production protocol multi-connection remains disabled until a same-client
+  identity policy exists. Runtime and registry tests may reuse one
+  `ExportOwner` to prove same-owner sharing below the protocol layer without
+  claiming that today meaningfully authenticates a backing-store namespace.
 - Serial runtime remains semantically valid because serial execution is stricter
   than the admission contract.
 
@@ -1005,7 +1058,10 @@ Rollout should be conservative:
 - add at least one opt-in userspace smoke or integration check for the
   concurrent path before making it default;
 - keep Docker kernel smoke in the validation path as a regression check even
-  when userspace smoke is the primary concurrent-runtime proof.
+  when userspace smoke is the primary concurrent-runtime proof;
+- keep production protocol multi-connection disabled until same-client identity
+  exists; prove same-owner sharing for the current single-domain runtime below
+  the protocol layer in this series.
 
 # Validation Strategy
 
@@ -1041,7 +1097,9 @@ engine:
 - runtime close rejects new reservations and waits for accepted jobs to settle;
 - runtime close does not remove the active export while request tasks can still
   mutate the engine;
-- export completions receive exactly one result for each accepted job.
+- export completions receive exactly one result for each accepted job;
+- close racing with submit either rejects the job before acceptance or tracks
+  the accepted job through exactly one completion.
 
 `MemoryExportEngine` should have storage-safety regression tests:
 
@@ -1079,11 +1137,11 @@ cargo test --workspace
 make docker-smoke
 ```
 
-An additional concurrent-runtime smoke target can be added once config wiring
+A concurrent-runtime userspace target should be added once config wiring
 exists. It can use the userspace client as the primary proof because the
 connection/runtime/admission path is the same server path exercised by the
 kernel smoke. Docker kernel smoke should still run as a compatibility
-regression check before handoff.
+regression check for the default serial path before handoff.
 
 # Risks
 
@@ -1112,10 +1170,19 @@ regression check before handoff.
 - Concurrent runtime can expose ordering assumptions hidden by
   `SerialExportRuntime`. Admission tests need to cover waiting conflicts, not
   only active conflicts.
+- Tokio multi-thread runtime is a binary startup policy. Reading worker-thread
+  count from config after `#[tokio::main]` has already constructed the runtime
+  would be misleading, so dynamic worker-thread sizing is deferred.
+- Same-owner runtime sharing is not the same as production NBD multi-conn.
+  Without authentication or client identity, the protocol path must keep using
+  the conservative one-active-connection policy. The tests still preserve the
+  intended future shape where serving and backing-store domains can become
+  `(owner, export)` once `owner` is no longer synthetic.
 
 # Open Questions
 
-None.
+None for Series 5. Dynamic Tokio worker-thread sizing and production
+same-client multi-connection identity are deferred design topics.
 
 # Design Exit Criteria
 

@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 4 finished; Series 5 pending
+- current state: Series 5 approved and in progress
 Completion:
 - execution complete: no
 - completed series: Series 1, Series 2, Series 3, Series 4
-- next series: Series 5 pending
+- next series: Series 5 approved
 
 ## Goal
 
@@ -722,7 +722,7 @@ Commit 1/5: docs/plans: revise admitted memory boundary
   Postconditions:   The active docs contain no engine-guard API path, Series 4
                     is scoped to admitted memory, Series 5 is scoped to
                     concurrent runtime rollout, and architecture docs match
-                    the same-owner multi-connection stance.
+                    the single-domain and future `(owner, export)` stance.
   Verify:           git diff --cached --check
   Risks:            Low; this is planning and architecture alignment only.
   Not included:     Any runtime, engine, memory storage, or test code changes.
@@ -881,21 +881,26 @@ Design coverage:
 Stable checkpoint: `ConcurrentExportRuntime` is opt-in through process config,
 uses the admitted engine boundary established in Series 4, registers
 admission before spawning request tasks, shares queue depth across same-owner
-connections for one active export, tracks runtime close/drain, and runs under
-a Tokio runtime policy capable of real parallel request execution.
+opens inside the Series 5 single-domain model, tracks runtime close/drain, and
+runs under a Tokio runtime policy capable of real parallel request execution.
+Production protocol multi-connection remains disabled until a same-client
+identity policy can decide when multiple sockets belong to the same
+`(owner, export)` serving and backing-store domain.
 
 Review focus: admission registration before spawn, task lifecycle tracking,
 waiting-admission cancellation, flush/read/write ordering, queue-depth
-backpressure through reply write/drop, same-owner multi-connection ordering
-domain, config rollout, and Tokio runtime worker-thread policy.
+backpressure through reply write/drop, same-owner ordering inside the current
+single-domain model, future `(owner, export)` domain compatibility, config
+rollout, and Tokio multi-thread startup policy.
 
 Done means: concurrent runtime tests prove compatible operations can overlap,
 conflicting operations and flush barriers are ordered by admission, queue depth
 is held through reply write/drop, close/drain settles waiting and executing
-jobs without detached mutations, userspace concurrent smoke passes, and Docker
-kernel smoke still passes on the default serial path.
+jobs without detached mutations, config can opt newly opened exports into the
+concurrent runtime with nonzero queue sizing, userspace concurrent smoke
+passes, and Docker kernel smoke still passes on the default serial path.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
@@ -911,4 +916,237 @@ make docker-smoke
 
 Not included: `DurableExportEngine`, WAL, read views, storage work queues,
 cross-process serving leases, authentication/client identity, advertising
-`NBD_FLAG_CAN_MULTI_CONN`, or making the concurrent runtime the default.
+`NBD_FLAG_CAN_MULTI_CONN`, dynamic Tokio worker-thread sizing from config, or
+making the concurrent runtime the default.
+
+Commit 1/7: docs/execution: plan concurrent runtime series
+
+  Type:             docs
+  Required:         yes
+  Summary:          Record the approved Series 5 commit contract and align
+                    active design and architecture docs around the current
+                    single-domain model and future `(owner, export)` domain
+                    key.
+  Invariant focus:  Series 5 begins with the execution contract and domain
+                    identity model committed before runtime rollout code
+                    changes start.
+  Test level:       none
+  Review gate:      structures
+  Files:            docs/plans/2026-05-03-connection-admission-concurrency.md
+                    docs/execution/2026-05-03-connection-admission-concurrency.md
+                    docs/architecture/local-export-registry-architecture.md
+                    docs/architecture/nbd-protocol-architecture.md
+  Preconditions:    Series 4 is finished and the Series 5 design review has
+                    accepted the single-domain now, `(owner, export)` later
+                    boundary.
+  Postconditions:   The active docs state that Series 5 keeps production
+                    protocol multi-connection disabled, tests same-owner
+                    sharing only below the protocol layer, and treats
+                    `(owner, export)` as the future serving and backing-store
+                    namespace.
+  Verify:           git diff --cached --check
+  Risks:            Low; this is planning and architecture alignment only.
+  Not included:     Runtime, config, registry, server startup, or protocol test
+                    code changes.
+  Depends on:       Series 4
+
+Commit 2/7: config: apply runtime queue sizing
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add nonzero server queue-depth and connection reply
+                    capacity settings, preserve the existing serial default,
+                    and apply the settings to the live serial runtime and
+                    connection reply queue paths.
+  Invariant focus:  Queue depth and reply queue capacity are process-local
+                    runtime policy for newly opened exports and connections,
+                    not catalog metadata or durable export state.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-config/src/lib.rs
+                    crates/nbd-config/tests/config_loading.rs
+                    crates/nbd-server/src/connection.rs
+                    crates/nbd-server/src/registry.rs
+                    crates/nbd-server/src/server.rs
+                    crates/nbd-server/tests/local_export_registry.rs
+  Preconditions:    Commit 1 has landed the Series 5 execution contract.
+  Postconditions:   Default config still yields serial runtime behavior with
+                    nonzero default queue sizing; explicit config can set
+                    queue and reply capacities; serial exports opened after
+                    config load use the configured export queue depth; new
+                    connections use the configured reply queue capacity.
+  Verify:           cargo test -p nbd-config
+                    cargo test -p nbd-server --test local_export_registry
+                    cargo test -p nbd-server connection::tests
+                    make test-protocol
+  Risks:            This touches live config and connection construction, so
+                    defaults and explicit config parsing must remain backward
+                    compatible.
+  Not included:     `ExportRuntimeKind::Concurrent`,
+                    `ConcurrentExportRuntime`, Tokio multi-thread startup, or
+                    concurrent userspace smoke.
+  Depends on:       1
+
+Commit 3/7: runtime: share admitted job execution
+
+  Type:             preparatory
+  Required:         yes
+  Summary:          Extract the serial worker's admission/profile/engine
+                    execution path into a small helper that is immediately used
+                    by `SerialExportRuntime`.
+  Invariant focus:  Serial execution still registers admission before engine
+                    access and completes exactly one result per accepted job;
+                    the helper is live in the same commit that introduces it.
+  Test level:       functional
+  Review gate:      code
+  Files:            crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/tests/export_runtime.rs
+  Preconditions:    Commit 2 has preserved serial runtime behavior under live
+                    queue sizing.
+  Postconditions:   `SerialExportRuntime` behavior is unchanged, but the
+                    admitted job execution sequence is factored for reuse by
+                    the concurrent runtime without adding a dormant API.
+  Verify:           cargo test -p nbd-server --test export_runtime
+                    make test-protocol
+  Risks:            The refactor must not accidentally change when admission
+                    permits are held or when queue slots move into completion.
+  Not included:     Concurrent spawning, runtime config selection, task
+                    lifecycle changes, or Tokio runtime changes.
+  Depends on:       2
+
+Commit 4/7: runtime: add concurrent export runtime
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ConcurrentExportRuntime` behind the existing
+                    `ExportRuntime` trait, with queue-depth-bounded request
+                    tasks, admitted execution, lifecycle close/drain tracking,
+                    and runtime tests.
+  Invariant focus:  Accepted concurrent jobs are tracked until one completion
+                    is handed off; admission order is assigned before spawn;
+                    compatible work may overlap while conflicting work and
+                    flushes obey `ExportAdmissionCtl`.
+  Test level:       functional
+  Review gate:      structures
+  Files:            crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/tests/export_runtime.rs
+  Preconditions:    Commit 3 has a shared live admitted execution path used by
+                    the serial runtime.
+  Postconditions:   `ConcurrentExportRuntime` can be constructed directly in
+                    tests, `reserve` enforces queue depth, `submit` returns
+                    after acceptance, compatible requests can execute
+                    concurrently, conflicting requests and flushes are ordered
+                    by admission, close rejects new work, and accepted waiting
+                    or executing jobs drain without detached mutations.
+  Verify:           cargo test -p nbd-server --test export_runtime
+                    cargo test -p nbd-server admission
+  Risks:            Task lifecycle and close/drain accounting are the main
+                    correctness risks; dropped waiters and post-acceptance
+                    admission errors must still produce exactly one
+                    completion.
+  Not included:     Process config selection, registry rollout, Tokio
+                    multi-thread startup, protocol multi-connection, or
+                    userspace concurrent smoke.
+  Depends on:       3
+
+Commit 5/7: server: run on multi-thread Tokio
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Enable Tokio's normal `rt-multi-thread` feature for the
+                    server crate and switch the server binary startup to the
+                    multi-thread runtime policy.
+  Invariant focus:  The server binary can execute spawned export request tasks
+                    on more than one Tokio worker before concurrent runtime is
+                    exposed through config.
+  Test level:       functional
+  Review gate:      code
+  Files:            crates/nbd-server/Cargo.toml
+                    crates/nbd-server/src/main.rs
+  Preconditions:    Commit 4 has introduced the concurrent runtime primitive,
+                    but production config does not select it yet.
+  Postconditions:   The `nbd-server` binary starts under Tokio's multi-thread
+                    scheduler; dynamic worker-thread count remains deferred and
+                    the default runtime kind remains serial.
+  Verify:           cargo test -p nbd-server --bin nbd-server
+                    cargo clippy -p nbd-server --bin nbd-server -- -D warnings
+  Risks:            This is a startup policy change; it must not pretend that
+                    worker-thread count is dynamically configurable from the
+                    loaded server config.
+  Not included:     `tokio_worker_threads` config, concurrent runtime
+                    selection, or making concurrent runtime the default.
+  Depends on:       4
+
+Commit 6/7: registry: opt into concurrent runtime
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ExportRuntimeKind::Concurrent`, wire
+                    `LocalExportRegistry` to construct the concurrent runtime
+                    when configured, and test same-owner sharing below the
+                    protocol layer.
+  Invariant focus:  Runtime kind is process-local policy for newly opened
+                    exports; serial remains the default; same-owner opens
+                    share one active runtime and one queue-depth domain.
+  Test level:       integration
+  Review gate:      migration
+  Files:            crates/nbd-config/src/lib.rs
+                    crates/nbd-config/tests/config_loading.rs
+                    crates/nbd-server/src/registry.rs
+                    crates/nbd-server/tests/local_export_registry.rs
+  Preconditions:    Commit 5 has made the server binary capable of real Tokio
+                    parallelism before config can expose the concurrent
+                    runtime.
+  Postconditions:   Config parsing accepts `export_runtime = "concurrent"`;
+                    default config still selects serial; newly opened exports
+                    choose serial or concurrent runtime from process config;
+                    same-owner registry opens share the configured active
+                    runtime; different synthetic owners remain rejected.
+  Verify:           cargo test -p nbd-config
+                    cargo test -p nbd-server --test local_export_registry
+                    cargo test -p nbd-server --test export_runtime
+  Risks:            This is the public opt-in cutover. It must not advertise
+                    NBD multi-connection or let different synthetic owners
+                    create independent serving domains for one export.
+  Not included:     Concurrent protocol smoke, durable storage, production
+                    client identity, or changing the default runtime kind.
+  Depends on:       5
+
+Commit 7/7: tests: smoke concurrent protocol path
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Extend the userspace protocol harness to start the server
+                    with concurrent runtime config and add an opt-in
+                    end-to-end smoke that exercises pipelined transmission
+                    through the concurrent path.
+  Invariant focus:  The concurrent runtime is validated through the same NBD
+                    userspace protocol path as the serial baseline while Docker
+                    smoke continues to prove the default serial kernel path.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-test-support/src/lib.rs
+                    crates/nbd-server/tests/support/nbd.rs
+                    crates/nbd-server/tests/tcp_integration.rs
+  Preconditions:    Commit 6 has exposed the concurrent runtime through
+                    process config while keeping production protocol
+                    multi-connection disabled.
+  Postconditions:   `make test-protocol` includes at least one concurrent
+                    runtime userspace scenario that sends pipelined requests
+                    and validates replies by cookie and visible data; existing
+                    serial protocol scenarios still pass; Docker smoke remains
+                    on the default serial path.
+  Verify:           make test-protocol
+                    cargo test --workspace
+                    cargo fmt --all --check
+                    cargo clippy --workspace --all-targets -- -D warnings
+                    make docker-smoke
+  Risks:            The smoke must prove the config-selected concurrent path is
+                    actually used, not merely rerun the default serial fixture.
+                    It must also keep order-tolerant assertions for
+                    non-conflicting pipelined replies.
+  Not included:     A new make target, kernel concurrent smoke, production
+                    multi-connection advertisement, durable engine coverage,
+                    or making concurrent runtime the default.
+  Depends on:       6
