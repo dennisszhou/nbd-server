@@ -3,11 +3,13 @@ Date: 2026-05-03
 Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 5 finished; connection admission concurrency execution
-  complete
+- current state: Series 5 and the approved concurrent-runtime-default follow-up
+  are finished; connection admission concurrency execution complete
 Completion:
 - execution complete: yes
 - completed series: Series 1, Series 2, Series 3, Series 4, Series 5
+- completed follow-up: concurrent runtime default and fixed four-worker
+  `nbd-server` Tokio startup policy
 - next series: none; durable engine work should start a new design and
   execution artifact
 
@@ -31,6 +33,8 @@ The target end state is:
 ## Design Inputs
 
 - `docs/plans/2026-05-03-connection-admission-concurrency.md`
+- `docs/plans/2026-05-03-concurrent-runtime-default.md`
+  (post-completion follow-up)
 
 ## Why Split
 
@@ -929,6 +933,19 @@ and confirmed mounted NBD write/readback. Concurrent runtime remains opt-in;
 durable storage, real client identity for production multi-connection,
 concurrent kernel smoke, dynamic Tokio worker sizing, and making concurrent
 runtime the default are deferred to future design and execution work.
+
+Post-completion follow-up: the approved concurrent-runtime-default design
+landed in commits `9994e89` through `41d69c0`. The follow-up pinned the
+`nbd-server` binary to four Tokio worker threads, added explicit serial
+registry and userspace protocol coverage, and changed missing
+`server.export_runtime` config to select `ConcurrentExportRuntime`. Review
+found no blocking findings. Verification passed: `cargo test -p nbd-config`,
+`cargo test -p nbd-server --test local_export_registry`,
+`make test-protocol`, `cargo fmt --all --check`, `cargo test --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`make docker-smoke`. Docker smoke now remains config-minimal and validates the
+default concurrent kernel path by mounting, writing through NBD, dropping
+caches, and reading the probe file back.
 
 Commit 1/7: docs/execution: plan concurrent runtime series
 
