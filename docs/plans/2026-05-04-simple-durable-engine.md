@@ -258,15 +258,26 @@ pub struct BlobKey(String);
 
 impl LocalBlobStore {
     async fn create_blob(&self, data: &[u8]) -> Result<BlobKey>;
-    async fn write_blob(&self, key: &BlobKey, data: &[u8]) -> Result<()>;
+    async fn replace_blob(&self, key: &BlobKey, data: &[u8])
+        -> Result<()>;
     async fn read_blob(&self, key: &BlobKey, offset: u64, len: u64)
         -> Result<Vec<u8>>;
 }
 ```
 
-`write_blob` replaces the full blob contents. It is not a partial write API.
+`replace_blob` replaces the full blob contents. It is not a partial write API.
+`BlobKey` is a storage key, not a path, and must validate as one safe path
+component.
 
 ```rust
+pub struct ChunkIndex(u64);
+
+pub struct SimpleChunkRef {
+    chunk_index: ChunkIndex,
+    blob_key: BlobKey,
+    len_bytes: u64,
+}
+
 pub struct SimpleMutableTree {
     export_id: ExportId,
     size_bytes: u64,
@@ -278,10 +289,10 @@ impl SimpleMutableTree {
     async fn load(catalog: Arc<dyn ExportCatalog>, meta: &ExportMeta)
         -> Result<Self>;
 
-    async fn lookup_chunk(&self, chunk_index: u64)
+    async fn lookup_chunk(&self, chunk_index: ChunkIndex)
         -> Result<Option<BlobKey>>;
 
-    async fn commit_new_chunks(&self, chunks: Vec<NewSimpleChunk>)
+    async fn commit_new_chunks(&self, chunks: Vec<SimpleChunkRef>)
         -> Result<()>;
 }
 ```
@@ -290,6 +301,9 @@ impl SimpleMutableTree {
 mutex. Two writes to different sparse chunks may perform file work in
 parallel, but root creation and tree row insertion must serialize so both
 writes are represented in the current head.
+
+`ChunkIndex` is the logical 32 MiB chunk number. In the v1 root-to-leaf tree it
+maps directly to `tree_edges.slot`.
 
 ```rust
 pub struct SimpleDurableEngine {

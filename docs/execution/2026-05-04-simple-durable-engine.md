@@ -3,11 +3,11 @@ Date: 2026-05-04
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 2 finished; Series 3 pending review and approval
+- current state: Series 3 approved
 Completion:
 - execution complete: no
 - completed series: Series 1 and Series 2
-- next series: Series 3, pending review and approval
+- next series: Series 3, approved for implementation
 
 ## Goal
 
@@ -145,13 +145,14 @@ DB references to unwritten blobs.
 
 Done means: `runtime.blob_dir` can be configured and defaults safely for
 generated config; `LocalBlobStore` can create, replace, and range-read one
-blob; `SimpleMutableTree` can load current head metadata, resolve sparse
-zeroes using a v1 root node with direct leaf edges keyed by chunk index, commit
-newly materialized chunks after blob work succeeds, and update its in-memory
-view only after DB commit; tests cover a 128 MiB example with sparse chunk
-reads and later leaf insertion.
+blob using `create_blob`, `replace_blob`, `read_blob`, and validated
+`BlobKey` values; `SimpleMutableTree` can load current head metadata, resolve
+sparse zeroes using a v1 root node with direct leaf edges keyed by
+`ChunkIndex`, commit newly materialized `SimpleChunkRef` values after blob
+work succeeds, and update its in-memory view only after DB commit; tests cover
+a 128 MiB example with sparse chunk reads and later leaf insertion.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
