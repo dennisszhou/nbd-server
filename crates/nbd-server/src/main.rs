@@ -7,7 +7,7 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
         eprintln!("error: {error}");
