@@ -1,12 +1,14 @@
 //! NBD server implementation with an in-memory export backend.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod admission;
 mod connection;
 
 pub mod error;
 pub mod export;
+// The memory module owns the admitted unsafe byte-storage boundary.
+#[allow(unsafe_code)]
 pub mod memory;
 pub mod registry;
 pub mod runtime;

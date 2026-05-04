@@ -4,8 +4,10 @@ use crate::{
     ServerError,
 };
 use nbd_control_plane::{ExportMeta, ExportName};
+use std::cell::UnsafeCell;
+use std::fmt;
+use std::ptr;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 pub const MAX_MEMORY_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -14,8 +16,17 @@ pub struct MemoryExportEngine {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
-    data: Mutex<Vec<u8>>,
+    data: MemoryStorage,
 }
+
+struct MemoryStorage {
+    bytes: Box<[UnsafeCell<u8>]>,
+}
+
+// SAFETY: MemoryStorage is only accessed through admitted export requests.
+// ExportAdmissionCtl guarantees that concurrently active reads and writes do
+// not conflict by byte range, and MemoryExportEngine never resizes storage.
+unsafe impl Sync for MemoryStorage {}
 
 #[derive(Debug)]
 pub struct MemoryAdmissionProfile {
@@ -63,7 +74,7 @@ impl MemoryExportEngine {
             name: meta.name().clone(),
             size_bytes,
             block_size: meta.block_size(),
-            data: Mutex::new(vec![0; size_bytes as usize]),
+            data: MemoryStorage::new(size_bytes as usize),
         })
     }
 
@@ -98,27 +109,68 @@ impl MemoryExportEngine {
         Ok(offset as usize)
     }
 
-    fn data(&self) -> Result<std::sync::MutexGuard<'_, Vec<u8>>> {
-        self.data.lock().map_err(|_| ServerError::LockPoisoned {
-            resource: "memory export data",
-        })
-    }
-
-    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+    fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
         let start = self.validate_range("read", offset, u64::from(len))?;
-        let end = start + len as usize;
-        Ok(self.data()?[start..end].to_vec())
+        Ok(self.data.read(start, len as usize))
     }
 
-    async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let start = self.validate_range("write", offset, data.len() as u64)?;
-        let end = start + data.len();
-        self.data()?[start..end].copy_from_slice(data);
+        self.data.write(start, data);
         Ok(())
     }
 
-    async fn flush(&self) -> Result<()> {
+    fn flush(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+impl MemoryStorage {
+    fn new(size_bytes: usize) -> Self {
+        let mut bytes = Vec::with_capacity(size_bytes);
+        bytes.resize_with(size_bytes, || UnsafeCell::new(0));
+        Self {
+            bytes: bytes.into_boxed_slice(),
+        }
+    }
+
+    fn read(&self, start: usize, len: usize) -> Vec<u8> {
+        let mut data = vec![0; len];
+        if len == 0 {
+            return data;
+        }
+
+        // SAFETY: validate_range checked that start..start+len is in bounds.
+        // Admission ensures no active writer overlaps this read range. Each
+        // UnsafeCell<u8> has u8 layout, and the boxed slice is contiguous.
+        unsafe {
+            let source = self.bytes.as_ptr().cast::<u8>().add(start);
+            ptr::copy_nonoverlapping(source, data.as_mut_ptr(), len);
+        }
+        data
+    }
+
+    fn write(&self, start: usize, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+
+        // SAFETY: validate_range checked that start..start+data.len() is in
+        // bounds. Admission ensures no active reader or writer overlaps this
+        // write range. UnsafeCell<u8> has u8 layout, and the boxed slice is
+        // contiguous.
+        unsafe {
+            let target = self.bytes.as_ptr().cast::<u8>().add(start).cast_mut();
+            ptr::copy_nonoverlapping(data.as_ptr(), target, data.len());
+        }
+    }
+}
+
+impl fmt::Debug for MemoryStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryStorage")
+            .field("len", &self.bytes.len())
+            .finish()
     }
 }
 
@@ -129,19 +181,170 @@ impl ExportEngine for MemoryExportEngine {
     }
 
     async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
-        let (request, _permit) = request.into_parts();
+        // Keep the admission permit live for the full storage access below.
+        let (request, _admission_permit) = request.into_parts();
         match request {
             ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
-                data: self.read(offset, len).await?,
+                data: self.read(offset, len)?,
             }),
             ExportRequest::Write { offset, data } => {
-                self.write(offset, &data).await?;
+                self.write(offset, &data)?;
                 Ok(ExportReply::Done)
             }
             ExportRequest::Flush => {
-                self.flush().await?;
+                self.flush()?;
                 Ok(ExportReply::Done)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExportAdmissionCtl, ExportEngine};
+    use nbd_control_plane::{
+        CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportState, Timestamp, WalSeq,
+    };
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admitted_non_overlapping_writes_can_share_storage() {
+        let meta = export_meta("disk-a", 4096);
+        let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
+        let admission = ExportAdmissionCtl::new(meta.size_bytes());
+        let profile = engine.admission_profile();
+
+        let left_request = ExportRequest::Write {
+            offset: 0,
+            data: b"aaaa".to_vec(),
+        };
+        let right_request = ExportRequest::Write {
+            offset: 4,
+            data: b"bbbb".to_vec(),
+        };
+        let left_permit = admission
+            .register(
+                profile
+                    .operation_for(&left_request)
+                    .expect("left admission op"),
+            )
+            .expect("left admission")
+            .wait()
+            .await
+            .expect("left permit");
+        let right_permit = admission
+            .register(
+                profile
+                    .operation_for(&right_request)
+                    .expect("right admission op"),
+            )
+            .expect("right admission")
+            .wait()
+            .await
+            .expect("right permit");
+
+        let left_engine = engine.clone();
+        let left = tokio::spawn(async move {
+            left_engine
+                .execute_admitted(AdmittedExportRequest::new(left_request, left_permit))
+                .await
+        });
+        let right_engine = engine.clone();
+        let right = tokio::spawn(async move {
+            right_engine
+                .execute_admitted(AdmittedExportRequest::new(right_request, right_permit))
+                .await
+        });
+
+        assert_eq!(
+            left.await.expect("left task").expect("left write"),
+            ExportReply::Done
+        );
+        assert_eq!(
+            right.await.expect("right task").expect("right write"),
+            ExportReply::Done,
+        );
+
+        let read_request = ExportRequest::Read { offset: 0, len: 8 };
+        let read_permit = admission
+            .register(
+                profile
+                    .operation_for(&read_request)
+                    .expect("read admission op"),
+            )
+            .expect("read admission")
+            .wait()
+            .await
+            .expect("read permit");
+        assert_eq!(
+            engine
+                .execute_admitted(AdmittedExportRequest::new(read_request, read_permit))
+                .await
+                .expect("read"),
+            ExportReply::Read {
+                data: b"aaaabbbb".to_vec(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_profile_blocks_overlapping_requests_in_admission() {
+        let meta = export_meta("disk-a", 4096);
+        let engine = MemoryExportEngine::new(&meta).expect("memory export");
+        let admission = ExportAdmissionCtl::new(meta.size_bytes());
+        let profile = engine.admission_profile();
+
+        let write_request = ExportRequest::Write {
+            offset: 0,
+            data: b"aaaa".to_vec(),
+        };
+        let write_permit = admission
+            .register(
+                profile
+                    .operation_for(&write_request)
+                    .expect("write admission op"),
+            )
+            .expect("write admission")
+            .wait()
+            .await
+            .expect("write permit");
+        let read_request = ExportRequest::Read { offset: 1, len: 2 };
+        let read_waiter = admission
+            .register(
+                profile
+                    .operation_for(&read_request)
+                    .expect("read admission op"),
+            )
+            .expect("read admission");
+        let pending_read = tokio::spawn(async move { read_waiter.wait().await });
+
+        tokio::task::yield_now().await;
+        assert!(
+            !pending_read.is_finished(),
+            "overlapping read should wait for the active write permit",
+        );
+
+        drop(write_permit);
+        pending_read
+            .await
+            .expect("read waiter task")
+            .expect("read permit");
+    }
+
+    fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
+        ExportMeta::new(
+            ExportId::new(format!("export-{name}")).expect("export id"),
+            ExportName::new(name).expect("export name"),
+            size_bytes,
+            4096,
+            ExportEngineKind::Memory,
+            ExportState::Active,
+            CommittedRoot::new(None, WalSeq::zero(), ExportGeneration::zero()),
+            Timestamp::new("created").expect("created timestamp"),
+            Timestamp::new("updated").expect("updated timestamp"),
+            None,
+        )
+        .expect("export meta")
     }
 }
