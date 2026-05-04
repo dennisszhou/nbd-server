@@ -1,6 +1,7 @@
 mod support;
 
 use nbd_config::{ExportRuntimeKind, ServerConfig};
+use nbd_control_plane::SIMPLE_CHUNK_BYTES;
 use nbd_protocol::constants::{
     NBD_CMD_WRITE, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT,
     NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
@@ -764,6 +765,103 @@ async fn pipelined_flush_preserves_prior_write_visibility() {
         .await
         .expect("disconnect raw client");
     server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn simple_durable_protocol_reads_writes_and_flushes() {
+    let fixture = ServerFixture::new(EngineProfile::SIMPLE_DURABLE)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-durable", SIMPLE_CHUNK_BYTES + 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = NbdClient::connect(server.addr(), "disk-durable")
+        .await
+        .expect("connect client");
+
+    assert_eq!(
+        client.read(0, 4).await.expect("initial sparse read"),
+        vec![0; 4]
+    );
+    client
+        .write(SIMPLE_CHUNK_BYTES - 2, b"abcd")
+        .await
+        .expect("cross-chunk write");
+    client.flush().await.expect("flush");
+    assert_eq!(
+        client
+            .read(SIMPLE_CHUNK_BYTES - 4, 8)
+            .await
+            .expect("read cross-chunk data"),
+        b"\0\0abcd\0\0".to_vec(),
+    );
+    assert_eq!(
+        client
+            .read(SIMPLE_CHUNK_BYTES + 128, 4)
+            .await
+            .expect("read sparse tail"),
+        vec![0; 4],
+    );
+
+    client.disconnect().await.expect("disconnect");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn simple_durable_protocol_persists_across_restart() {
+    let fixture = ServerFixture::new(EngineProfile::SIMPLE_DURABLE)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-durable", SIMPLE_CHUNK_BYTES + 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = NbdClient::connect(server.addr(), "disk-durable")
+        .await
+        .expect("connect first client");
+    client.write(0, b"persist").await.expect("write chunk zero");
+    client
+        .write(SIMPLE_CHUNK_BYTES + 4, b"tail")
+        .await
+        .expect("write tail chunk");
+    client.flush().await.expect("flush writes");
+    client.disconnect().await.expect("disconnect first client");
+    server.shutdown().await.expect("shutdown first server");
+
+    let restarted = fixture.start_server().await.expect("restart server");
+    let mut client = NbdClient::connect(restarted.addr(), "disk-durable")
+        .await
+        .expect("connect restarted client");
+
+    assert_eq!(
+        client.read(0, 7).await.expect("read persisted head"),
+        b"persist".to_vec(),
+    );
+    assert_eq!(
+        client
+            .read(SIMPLE_CHUNK_BYTES, 8)
+            .await
+            .expect("read persisted tail"),
+        b"\0\0\0\0tail".to_vec(),
+    );
+    assert_eq!(
+        client.read(1024, 4).await.expect("read sparse middle"),
+        vec![0; 4],
+    );
+
+    client
+        .disconnect()
+        .await
+        .expect("disconnect restarted client");
+    restarted
+        .shutdown()
+        .await
+        .expect("shutdown restarted server");
 }
 
 fn assert_unknown_export(result: nbd_us_client::Result<NbdClient>) {

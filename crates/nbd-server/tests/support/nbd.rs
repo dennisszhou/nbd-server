@@ -45,6 +45,9 @@ impl EngineProfile {
     pub const MEMORY: Self = Self {
         kind: ExportEngineKind::Memory,
     };
+    pub const SIMPLE_DURABLE: Self = Self {
+        kind: ExportEngineKind::SimpleDurable,
+    };
 
     pub fn kind(self) -> ExportEngineKind {
         self.kind
