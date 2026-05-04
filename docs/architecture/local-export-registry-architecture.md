@@ -198,7 +198,9 @@ belong to the same authenticated client/host. That requires auth to
 differentiate hosts and is out of scope for the first implementation.
 
 The first implementation should allow only one active writable connection per
-export.
+export. Runtime and admission boundaries should still be written so multiple
+same-owner connections can share one active export ordering domain once the
+registry has a real client identity to compare.
 
 # Close Flow
 

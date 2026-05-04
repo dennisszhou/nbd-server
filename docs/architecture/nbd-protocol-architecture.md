@@ -120,10 +120,10 @@ connection B ─┼─> export X admission/work -> reply queue A/B/C
 connection C ─┘
 ```
 
-The Series 4 in-memory server may collapse this to one sequential connection
-task that reads a request, executes `MemoryExport`, and writes a reply. That is
-an implementation shortcut for the first vertical slice, not the long-term
-socket architecture.
+The earliest in-memory server collapsed this to one sequential connection task
+that read a request, executed `MemoryExport`, and wrote a reply. That was an
+implementation shortcut for the first vertical slice, not the long-term socket
+architecture.
 
 # Runtime Boundaries
 
@@ -456,9 +456,13 @@ the first implementation.
 The default is conservative: one active writable NBD connection per export.
 
 Multiple transport connections still use separate per-connection inbound and
-outbound ownership. If future authenticated multi-connection support is
-enabled, all connections serving the same export must route through the same
-export admission/order boundary.
+outbound ownership. Runtime ordering should be correct for multiple
+same-owner connections sharing one active export before the server advertises
+multi-connection support. Future authentication and client identity policy
+decides which connections are same-owner; separate-client acceptance is out of
+scope until that policy exists. If future authenticated multi-connection
+support is enabled, all connections serving the same export must route through
+the same export admission/order boundary.
 
 # Invariants
 

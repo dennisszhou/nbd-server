@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 3 finished; Series 4 pending review
+- current state: Series 4 approved
 Completion:
 - execution complete: no
 - completed series: Series 1, Series 2, Series 3
-- next series: Series 4 pending review
+- next series: Series 4 approved
 
 ## Goal
 
@@ -21,9 +21,9 @@ The target end state is:
 - a comprehensive userspace protocol integration suite that defines the
   transmission contract before the connection runtime is split;
 - a `ConnectionRuntime` with independent request read and reply write paths;
-- an opt-in `ConcurrentExportRuntime` behind the existing runtime trait;
 - `MemoryExportEngine` storage that does not hide correctness behind an
   export-wide semantic mutex;
+- an opt-in `ConcurrentExportRuntime` behind the existing runtime trait;
 - userspace concurrent-runtime validation plus Docker kernel smoke regression.
 
 ## Design Inputs
@@ -45,8 +45,10 @@ The execution checkpoints are:
    on the serial runtime path;
 3. split connection transmission into reader and writer tasks using the new
    runtime/completion boundary;
-4. add the concurrent runtime, memory-engine synchronization change, config
-   wiring, and opt-in validation.
+4. make admitted export requests the only memory-engine execution path and
+   move memory synchronization behind `ExportAdmissionCtl`;
+5. add the concurrent runtime, config wiring, multi-thread Tokio policy, and
+   opt-in validation.
 
 ## Series 1: Userspace Protocol Integration Baseline
 
@@ -651,25 +653,246 @@ Commit 5/5: tests: cover connection runtime pipelining
                     concurrent runtime the default.
   Depends on:       4
 
-## Series 4: Concurrent Runtime And Memory Synchronization
+## Series 4: Admission-Backed Memory Boundary
 
 Depends on: Series 3
 
 Design coverage:
 `docs/plans/2026-05-03-connection-admission-concurrency.md`
 
+Stable checkpoint: every `ExportEngine` execution goes through
+`AdmittedExportRequest`, `SerialExportRuntime` acquires
+`ExportAdmissionCtl` permits before engine execution, and
+`ExportAdmissionCtl` owns active extent validation before admitted execution.
+`MemoryExportEngine` storage safety no longer depends on an export-wide
+semantic mutex or any safe raw `ExportRequest` execution path.
+
+Review focus: admitted request API shape, removal of safe engine bypasses,
+admission extent validation, serial runtime admission wiring, unsafe memory
+boundary size, range coverage for every byte the memory engine may touch, and
+tests that prove admission rather than memory locking owns read/write/flush
+correctness.
+
+Done means: the memory engine cannot be safely called with a bare
+`ExportRequest`, out-of-bounds admission operations fail before receiving
+tickets, direct admitted memory tests prove compatible operations can overlap
+while conflicting operations and flush barriers are ordered by admission,
+serial runtime and protocol tests still pass through the admitted engine path,
+and Docker kernel smoke still passes on the default serial path.
+
+Approval: approved
+
+Verification plan:
+
+```text
+cargo test -p nbd-server admission
+cargo test -p nbd-server --test export_runtime
+cargo test -p nbd-server --test memory_export
+make test-protocol
+cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+make docker-smoke
+```
+
+Not included: `ConcurrentExportRuntime`, runtime config rollout,
+multi-thread Tokio policy, `DurableExportEngine`, WAL, read views, storage
+work queues, cross-process serving leases, authentication/client identity, or
+advertising `NBD_FLAG_CAN_MULTI_CONN`.
+
+Commit 1/5: docs/plans: revise admitted memory boundary
+
+  Type:             docs
+  Required:         yes
+  Summary:          Commit the approved design and execution deltas that split
+                    admitted memory from concurrent scheduling and align the
+                    architecture docs with the admitted engine boundary.
+  Invariant focus:  Series 4 owns the admitted memory safety boundary; Series
+                    5 owns concurrent runtime scheduling and config rollout.
+  Test level:       none
+  Review gate:      structures
+  Files:            docs/plans/2026-05-03-connection-admission-concurrency.md
+                    docs/execution/2026-05-03-connection-admission-concurrency.md
+                    docs/architecture/export-admission-control.md
+                    docs/architecture/local-export-registry-architecture.md
+                    docs/architecture/nbd-protocol-architecture.md
+                    docs/architecture/nbd-s3-long-term-architecture.md
+  Preconditions:    Series 3 is finished and the revised Series 4/5 split has
+                    been accepted for execution planning.
+  Postconditions:   The active docs contain no engine-guard API path, Series 4
+                    is scoped to admitted memory, Series 5 is scoped to
+                    concurrent runtime rollout, and architecture docs match
+                    the same-owner multi-connection stance.
+  Verify:           git diff --cached --check
+  Risks:            Low; this is planning and architecture alignment only.
+  Not included:     Any runtime, engine, memory storage, or test code changes.
+  Depends on:       Series 3
+
+Commit 2/5: admission: validate ranges against extent
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add active extent size to `ExportAdmissionCtl` and reject
+                    read/write admission operations whose ranges overflow or
+                    extend past that extent before assigning tickets.
+  Invariant focus:  Admission tickets are assigned only to operations within
+                    the current active export extent; future resize has a
+                    single admission-owned extent update point.
+  Test level:       unit
+  Review gate:      structures
+  Files:            crates/nbd-server/src/admission.rs
+                    crates/nbd-server/tests/admission.rs
+  Preconditions:    Commit 1 has landed the approved Series 4 execution
+                    contract; current admission tests cover ordering and
+                    waiter liveness without extent validation.
+  Postconditions:   `ExportAdmissionCtl` is constructed with an active extent,
+                    range operations outside that extent fail without tickets
+                    or waiters, and existing admission ordering tests still
+                    pass inside the extent.
+  Verify:           cargo test -p nbd-server admission
+  Risks:            Existing callers and tests must not silently fall back to
+                    an unbounded admission controller.
+  Not included:     Resize implementation, admitted engine execution, memory
+                    storage changes, or concurrent runtime scheduling.
+  Depends on:       1
+
+Commit 3/5: export: require admitted engine execution
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add `ExportAdmissionProfile` and
+                    `AdmittedExportRequest`, replace
+                    `ExportEngine::execute` with `execute_admitted`, and make
+                    `SerialExportRuntime` acquire profile-derived admission
+                    before engine execution.
+  Invariant focus:  Engine execution receives a real `AdmissionPermit` for the
+                    active profile's storage-touch operation; serial execution
+                    is stricter than admission but is not a bypass around the
+                    admitted engine contract.
+  Test level:       integration
+  Review gate:      structures
+  Files:            crates/nbd-server/src/export.rs
+                    crates/nbd-server/src/runtime.rs
+                    crates/nbd-server/src/memory.rs
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/src/connection.rs
+                    crates/nbd-server/tests/export_runtime.rs
+                    crates/nbd-server/tests/memory_export.rs
+  Preconditions:    Commit 2 has made `ExportAdmissionCtl` own active extent
+                    validation and already provides tested permits.
+  Postconditions:   All runtime-driven engine calls ask the active admission
+                    profile for an `AdmissionOp`, construct an admitted
+                    request from the original request and permit, and preserve
+                    externally visible serial runtime behavior.
+  Verify:           cargo test -p nbd-server admission
+                    cargo test -p nbd-server --test export_runtime
+                    cargo test -p nbd-server connection::tests
+                    make test-protocol
+  Risks:            This changes the core engine trait and every test engine;
+                    reviewers should confirm profile-derived admission ranges
+                    cover the full storage-touch range, permits are held for
+                    the full engine execution, and permits drop before
+                    completion handoff can wait on a reply queue.
+  Not included:     Removing direct memory read/write bypasses, unsafe memory
+                    storage, `ConcurrentExportRuntime`, or config rollout.
+  Depends on:       2
+
+Commit 4/5: memory: remove raw access bypasses
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Remove the public direct memory access path and make
+                    memory read/write helpers private implementation details
+                    behind admitted engine execution.
+  Invariant focus:  Safe callers cannot observe or mutate memory storage with
+                    a bare `ExportRequest` or direct memory export API.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/export.rs
+                    crates/nbd-server/src/memory.rs
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/tests/memory_export.rs
+                    crates/nbd-server/tests/export_runtime.rs
+  Preconditions:    Commit 3 has made the runtime and engine path use
+                    `AdmittedExportRequest`.
+  Postconditions:   External tests and callers exercise memory behavior
+                    through runtime/admitted execution; the old direct
+                    `Export`/`ExportHandle` memory path is gone or no longer
+                    exposes storage mutation.
+  Verify:           cargo test -p nbd-server --test memory_export
+                    cargo test -p nbd-server --test export_runtime
+                    make test-protocol
+  Risks:            This is an API cleanup inside the crate boundary; the main
+                    risk is leaving a convenient public helper that still
+                    bypasses admission.
+  Not included:     Removing the memory storage mutex, adding unsafe storage,
+                    or introducing concurrent runtime scheduling.
+  Depends on:       3
+
+Commit 5/5: memory: use admitted unsafe storage
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Replace the memory engine's export-wide storage mutex with
+                    a small audited unsafe storage boundary reachable only
+                    through `AdmittedExportRequest`.
+  Invariant focus:  `ExportAdmissionCtl` owns read/write/flush correctness;
+                    memory storage trusts the `MemoryAdmissionProfile` and
+                    admitted request permit to exclude overlapping storage
+                    touches.
+  Test level:       functional
+  Review gate:      code
+  Files:            crates/nbd-server/src/lib.rs
+                    crates/nbd-server/src/memory.rs
+                    crates/nbd-server/tests/memory_export.rs
+                    crates/nbd-server/tests/export_runtime.rs
+  Preconditions:    Commit 4 has removed safe raw memory bypasses, so unsafe
+                    storage cannot be reached without admitted execution.
+  Postconditions:   `MemoryExportEngine` no longer uses an export-wide
+                    semantic `Mutex<Vec<u8>>`; tests prove admitted
+                    non-overlapping operations can coexist, overlapping
+                    operations are blocked by admission, read-after-write
+                    visibility holds, and flush remains ordered.
+  Verify:           cargo test -p nbd-server admission
+                    cargo test -p nbd-server --test memory_export
+                    cargo test -p nbd-server --test export_runtime
+                    make test-protocol
+                    cargo test --workspace
+                    cargo fmt --all --check
+                    cargo clippy --workspace --all-targets -- -D warnings
+                    make docker-smoke
+  Risks:            High-risk correctness boundary: unsafe code must stay
+                    small, documented, and tied to exact
+                    `MemoryAdmissionProfile` byte ranges. Any future cacheline
+                    or word expansion must update that profile in the same
+                    change.
+  Not included:     `ConcurrentExportRuntime`, Tokio worker-thread changes,
+                    runtime config rollout, durable storage, WAL, or
+                    advertising `NBD_FLAG_CAN_MULTI_CONN`.
+  Depends on:       4
+
+## Series 5: Concurrent Runtime And Config Rollout
+
+Depends on: Series 4
+
+Design coverage:
+`docs/plans/2026-05-03-connection-admission-concurrency.md`
+
 Stable checkpoint: `ConcurrentExportRuntime` is opt-in through process config,
-uses `ExportAdmissionCtl`, shares queue depth across active connections for one
-export, tracks runtime close/drain, and runs against a memory engine whose
-storage safety no longer depends on an export-wide semantic mutex.
+uses the admitted engine boundary established in Series 4, registers
+admission before spawning request tasks, shares queue depth across same-owner
+connections for one active export, tracks runtime close/drain, and runs under
+a Tokio runtime policy capable of real parallel request execution.
 
 Review focus: admission registration before spawn, task lifecycle tracking,
-flush/read/write ordering, queue-depth backpressure, memory-engine data-race
-safety, config rollout, and Tokio runtime worker-thread policy.
+waiting-admission cancellation, flush/read/write ordering, queue-depth
+backpressure through reply write/drop, same-owner multi-connection ordering
+domain, config rollout, and Tokio runtime worker-thread policy.
 
 Done means: concurrent runtime tests prove compatible operations can overlap,
 conflicting operations and flush barriers are ordered by admission, queue depth
-is held through reply write/drop, userspace concurrent smoke passes, and Docker
+is held through reply write/drop, close/drain settles waiting and executing
+jobs without detached mutations, userspace concurrent smoke passes, and Docker
 kernel smoke still passes on the default serial path.
 
 Approval: pending
@@ -677,8 +900,9 @@ Approval: pending
 Verification plan:
 
 ```text
+cargo test -p nbd-server admission
 cargo test -p nbd-server --test export_runtime
-cargo test -p nbd-server --test tcp_integration
+make test-protocol
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -686,5 +910,5 @@ make docker-smoke
 ```
 
 Not included: `DurableExportEngine`, WAL, read views, storage work queues,
-cross-process serving leases, authenticated multi-connection support, or making
-the concurrent runtime the default.
+cross-process serving leases, authentication/client identity, advertising
+`NBD_FLAG_CAN_MULTI_CONN`, or making the concurrent runtime the default.

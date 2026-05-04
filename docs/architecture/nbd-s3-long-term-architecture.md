@@ -157,8 +157,10 @@ impl Export {
 The broad architecture's `Export` means the active serving boundary for one
 opened export. In code, this can be split into `ExportRuntime` plus
 `ExportEngine`: the runtime owns request queueing, admission, and execution
-policy, while the engine owns data behavior. The boundary does not own WAL
-format, object I/O, or catalog schema.
+policy, while the engine owns data behavior. Engine execution may be guarded
+by an admitted request capability so storage access cannot bypass the
+per-export admission boundary. The boundary does not own WAL format, object
+I/O, or catalog schema.
 
 ## ExportAdmissionCtl
 

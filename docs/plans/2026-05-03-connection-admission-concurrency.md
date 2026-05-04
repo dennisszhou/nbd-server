@@ -37,6 +37,10 @@ Define a small, implementable runtime design that:
 - uses NBD cookies as the reply correlation key;
 - introduces `ExportAdmissionCtl` as the per-export read/write/flush ordering
   source of truth and owner of dynamic range-lock state;
+- makes admitted export requests the only engine execution path, so memory
+  access cannot bypass admission;
+- routes request-to-admission mapping through an admission profile so backing
+  stores can define the storage-touch range they require;
 - adds `ConcurrentExportRuntime` behind an export-runtime reservation and
   submission boundary;
 - preserves `SerialExportRuntime` as the simple baseline and test oracle;
@@ -66,7 +70,10 @@ Define a small, implementable runtime design that:
 - Implementing `DurableExportEngine`, WAL, `ExportReadView`, object storage,
   compaction, or checkpoint publication.
 - Implementing cross-process serving leases or writer fencing.
-- Supporting authenticated same-owner multi-connection mounts.
+- Implementing authentication, client identity, or advertising
+  `NBD_FLAG_CAN_MULTI_CONN`. Runtime ordering should still be correct for
+  multiple same-owner connections sharing one active export once the registry
+  can identify them.
 - Adding a general-purpose workqueue framework before there are multiple real
   queue classes in code.
 - Changing the catalog schema.
@@ -92,7 +99,7 @@ After this design is implemented:
   queue-depth capacity;
 - admission order is assigned by the export runtime's accepted-job order, not
   by Tokio task polling order;
-- every read, write, and flush executed by `ConcurrentExportRuntime` holds an
+- every engine execution observes an `AdmittedExportRequest` that carries an
   `ExportAdmissionCtl` permit for the operation's semantic duration;
 - `ExportAdmissionCtl` permits compatible operations concurrently and enforces
   ordered conflicts for overlapping writes and flush barriers;
@@ -115,7 +122,7 @@ ExportRuntime
   owns shared queue depth across connections
   moves export work off the connection runtime
   chooses serial or concurrent execution policy
-  owns ExportAdmissionCtl and its range-lock table
+  owns ExportAdmissionCtl, admission profile, and range-lock table
 
 ExportEngine
   owns data behavior for one active export
@@ -210,14 +217,8 @@ struct ExportCompletion {
 }
 
 enum ExportCompletionTarget {
-    OneShot(oneshot::Sender<ExportResult>),
-    Connection(ConnectionExportCompletion),
-}
-
-struct ConnectionExportCompletion {
-    cookie: u64,
-    expected: ReplyKind,
-    replies: mpsc::Sender<ConnectionReply>,
+    OneShot(oneshot::Sender<CompletedExport>),
+    Sink(Box<dyn ExportCompletionSink>),
 }
 
 impl ExportCompletion {
@@ -225,17 +226,32 @@ impl ExportCompletion {
         self,
         result: ExportResult,
         slot: ExportQueueSlot,
-    ) -> Result<()>;
+    );
 }
 ```
 
 `ExportRuntime` completes work by calling
 `completion.complete(result, slot).await`. `ExportEngine` only returns
 `ExportResult`; it does not know about completion targets, cookies, queue
-slots, or NBD error encoding.
+slots, reply queues, or NBD error encoding.
 
-The connection sink packages the export result with the request cookie and the
-expected reply kind:
+Connection-specific completion state lives behind an opaque completion sink,
+not in the export module:
+
+```rust
+trait ExportCompletionSink: Send {
+    async fn complete(self: Box<Self>, completed: CompletedExport);
+}
+
+struct ConnectionExportCompletion {
+    cookie: u64,
+    expected: ReplyKind,
+    replies: mpsc::Sender<ConnectionReply>,
+}
+```
+
+The connection-owned sink packages the completed export result with the
+request cookie and the expected reply kind:
 
 ```rust
 enum ReplyKind {
@@ -388,6 +404,8 @@ struct AdmissionWaiter {
 }
 
 impl ExportAdmissionCtl {
+    fn new(extent_bytes: u64) -> Self;
+
     fn register(&self, op: AdmissionOp) -> Result<AdmissionWaiter>;
 }
 
@@ -403,6 +421,12 @@ admitted only while the permit is held. Dropping the permit releases the active
 operation and wakes blocked waiters. Waiters are already owned by request
 tasks, so admission wakeup does not need a separate dispatcher to spawn newly
 permitted work.
+
+Registration also validates range operations against the admission controller's
+current `extent_bytes` before assigning a ticket. Offset overflow or an end
+past the current extent fails immediately and does not enter the waiting
+queue. That keeps bounds enforcement in the same component that owns the
+operation's storage-touch range and gives future resize a single update point.
 
 Registration and promotion must avoid a check-then-wait race. The first
 implementation should create a concrete per-waiter grant channel while holding
@@ -569,16 +593,20 @@ call waits for admission, engine execution, or reply writing.
 `close()` stops new reservations and waits for already accepted jobs to finish,
 fail, or be canceled according to the runtime shutdown policy.
 
-`submit` registers the job with admission and spawns one Tokio request task.
-The runtime records the accepted job in `ExportRuntimeLifecycle` before the
-task can run, and the task removes itself on every completion, cancellation, or
-panic-unwind path. The job owns the slot for the lifetime of the accepted
-request. The slot is moved into the connection reply after engine completion
-and released only after the reply writer finishes the socket write or drops
-the reply during shutdown. This makes queue depth the shared outstanding
-request budget for one active export across all connections.
-`SerialExportRuntime` should implement the same reservation boundary while
-still executing queued jobs one at a time.
+Both runtime implementations register admission before calling the engine.
+`SerialExportRuntime` still executes queued jobs one at a time, but it uses the
+same admitted engine path as the concurrent runtime. This keeps the engine
+safety contract uniform: there is no serial-only bypass around admission.
+
+`ConcurrentExportRuntime::submit` registers the job with admission and spawns
+one Tokio request task. The runtime records the accepted job in
+`ExportRuntimeLifecycle` before the task can run, and the task removes itself
+on every completion, cancellation, or panic-unwind path. The job owns the slot
+for the lifetime of the accepted request. The slot is moved into the
+connection reply after engine completion and released only after the reply
+writer finishes the socket write or drops the reply during shutdown. This
+makes queue depth the shared outstanding request budget for one active export
+across same-owner connections.
 
 If the connection drops the request before submission, dropping the
 `ExportQueueSlot` releases queue depth. If submission fails because the runtime
@@ -592,7 +620,7 @@ reserve()
   -> acquire shared ExportQueueSlot
 
 runtime.submit(job)
-  derive AdmissionOp from ExportRequest
+  derive AdmissionOp from ExportAdmissionProfile
   register job with ExportAdmissionCtl
   register active job guard
   spawn request task with AdmissionWaiter and active job guard
@@ -638,17 +666,20 @@ block an OS thread. `ExportAdmissionCtl` remains responsible for promoting
 compatible waiters, such as allowing a later read on block 2 to run while an
 earlier write on block 1 is waiting behind an active read on block 1.
 
-No separate admission dispatcher is introduced in this slice. Queue depth
-already bounds the number of accepted jobs and therefore the number of spawned
-request tasks. Each task has registered its admission position before spawning
-and simply awaits its own `AdmissionWaiter`. When an active permit is dropped,
-`ExportAdmissionCtl` wakes compatible waiters, and those already-spawned tasks
-resume.
+No separate admission dispatcher is introduced for the concurrent runtime.
+Queue depth already bounds the number of accepted jobs and therefore the
+number of spawned request tasks. Each task has registered its admission
+position before spawning and simply awaits its own `AdmissionWaiter`. When an
+active permit is dropped, `ExportAdmissionCtl` wakes compatible waiters, and
+those already-spawned tasks resume.
 
 `SerialExportRuntime` remains useful. It has no admission controller in the
-first implementation because serial execution is already stricter than the
-admission contract. Tests should continue to cover it because it is the
-simplest runtime and a useful comparison point for concurrent behavior.
+current implementation, but the admitted engine boundary adds one before
+unsafe memory access is introduced. Tests should continue to cover it because
+it is the simplest runtime and a useful comparison point for concurrent
+behavior. A later cleanup may collapse the serial runtime into the concurrent
+runtime with queue depth one, but that is not part of this design's risky
+transition.
 
 ## Memory Engine Synchronization
 
@@ -680,14 +711,13 @@ unrepresentative and unnecessarily slow. Instead, unsafe memory access is
 acceptable if the engine API makes admitted access a type-level capability.
 
 ```rust
-struct AdmittedExportRequest {
-    request: ExportRequest,
-    _access: EngineAccessGuard,
+trait ExportAdmissionProfile: Send + Sync {
+    fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp>;
 }
 
-enum EngineAccessGuard {
-    Admission(AdmissionPermit),
-    Serial,
+struct AdmittedExportRequest {
+    request: ExportRequest,
+    _permit: AdmissionPermit,
 }
 
 #[async_trait::async_trait]
@@ -699,24 +729,31 @@ trait ExportEngine: Send + Sync {
 }
 ```
 
+`ExportAdmissionProfile` is the backing-store-specific mapping from a request
+to the operation admission must protect. The first `MemoryAdmissionProfile`
+can map read/write requests to exact byte ranges, unless the unsafe memory
+implementation expands its actual touch range. Future file-backed, S3-backed,
+WAL, compaction, or resize-aware engines can replace that mapping without
+moving backend geometry into connection code or making admission tickets
+durable.
+
 `AdmittedExportRequest` is not a scheduler and does not expose admission
 policy to the engine. It is an unforgeable capability proving that an export
-runtime has either:
-
-- acquired an `AdmissionPermit` for the exact storage range the request may
-  touch; or
-- is executing through the serial runtime's exclusive execution path.
+runtime acquired an `AdmissionPermit` for the exact storage range the request
+may touch. `SerialExportRuntime` also acquires admission before calling
+`execute_admitted`; serial execution remains stricter than admission, but it
+does not provide a separate engine-access capability.
 
 The constructor should stay private to the runtime/admission boundary. Once
 unsafe memory storage is introduced, safe callers must not be able to invoke
 memory access with a bare `ExportRequest`.
 
 If the memory backend touches cacheline-rounded, word-rounded, or otherwise
-expanded ranges internally, the `AdmissionOp` registered by the runtime must
-cover that expanded storage-touch range. Admission remains the operation-level
-lock: overlapping read/write and write/write operations are excluded before
-the engine touches storage, while non-overlapping operations can proceed
-without an export-wide memory mutex.
+expanded ranges internally, `MemoryAdmissionProfile` must return an
+`AdmissionOp` that covers that expanded storage-touch range. Admission remains
+the operation-level lock: overlapping read/write and write/write operations
+are excluded before the engine touches storage, while non-overlapping
+operations can proceed without an export-wide memory mutex.
 
 The current crate forbids unsafe code. Introducing unsafe raw memory storage
 therefore requires either deliberately relaxing that crate-level policy with a
@@ -732,7 +769,7 @@ ExportAdmissionCtl
 
 MemoryExportEngine storage
   proves raw byte access is reachable only through an admitted request whose
-  guard excludes overlapping storage touches
+  permit excludes overlapping storage touches
 ```
 
 Tests should not depend on a memory-engine mutex for correctness. The
@@ -786,22 +823,27 @@ or constructing an explicit multi-thread runtime in `main`.
   truth.
 - `ConnectionRuntime` owns per-connection protocol state and reply state.
 - `ExportAdmissionCtl` owns volatile per-export admission order, dynamic range
-  locks, active permit state, and the future extent update point.
+  locks, active permit state, current extent size, and the future extent update
+  point.
 - `ExportRuntime` owns shared per-export queue depth, accepted export jobs, and
   runtime execution policy.
 - `ExportRuntimeLifecycle` owns volatile runtime close state and accepted job
   settlement tracking.
+- `ExportAdmissionProfile` owns the backing-store-specific request-to-admission
+  mapping for the active export.
 - `ExportEngine` owns data behavior.
 - `AdmittedExportRequest` owns the volatile engine-access capability proving
-  the request was admitted or is executing under serial exclusivity.
+  the request was admitted before engine execution.
 - WAL sequence and durability remain future `WALManager` responsibilities.
 
 ## Derived State
 
 - NBD wire replies are derived from `ExportResult`, the original request kind,
   and the request cookie.
+- Admission operations are derived from `ExportRequest` and the active export's
+  admission profile.
 - Admission conflict decisions are derived from dynamic range-lock state,
-  active permits, and earlier queued waiters.
+  active permits, earlier queued waiters, and the current admitted extent.
 - Queue depth and reply queue occupancy are runtime diagnostics, not durable
   state.
 
@@ -832,8 +874,12 @@ No new durable or serving cache is introduced by this design. Future
 - Once unsafe memory storage exists, `ExportEngine` does not expose a safe
   raw `ExportRequest` execution path for memory access; callers execute
   through an `AdmittedExportRequest`.
-- Every concurrent read, write, and flush holds an admission permit while its
-  engine operation is executing.
+- Runtime admission registration uses the active `ExportAdmissionProfile`;
+  runtimes do not hard-code memory, file, S3, or WAL geometry.
+- `ExportAdmissionCtl` rejects out-of-bounds read/write admission operations
+  before assigning tickets or inserting waiters.
+- Every read, write, and flush holds an admission permit while its engine
+  operation is executing, including requests served by `SerialExportRuntime`.
 - Overlapping writes never execute concurrently.
 - Reads do not execute concurrently with overlapping active writes.
 - Later overlapping reads do not pass earlier waiting writes.
@@ -841,7 +887,10 @@ No new durable or serving cache is introduced by this design. Future
 - Admission tickets are volatile and never used as WAL sequence numbers.
 - Admission ranges are dynamic operation ranges, not static memory chunks.
 - Admission ranges cover the full storage-touch range, including any
-  cacheline or word expansion required by an unsafe memory backend.
+  cacheline or word expansion required by the active admission profile.
+- The admission extent is the volatile serving extent for the active export.
+  Resize is a future full-export admission barrier that updates that extent
+  before later operation validation.
 - Admission waiter grants cannot be lost: registration and promotion happen
   under the same admission state mutex.
 - Dropping an admission permit releases the active operation and wakes waiters.
@@ -918,6 +967,23 @@ runtime correctness model. Keeping it as the only real synchronization point
 would make concurrent runtime tests pass for the wrong reason and would not
 carry over to durable engines, resize, WAL replay, or storage-backed reads.
 
+## Derive Admission Directly From ExportRequest
+
+Deriving `AdmissionOp` directly from `ExportRequest` is enough for the first
+byte-addressed memory engine, but it would make the runtime the owner of
+backend geometry. File-backed and S3-backed engines may need block alignment,
+extent barriers, object/leaf boundaries, or WAL/read-view barriers. The chosen
+model keeps that mapping behind `ExportAdmissionProfile` while
+`ExportAdmissionCtl` still owns dynamic waiting and active permit state.
+
+## Add A Serial-Only Admission Bypass
+
+An earlier shape let the serial runtime call admitted engine methods without
+an admission permit. That is correct only by convention and adds a second
+safety proof for memory access. The chosen model makes `SerialExportRuntime`
+acquire admission too. Serial execution is still a simple baseline, but the
+engine sees the same admitted capability in every runtime.
+
 ## Build An Interval Tree Immediately
 
 An interval tree can improve admission scans later, but it is not needed to
@@ -945,6 +1011,7 @@ Rollout should be conservative:
 
 Admission control should have focused unit tests:
 
+- out-of-bounds read/write ranges are rejected before a ticket is assigned;
 - read block 1, write block 1, read block 1 admits in ticket order and the
   second read waits behind the write;
 - a read registered while a conflicting write permit is being released cannot
@@ -978,9 +1045,15 @@ engine:
 
 `MemoryExportEngine` should have storage-safety regression tests:
 
+- `MemoryAdmissionProfile` maps read/write/flush requests to the expected
+  admission operations;
 - unsafe/raw memory access is possible only through `AdmittedExportRequest`;
+- direct admitted non-overlapping reads and writes can overlap without relying
+  on an export-wide memory mutex;
+- serial runtime execution reaches memory only through an admitted request;
 - concurrent non-overlapping writes through `ConcurrentExportRuntime`
-  complete without relying on an export-wide memory mutex;
+  complete without relying on an export-wide memory mutex once that runtime
+  exists;
 - a read after an admitted write observes the completed write bytes;
 - overlapping memory operations are serialized by admission, not by storage;
 - flush waits for earlier writes even though the memory engine flush is a
@@ -1055,6 +1128,10 @@ This design is ready for `$review-plan` when:
   completion state;
 - the O(n) accepted-order conflict queue in `ExportAdmissionCtl` is accepted as
   the first range-permit implementation;
+- `ExportAdmissionProfile` is accepted as the backing-store-specific source of
+  request-to-admission mapping;
+- `AdmittedExportRequest` is accepted as the only engine execution capability,
+  including for `SerialExportRuntime`;
 - `ConcurrentExportRuntime` shared queue-depth bound is accepted;
 - `SerialExportRuntime` remaining as default is accepted;
 - the validation strategy is considered sufficient for the concurrency risk.

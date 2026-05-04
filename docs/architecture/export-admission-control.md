@@ -48,12 +48,21 @@ struct AdmissionPermit {
 }
 
 impl ExportAdmissionCtl {
+    fn new(extent_bytes: u64) -> Self;
+
     async fn acquire(&self, op: AdmissionOp) -> Result<AdmissionPermit>;
 }
 ```
 
 The permit is RAII-style. While held, the operation is allowed to observe or
 mutate the protected range according to its mode.
+
+`ExportAdmissionCtl` owns the active export extent used for admission
+validation. Read and write operations whose storage-touch ranges overflow or
+extend past the current extent fail before receiving a ticket or entering the
+wait queue. A future resize operation should update the extent as a
+full-export admission barrier so later operations validate against the new
+size.
 
 The `ticket` is a volatile diagnostic/scheduling value only. It is not a WAL
 sequence number and is not used for replay or compaction.
@@ -156,9 +165,37 @@ byte ranges.
 Request workers may block waiting for admission. The NBD socket read path
 should not.
 
+# Engine Access Boundary
+
+Engines that can access mutable export storage should execute through an
+admitted request capability rather than a bare request value:
+
+```rust
+trait ExportAdmissionProfile {
+    fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp>;
+}
+
+struct AdmittedExportRequest {
+    request: ExportRequest,
+    _permit: AdmissionPermit,
+}
+```
+
+`ExportAdmissionProfile` maps an export request to the storage-touch operation
+that admission must protect. Memory, file-backed, S3-backed, WAL-aware, and
+resize-aware engines can use different profiles without moving backend
+geometry into connection code.
+
+The admitted request is not the scheduler. It is the type-level proof that an
+export runtime acquired the required range or flush permit before storage was
+observed or mutated. Serial and concurrent runtimes should use the same engine
+capability so storage code does not need a serial-only bypass.
+
 # Invariants
 
 - Admission protects logical byte ranges.
+- Admission validates read/write ranges against the current active export
+  extent before assigning tickets.
 - A permit authorizes observation or mutation only while it is held.
 - Overlapping writes are exclusive.
 - Reads do not run concurrently with overlapping active writes.
@@ -166,6 +203,10 @@ should not.
 - Flush is an export-wide barrier in the first implementation.
 - Admission tickets are volatile and are not WAL sequence numbers.
 - Admission does not perform WAL append, read-view apply, or storage I/O.
+- Admission operation shape is derived by the active admission profile, not by
+  socket protocol code.
+- Mutable engine storage is reachable only through an admitted request
+  capability once unsafe or lock-free storage exists.
 - Policy can become more concurrent without changing the `Export` API.
 
 # Open Questions
