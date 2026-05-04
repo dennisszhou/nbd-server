@@ -1,6 +1,6 @@
 use crate::{
     admission::{AdmissionOp, AdmissionPermit},
-    observability::ExportJobContext,
+    observability::{self, event, target, ExportJobContext},
     runtime::ExportQueueSlot,
     Result,
 };
@@ -37,19 +37,54 @@ pub type ExportAdmissionPolicyHandle = Arc<dyn ExportAdmissionPolicy>;
 #[derive(Debug)]
 pub struct AdmittedExportRequest {
     request: ExportRequest,
-    _permit: AdmissionPermit,
+    permit: Option<AdmissionPermit>,
+    context: ExportJobContext,
 }
 
 impl AdmittedExportRequest {
-    pub(crate) fn new(request: ExportRequest, permit: AdmissionPermit) -> Self {
+    pub(crate) fn new(
+        request: ExportRequest,
+        permit: AdmissionPermit,
+        context: ExportJobContext,
+    ) -> Self {
         Self {
             request,
-            _permit: permit,
+            permit: Some(permit),
+            context,
         }
     }
 
-    pub(crate) fn into_parts(self) -> (ExportRequest, AdmissionPermit) {
-        (self.request, self._permit)
+    /// Return the admitted request while keeping its admission permit live.
+    pub fn request(&self) -> &ExportRequest {
+        &self.request
+    }
+}
+
+impl Drop for AdmittedExportRequest {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let ticket = permit.ticket();
+        let op = permit.op();
+        // Release admission before logging so observability cannot delay
+        // promotion of later waiters.
+        drop(permit);
+
+        tracing::trace!(
+            target: target::ADMISSION,
+            event = event::ADMISSION_RELEASED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            admission_ticket = ticket.as_u64(),
+            admission_op = op.kind(),
+            range_start = ?op.range().map(crate::ByteRange::start),
+            range_len = ?op.range().map(crate::ByteRange::len),
+            connection_id = self.context.connection_id().raw(),
+            request_sequence = self.context.request_sequence().raw(),
+            cookie = self.context.cookie().raw(),
+        );
     }
 }
 

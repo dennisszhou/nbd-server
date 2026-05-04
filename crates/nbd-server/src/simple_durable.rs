@@ -1,4 +1,5 @@
 use crate::{
+    observability::{self, event, target},
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
@@ -296,14 +297,12 @@ impl ExportEngine for SimpleDurableEngine {
     }
 
     async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
-        // Keep the admission permit live for the full blob/tree operation.
-        let (request, _admission_permit) = request.into_parts();
-        match request {
+        match request.request() {
             ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
-                data: self.read(offset, len).await?,
+                data: self.read(*offset, *len).await?,
             }),
             ExportRequest::Write { offset, data } => {
-                self.write(offset, &data).await?;
+                self.write(*offset, data).await?;
                 Ok(ExportReply::Done)
             }
             ExportRequest::Flush => {
@@ -332,6 +331,17 @@ impl LocalBlobStore {
             match write_new_file(&path, data).await {
                 Ok(()) => {
                     sync_directory(self.root.clone()).await?;
+                    tracing::trace!(
+                        target: target::STORAGE,
+                        event = event::BLOB_CREATE,
+                        service = observability::SERVICE_NAME,
+                        server_instance_id = observability::server_instance_id(),
+                        pid = observability::pid(),
+                        engine_kind = "simple_durable",
+                        blob_op = "create",
+                        blob_key = %key,
+                        storage_len = data.len(),
+                    );
                     return Ok(key);
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -367,7 +377,19 @@ impl LocalBlobStore {
             let _ = fs::remove_file(&temp_path).await;
             return Err(ServerError::io("rename replacement blob", error));
         }
-        sync_directory(self.root.clone()).await
+        sync_directory(self.root.clone()).await?;
+        tracing::trace!(
+            target: target::STORAGE,
+            event = event::BLOB_REPLACE,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            engine_kind = "simple_durable",
+            blob_op = "replace",
+            blob_key = %key,
+            storage_len = data.len(),
+        );
+        Ok(())
     }
 
     pub async fn read_blob(&self, key: &BlobKey, offset: u64, len: u64) -> Result<Vec<u8>> {
@@ -387,6 +409,18 @@ impl LocalBlobStore {
         file.read_exact(&mut data)
             .await
             .map_err(|source| ServerError::io("read blob", source))?;
+        tracing::trace!(
+            target: target::STORAGE,
+            event = event::BLOB_READ,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            engine_kind = "simple_durable",
+            blob_op = "read",
+            blob_key = %key,
+            storage_offset = offset,
+            storage_len = len,
+        );
         Ok(data)
     }
 
@@ -422,6 +456,17 @@ impl SimpleMutableTree {
             });
         }
 
+        tracing::debug!(
+            target: target::CATALOG,
+            event = event::CATALOG_TREE_LOADED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            export_id = %meta.id(),
+            export_name = %meta.name(),
+            layout_kind = %meta.head().layout_kind(),
+            phase = "start",
+        );
         let snapshot = catalog
             .load_simple_tree(meta.id())
             .await
@@ -444,6 +489,20 @@ impl SimpleMutableTree {
                 ),
             });
         }
+
+        tracing::debug!(
+            target: target::CATALOG,
+            event = event::CATALOG_TREE_LOADED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            export_id = %snapshot.export_id(),
+            export_name = %meta.name(),
+            layout_kind = %meta.head().layout_kind(),
+            root_node_id = ?snapshot.root_node_id(),
+            chunk_count = snapshot.chunks().len(),
+            phase = "complete",
+        );
 
         Ok(Self {
             catalog,
@@ -477,11 +536,32 @@ impl SimpleMutableTree {
 
         let _commit = self.commit_lock.lock().await;
         let export_id = self.state.read().await.export_id.clone();
+        tracing::debug!(
+            target: target::CATALOG,
+            event = event::CATALOG_TREE_COMMIT_STARTED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            export_id = %export_id,
+            layout_kind = "simple_mutable_tree",
+            chunk_count = chunks.len(),
+        );
         let snapshot = self
             .catalog
             .commit_simple_chunks(&export_id, chunks)
             .await
             .map_err(ServerError::catalog)?;
+        tracing::debug!(
+            target: target::CATALOG,
+            event = event::CATALOG_TREE_COMMIT_COMPLETED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            export_id = %snapshot.export_id(),
+            layout_kind = "simple_mutable_tree",
+            root_node_id = ?snapshot.root_node_id(),
+            chunk_count = snapshot.chunks().len(),
+        );
         *self.state.write().await = SimpleTreeState::from_snapshot(&snapshot);
         Ok(())
     }
@@ -545,7 +625,17 @@ async fn sync_directory(path: PathBuf) -> Result<()> {
         context: "sync blob directory",
         message: error.to_string(),
     })?
-    .map_err(|source| ServerError::io("sync blob directory", source))
+    .map_err(|source| ServerError::io("sync blob directory", source))?;
+    tracing::trace!(
+        target: target::STORAGE,
+        event = event::BLOB_DIRECTORY_SYNCED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        engine_kind = "simple_durable",
+        blob_op = "sync_directory",
+    );
+    Ok(())
 }
 
 #[cfg(unix)]

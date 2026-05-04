@@ -1,11 +1,16 @@
-use crate::{connection, LocalExportRegistry, Result, ServerError};
+use crate::{
+    connection,
+    observability::{self, event, target},
+    ConnectionId, LocalExportRegistry, Result, ServerError,
+};
 use nbd_config::NbdConfig;
-use nbd_control_plane::{CatalogUrl, SQLiteExportCatalog};
+use nbd_control_plane::{CatalogProvider, CatalogUrl, SQLiteExportCatalog};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 pub struct NbdServer {
     addr: SocketAddr,
@@ -20,9 +25,25 @@ impl NbdServer {
 
     pub async fn start_on(config: NbdConfig, listen: SocketAddr) -> Result<Self> {
         let catalog_url = CatalogUrl::parse(&config.catalog.url).map_err(ServerError::catalog)?;
+        tracing::debug!(
+            target: target::CATALOG,
+            event = event::CATALOG_CONNECT_STARTED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            catalog_provider = catalog_provider_name(catalog_url.provider()),
+        );
         let catalog = SQLiteExportCatalog::connect(&catalog_url)
             .await
             .map_err(ServerError::catalog)?;
+        tracing::debug!(
+            target: target::CATALOG,
+            event = event::CATALOG_CONNECT_COMPLETED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            catalog_provider = catalog_provider_name(catalog_url.provider()),
+        );
         let registry = Arc::new(LocalExportRegistry::new(
             Arc::new(catalog),
             config.server.clone(),
@@ -42,13 +63,51 @@ impl NbdServer {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     accepted = listener.accept() => {
-                        let Ok((stream, _peer)) = accepted else {
+                        let Ok((stream, peer_addr)) = accepted else {
                             break;
                         };
+                        let connection_id = ConnectionId::next();
+                        tracing::info!(
+                            target: target::CONNECTION,
+                            event = event::CONNECTION_ACCEPTED,
+                            service = observability::SERVICE_NAME,
+                            server_instance_id = observability::server_instance_id(),
+                            pid = observability::pid(),
+                            connection_id = connection_id.raw(),
+                            peer_addr = %peer_addr,
+                        );
                         let registry = registry.clone();
+                        let span = tracing::debug_span!(
+                            target: target::CONNECTION,
+                            "connection",
+                            service = observability::SERVICE_NAME,
+                            server_instance_id = observability::server_instance_id(),
+                            pid = observability::pid(),
+                            connection_id = connection_id.raw(),
+                            peer_addr = %peer_addr,
+                        );
                         tokio::spawn(async move {
-                            let _ = connection::serve(stream, registry, reply_capacity).await;
-                        });
+                            if let Err(error) = connection::serve(
+                                stream,
+                                registry,
+                                reply_capacity,
+                                connection_id,
+                                peer_addr,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    target: target::CONNECTION,
+                                    event = event::CONNECTION_ERROR,
+                                    service = observability::SERVICE_NAME,
+                                    server_instance_id = observability::server_instance_id(),
+                                    pid = observability::pid(),
+                                    connection_id = connection_id.raw(),
+                                    peer_addr = %peer_addr,
+                                    error = %error,
+                                );
+                            }
+                        }.instrument(span));
                     }
                 }
             }
@@ -66,6 +125,14 @@ impl NbdServer {
     }
 
     pub async fn shutdown(mut self) -> Result<()> {
+        tracing::info!(
+            target: target::OPS,
+            event = event::SERVER_SHUTDOWN_STARTED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            listen_addr = %self.addr,
+        );
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -77,7 +144,22 @@ impl NbdServer {
                 )
             })?;
         }
+        tracing::info!(
+            target: target::OPS,
+            event = event::SERVER_SHUTDOWN_COMPLETED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            listen_addr = %self.addr,
+        );
         Ok(())
+    }
+}
+
+fn catalog_provider_name(provider: CatalogProvider) -> &'static str {
+    match provider {
+        CatalogProvider::Sqlite => "sqlite",
+        CatalogProvider::Postgres => "postgres",
     }
 }
 

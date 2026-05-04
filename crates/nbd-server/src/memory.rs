@@ -181,14 +181,12 @@ impl ExportEngine for MemoryExportEngine {
     }
 
     async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
-        // Keep the admission permit live for the full storage access below.
-        let (request, _admission_permit) = request.into_parts();
-        match request {
+        match request.request() {
             ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
-                data: self.read(offset, len)?,
+                data: self.read(*offset, *len)?,
             }),
             ExportRequest::Write { offset, data } => {
-                self.write(offset, &data)?;
+                self.write(*offset, data)?;
                 Ok(ExportReply::Done)
             }
             ExportRequest::Flush => {
@@ -202,8 +200,9 @@ impl ExportEngine for MemoryExportEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExportAdmissionCtl, ExportEngine};
+    use crate::{AdmissionPermit, ExportAdmissionCtl, ExportEngine, ExportJobContext};
     use nbd_control_plane::{ExportEngineKind, ExportHead, ExportId, ExportState, Timestamp};
+    use nbd_protocol::wire::NbdCookie;
     use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -245,13 +244,13 @@ mod tests {
         let left_engine = engine.clone();
         let left = tokio::spawn(async move {
             left_engine
-                .execute_admitted(AdmittedExportRequest::new(left_request, left_permit))
+                .execute_admitted(admitted(left_request, left_permit))
                 .await
         });
         let right_engine = engine.clone();
         let right = tokio::spawn(async move {
             right_engine
-                .execute_admitted(AdmittedExportRequest::new(right_request, right_permit))
+                .execute_admitted(admitted(right_request, right_permit))
                 .await
         });
 
@@ -277,13 +276,18 @@ mod tests {
             .expect("read permit");
         assert_eq!(
             engine
-                .execute_admitted(AdmittedExportRequest::new(read_request, read_permit))
+                .execute_admitted(admitted(read_request, read_permit))
                 .await
                 .expect("read"),
             ExportReply::Read {
                 data: b"aaaabbbb".to_vec(),
             },
         );
+    }
+
+    fn admitted(request: ExportRequest, permit: AdmissionPermit) -> AdmittedExportRequest {
+        let context = ExportJobContext::internal(NbdCookie::new(0), request.command_name());
+        AdmittedExportRequest::new(request, permit, context)
     }
 
     #[tokio::test]

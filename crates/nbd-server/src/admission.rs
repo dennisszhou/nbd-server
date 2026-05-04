@@ -1,4 +1,7 @@
-use crate::{Result, ServerError};
+use crate::{
+    observability::{self, event, target},
+    Result, ServerError,
+};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -15,12 +18,16 @@ impl ByteRange {
         Self { start, len }
     }
 
-    fn start(self) -> u64 {
+    pub fn start(self) -> u64 {
         self.start
     }
 
-    fn len(self) -> u64 {
+    pub fn len(self) -> u64 {
         u64::from(self.len)
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
     }
 
     fn checked_end(self) -> Option<u64> {
@@ -45,6 +52,21 @@ pub enum AdmissionOp {
 }
 
 impl AdmissionOp {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Read(_) => "read",
+            Self::Write(_) => "write",
+            Self::Flush => "flush",
+        }
+    }
+
+    pub fn range(self) -> Option<ByteRange> {
+        match self {
+            Self::Read(range) | Self::Write(range) => Some(range),
+            Self::Flush => None,
+        }
+    }
+
     fn conflicts(self, other: Self) -> bool {
         match (self, other) {
             (Self::Flush, _) | (_, Self::Flush) => true,
@@ -83,7 +105,10 @@ impl ExportAdmissionCtl {
         let (grant, receiver) = oneshot::channel();
         let ticket = {
             let mut state = self.inner.state()?;
-            state.validate(op)?;
+            if let Err(error) = state.validate(op) {
+                trace_admission_rejected(op, &error);
+                return Err(error);
+            }
             let ticket = state.next_ticket();
             state
                 .waiting
@@ -144,6 +169,17 @@ impl AdmissionWaiter {
 impl Drop for AdmissionWaiter {
     fn drop(&mut self) {
         if self.registered {
+            tracing::trace!(
+                target: target::ADMISSION,
+                event = event::ADMISSION_CANCELLED,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                admission_ticket = self.ticket.as_u64(),
+                admission_op = self.op.kind(),
+                range_start = ?self.op.range().map(ByteRange::start),
+                range_len = ?self.op.range().map(ByteRange::len),
+            );
             self.inner.cancel(self.ticket);
         }
     }
@@ -185,6 +221,20 @@ impl Drop for AdmissionPermit {
             inner.release(self.ticket);
         }
     }
+}
+
+fn trace_admission_rejected(op: AdmissionOp, error: &ServerError) {
+    observability::request_failure_event!(
+        target: target::ADMISSION,
+        error: error,
+        event = event::ADMISSION_REJECTED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        admission_op = op.kind(),
+        range_start = ?op.range().map(ByteRange::start),
+        range_len = ?op.range().map(ByteRange::len),
+    );
 }
 
 #[derive(Debug)]

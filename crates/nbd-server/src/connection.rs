@@ -1,5 +1,5 @@
 use crate::export::ExportCompletionSink;
-use crate::observability::RequestSequenceGenerator;
+use crate::observability::{self, event, target, RequestSequenceGenerator};
 use crate::{
     CompletedExport, ConnectionId, ExportCompletion, ExportJob, ExportJobContext, ExportOwner,
     ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntimeHandle,
@@ -14,10 +14,11 @@ use nbd_protocol::option::{
     parse_option_request_header, OptionRequest, OPTION_REQUEST_HEADER_BYTES,
 };
 use nbd_protocol::transmission::{
-    encode_read_reply, encode_simple_reply, parse_request, parse_request_header,
+    encode_read_reply, encode_simple_reply, parse_request, parse_request_header, RequestHeader,
     TransmissionRequest, MAX_IO_BYTES, REQUEST_HEADER_BYTES,
 };
 use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -165,10 +166,32 @@ pub async fn serve(
     mut stream: TcpStream,
     registry: Arc<LocalExportRegistry>,
     reply_capacity: usize,
+    connection_id: ConnectionId,
+    peer_addr: SocketAddr,
 ) -> Result<()> {
-    let connection_id = ConnectionId::next();
     write_handshake(&mut stream).await?;
-    let Some(export) = negotiate_options(&mut stream, registry.clone()).await? else {
+    tracing::debug!(
+        target: target::CONNECTION,
+        event = event::CONNECTION_HANDSHAKE_COMPLETED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        connection_id = connection_id.raw(),
+        peer_addr = %peer_addr,
+    );
+    let Some(export) =
+        negotiate_options(&mut stream, registry.clone(), connection_id, peer_addr).await?
+    else {
+        tracing::info!(
+            target: target::CONNECTION,
+            event = event::CONNECTION_CLOSED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            connection_id = connection_id.raw(),
+            peer_addr = %peer_addr,
+            status = "no_export",
+        );
         return Ok(());
     };
     let result = ConnectionRuntime::new(connection_id, export.runtime.clone(), reply_capacity)
@@ -179,7 +202,21 @@ pub async fn serve(
     match (result, close_result) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Ok(())) => {
+            tracing::info!(
+                target: target::CONNECTION,
+                event = event::CONNECTION_CLOSED,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                connection_id = connection_id.raw(),
+                peer_addr = %peer_addr,
+                export_name = %export.name,
+                owner_id = export.owner.id().raw(),
+                status = "ok",
+            );
+            Ok(())
+        }
     }
 }
 
@@ -201,7 +238,18 @@ async fn write_handshake(stream: &mut TcpStream) -> Result<()> {
 async fn negotiate_options(
     stream: &mut TcpStream,
     registry: Arc<LocalExportRegistry>,
+    connection_id: ConnectionId,
+    peer_addr: SocketAddr,
 ) -> Result<Option<ConnectionExport>> {
+    tracing::debug!(
+        target: target::CONNECTION,
+        event = event::CONNECTION_NEGOTIATION_STARTED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        connection_id = connection_id.raw(),
+        peer_addr = %peer_addr,
+    );
     loop {
         let request = read_option_request(stream).await?;
         match request {
@@ -210,15 +258,52 @@ async fn negotiate_options(
                 let export_name =
                     ExportName::new(go.export_name().to_owned()).map_err(ServerError::catalog)?;
                 let owner = ExportOwner::unique_connection();
+                tracing::info!(
+                    target: target::EXPORT,
+                    event = event::EXPORT_OPEN_STARTED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    connection_id = connection_id.raw(),
+                    peer_addr = %peer_addr,
+                    export_name = %export_name,
+                    owner_id = owner.id().raw(),
+                );
                 let runtime = match registry.open(export_name.clone(), owner).await {
                     Ok(runtime) => runtime,
                     Err(error) => {
+                        tracing::warn!(
+                            target: target::EXPORT,
+                            event = event::EXPORT_OPEN_REJECTED,
+                            service = observability::SERVICE_NAME,
+                            server_instance_id = observability::server_instance_id(),
+                            pid = observability::pid(),
+                            connection_id = connection_id.raw(),
+                            peer_addr = %peer_addr,
+                            export_name = %export_name,
+                            owner_id = owner.id().raw(),
+                            error = %error,
+                        );
                         write_go_error(stream, option, &error).await?;
                         return Ok(None);
                     }
                 };
 
                 let meta = runtime.export_meta();
+                tracing::info!(
+                    target: target::EXPORT,
+                    event = event::EXPORT_OPEN_COMPLETED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    connection_id = connection_id.raw(),
+                    peer_addr = %peer_addr,
+                    export_id = %meta.id(),
+                    export_name = %meta.name(),
+                    owner_id = owner.id().raw(),
+                    engine_kind = %meta.engine_kind(),
+                    size_bytes = meta.size_bytes(),
+                );
                 let result = stream
                     .write_all(&encode_export_info_reply(
                         option,
@@ -241,6 +326,17 @@ async fn negotiate_options(
                     return Err(error);
                 }
 
+                tracing::debug!(
+                    target: target::CONNECTION,
+                    event = event::CONNECTION_NEGOTIATION_COMPLETED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    connection_id = connection_id.raw(),
+                    peer_addr = %peer_addr,
+                    export_name = %export_name,
+                    owner_id = owner.id().raw(),
+                );
                 return Ok(Some(ConnectionExport {
                     name: export_name,
                     owner,
@@ -331,24 +427,66 @@ where
 
         let header = match parse_request_header(&bytes) {
             Ok(header) => header,
-            Err(error) => return RequestReaderExit::close(Err(error.into())),
+            Err(error) => {
+                let error = ServerError::from(error);
+                trace_decode_request_failed(connection_id, &error);
+                return RequestReaderExit::close(Err(error));
+            }
         };
         let payload_len = match header.payload_len(MAX_IO_BYTES) {
             Ok(payload_len) => payload_len,
             Err(error) => {
+                let error = ServerError::from(error);
+                trace_header_request_failed(connection_id, &header, "decode", &error);
                 return RequestReaderExit::drain(
-                    send_error_then_return(&replies, header.cookie, error.into()).await,
+                    send_error_then_return(&replies, header.cookie, error).await,
                 );
             }
         };
 
         if header.command.raw() == NBD_CMD_DISC {
+            tracing::info!(
+                target: target::CONNECTION,
+                event = event::CONNECTION_DISCONNECT_RECEIVED,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                connection_id = connection_id.raw(),
+                cookie = header.cookie.raw(),
+            );
             return RequestReaderExit::close(Ok(()));
         }
 
+        tracing::trace!(
+            target: target::RUNTIME,
+            event = event::QUEUE_RESERVE_WAIT,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            connection_id = connection_id.raw(),
+            cookie = header.cookie.raw(),
+            command_raw = header.command.raw(),
+            offset = header.offset,
+            length = header.length,
+        );
         let queue_slot = match runtime.reserve().await {
-            Ok(queue_slot) => queue_slot,
+            Ok(queue_slot) => {
+                tracing::trace!(
+                    target: target::RUNTIME,
+                    event = event::QUEUE_RESERVE_ACQUIRED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    connection_id = connection_id.raw(),
+                    cookie = header.cookie.raw(),
+                    command_raw = header.command.raw(),
+                    offset = header.offset,
+                    length = header.length,
+                );
+                queue_slot
+            }
             Err(error) => {
+                trace_header_request_failed(connection_id, &header, "queue_reserve", &error);
                 return RequestReaderExit::drain(
                     send_simple_error(&replies, header.cookie)
                         .await
@@ -370,9 +508,11 @@ where
         let request = match parse_request(&bytes, MAX_IO_BYTES) {
             Ok(request) => request,
             Err(error) => {
+                let error = ServerError::from(error);
+                trace_header_request_failed(connection_id, &header, "decode", &error);
                 drop(queue_slot);
                 return RequestReaderExit::drain(
-                    send_error_then_return(&replies, header.cookie, error.into()).await,
+                    send_error_then_return(&replies, header.cookie, error).await,
                 );
             }
         };
@@ -421,13 +561,42 @@ where
             length,
             kind.as_str(),
         );
+        tracing::trace!(
+            target: target::REQUEST,
+            event = event::REQUEST_DECODED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            connection_id = context.connection_id().raw(),
+            request_sequence = context.request_sequence().raw(),
+            cookie = context.cookie().raw(),
+            command = context.command(),
+            offset = ?context.offset(),
+            length = ?context.length(),
+            reply_kind = context.reply_kind(),
+        );
         let completion = ExportCompletion::sink(ConnectionExportCompletion::new(
             context.clone(),
             kind,
             replies.clone(),
         ));
         let job = ExportJob::with_context(context, request, completion, queue_slot);
+        tracing::trace!(
+            target: target::REQUEST,
+            event = event::REQUEST_SUBMITTED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            connection_id = job.context().connection_id().raw(),
+            request_sequence = job.context().request_sequence().raw(),
+            cookie = job.context().cookie().raw(),
+            command = job.context().command(),
+            offset = ?job.context().offset(),
+            length = ?job.context().length(),
+        );
+        let submit_context = job.context().clone();
         if let Err(error) = runtime.submit(job).await {
+            trace_context_request_failed(&submit_context, "runtime_submit", &error);
             return RequestReaderExit::drain(
                 send_simple_error(&replies, cookie).await.and(Err(error)),
             );
@@ -528,13 +697,71 @@ async fn send_simple_error(
         })
 }
 
+fn trace_header_request_failed(
+    connection_id: ConnectionId,
+    header: &RequestHeader,
+    phase: &'static str,
+    error: &ServerError,
+) {
+    observability::request_failure_event!(
+        target: target::REQUEST,
+        error: error,
+        event = event::REQUEST_FAILED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        connection_id = connection_id.raw(),
+        cookie = header.cookie.raw(),
+        command_raw = header.command.raw(),
+        offset = header.offset,
+        length = header.length,
+        phase = phase,
+    );
+}
+
+fn trace_decode_request_failed(connection_id: ConnectionId, error: &ServerError) {
+    observability::request_failure_event!(
+        target: target::REQUEST,
+        error: error,
+        event = event::REQUEST_FAILED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        connection_id = connection_id.raw(),
+        phase = "decode",
+    );
+}
+
+fn trace_context_request_failed(
+    context: &ExportJobContext,
+    phase: &'static str,
+    error: &ServerError,
+) {
+    observability::request_failure_event!(
+        target: target::REQUEST,
+        error: error,
+        event = event::REQUEST_FAILED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+        command = context.command(),
+        offset = ?context.offset(),
+        length = ?context.length(),
+        phase = phase,
+        duration_ms = observability::duration_ms(context.elapsed()),
+    );
+}
+
 pub(crate) async fn write_connection_reply<W>(writer: &mut W, reply: ConnectionReply) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     match reply.payload {
         ConnectionReplyPayload::Export {
-            context: _context,
+            context,
             kind,
             result,
             _queue_slot: queue_slot,
@@ -543,18 +770,76 @@ where
                 (ReplyKind::Read, Ok(ExportReply::Read { data })) => writer
                     .write_all(&encode_read_reply(reply.cookie, &data))
                     .await
-                    .map_err(|source| ServerError::io("write NBD read reply", source)),
+                    .map_err(|source| ServerError::io("write NBD read reply", source))
+                    .map(|()| "ok"),
                 (ReplyKind::Simple, Ok(ExportReply::Done)) => writer
                     .write_all(&encode_simple_reply(reply.cookie, 0))
                     .await
-                    .map_err(|source| ServerError::io("write NBD simple reply", source)),
+                    .map_err(|source| ServerError::io("write NBD simple reply", source))
+                    .map(|()| "ok"),
                 _ => writer
                     .write_all(&encode_simple_reply(reply.cookie, NBD_EINVAL))
                     .await
-                    .map_err(|source| ServerError::io("write NBD error reply", source)),
+                    .map_err(|source| ServerError::io("write NBD error reply", source))
+                    .map(|()| "error"),
             };
+            match &write_result {
+                Ok(status) => {
+                    tracing::trace!(
+                        target: target::REQUEST,
+                        event = event::REQUEST_REPLY_WRITTEN,
+                        service = observability::SERVICE_NAME,
+                        server_instance_id = observability::server_instance_id(),
+                        pid = observability::pid(),
+                        connection_id = context.connection_id().raw(),
+                        request_sequence = context.request_sequence().raw(),
+                        cookie = context.cookie().raw(),
+                        command = context.command(),
+                        offset = ?context.offset(),
+                        length = ?context.length(),
+                        reply_kind = context.reply_kind(),
+                        status = *status,
+                        duration_ms = observability::duration_ms(context.elapsed()),
+                    );
+                    tracing::debug!(
+                        target: target::REQUEST,
+                        event = event::REQUEST_COMPLETED,
+                        service = observability::SERVICE_NAME,
+                        server_instance_id = observability::server_instance_id(),
+                        pid = observability::pid(),
+                        connection_id = context.connection_id().raw(),
+                        request_sequence = context.request_sequence().raw(),
+                        cookie = context.cookie().raw(),
+                        command = context.command(),
+                        offset = ?context.offset(),
+                        length = ?context.length(),
+                        reply_kind = context.reply_kind(),
+                        status = *status,
+                        duration_ms = observability::duration_ms(context.elapsed()),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: target::REQUEST,
+                        event = event::REQUEST_FAILED,
+                        service = observability::SERVICE_NAME,
+                        server_instance_id = observability::server_instance_id(),
+                        pid = observability::pid(),
+                        connection_id = context.connection_id().raw(),
+                        request_sequence = context.request_sequence().raw(),
+                        cookie = context.cookie().raw(),
+                        command = context.command(),
+                        offset = ?context.offset(),
+                        length = ?context.length(),
+                        reply_kind = context.reply_kind(),
+                        phase = "reply_write",
+                        duration_ms = observability::duration_ms(context.elapsed()),
+                        error = %error,
+                    );
+                }
+            }
             drop(queue_slot);
-            write_result
+            write_result.map(|_| ())
         }
         ConnectionReplyPayload::SimpleError { error } => writer
             .write_all(&encode_simple_reply(reply.cookie, error))

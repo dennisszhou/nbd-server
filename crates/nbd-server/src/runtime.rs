@@ -1,12 +1,14 @@
 use crate::{
-    AdmissionWaiter, AdmittedExportRequest, ExportAdmissionCtl, ExportAdmissionPolicyHandle,
-    ExportCompletion, ExportEngineHandle, ExportJob, ExportJobContext, ExportRequest, ExportResult,
-    Result, ServerError,
+    observability::{self, event, target},
+    AdmissionPermit, AdmissionWaiter, AdmittedExportRequest, ExportAdmissionCtl,
+    ExportAdmissionPolicyHandle, ExportCompletion, ExportEngineHandle, ExportJob, ExportJobContext,
+    ExportRequest, ExportResult, Result, ServerError,
 };
 use nbd_control_plane::ExportMeta;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tracing::Instrument;
 
 pub const DEFAULT_EXPORT_QUEUE_CAPACITY: usize = 128;
 
@@ -117,15 +119,20 @@ impl SerialExportRuntime {
         });
         let (sender, mut receiver) = mpsc::channel::<ExportJob>(capacity);
         let worker_lifecycle = lifecycle.clone();
+        let worker_meta = meta.clone();
 
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
+                let span = observability::request_span(&worker_meta, "serial", job.context());
                 execute_admitted_job(
+                    worker_meta.clone(),
+                    "serial",
                     engine.clone(),
                     admission_policy.clone(),
                     admission.clone(),
                     job,
                 )
+                .instrument(span)
                 .await;
                 worker_lifecycle.finish_job();
             }
@@ -166,15 +173,22 @@ impl ConcurrentExportRuntime {
 }
 
 async fn execute_admitted_job(
+    meta: ExportMeta,
+    runtime_kind: &'static str,
     engine: ExportEngineHandle,
     admission_policy: ExportAdmissionPolicyHandle,
     admission: ExportAdmissionCtl,
     job: ExportJob,
 ) {
+    let context = job.context().clone();
+    trace_runtime_task_started(&meta, runtime_kind, &context);
     match prepare_admitted_job(admission_policy, admission, job) {
-        PreparedExportJob::Registered(job) => execute_registered_job(engine, job).await,
+        PreparedExportJob::Registered(job) => {
+            execute_registered_job(&meta, runtime_kind, engine, job).await
+        }
         PreparedExportJob::Rejected(job) => complete_rejected_job(job).await,
     }
+    trace_runtime_task_completed(&meta, runtime_kind, &context);
 }
 
 fn prepare_admitted_job(
@@ -189,6 +203,7 @@ fn prepare_admitted_job(
     {
         Ok(waiter) => waiter,
         Err(error) => {
+            trace_request_failed(&context, "admission", &error);
             return PreparedExportJob::Rejected(RejectedExportJob {
                 context,
                 result: Err(error),
@@ -198,6 +213,7 @@ fn prepare_admitted_job(
         }
     };
 
+    trace_admission_registered(&context, &waiter);
     PreparedExportJob::Registered(RegisteredExportJob {
         context,
         request,
@@ -207,9 +223,14 @@ fn prepare_admitted_job(
     })
 }
 
-async fn execute_registered_job(engine: ExportEngineHandle, job: RegisteredExportJob) {
+async fn execute_registered_job(
+    meta: &ExportMeta,
+    runtime_kind: &'static str,
+    engine: ExportEngineHandle,
+    job: RegisteredExportJob,
+) {
     let RegisteredExportJob {
-        context: _context,
+        context,
         request,
         completion,
         queue_slot,
@@ -217,18 +238,228 @@ async fn execute_registered_job(engine: ExportEngineHandle, job: RegisteredExpor
     } = job;
     let result = match waiter.wait().await {
         Ok(permit) => {
-            engine
-                .execute_admitted(AdmittedExportRequest::new(request, permit))
-                .await
+            trace_admission_granted(&context, &permit);
+            trace_engine_execute_started(meta, runtime_kind, &context);
+            let result = engine
+                .execute_admitted(AdmittedExportRequest::new(request, permit, context.clone()))
+                .await;
+            trace_engine_execute_finished(meta, runtime_kind, &context, &result);
+            result
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            trace_request_failed(&context, "admission", &error);
+            Err(error)
+        }
     };
     completion.complete(result, queue_slot).await;
 }
 
 async fn complete_rejected_job(job: RejectedExportJob) {
-    let _context = job.context;
     job.completion.complete(job.result, job.queue_slot).await;
+}
+
+fn trace_runtime_submit(meta: &ExportMeta, runtime_kind: &'static str, context: &ExportJobContext) {
+    tracing::trace!(
+        target: target::RUNTIME,
+        event = event::RUNTIME_SUBMIT,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %meta.id(),
+        export_name = %meta.name(),
+        runtime_kind = runtime_kind,
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+    );
+}
+
+fn trace_runtime_task_started(
+    meta: &ExportMeta,
+    runtime_kind: &'static str,
+    context: &ExportJobContext,
+) {
+    tracing::trace!(
+        target: target::RUNTIME,
+        event = event::RUNTIME_TASK_STARTED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %meta.id(),
+        export_name = %meta.name(),
+        runtime_kind = runtime_kind,
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+    );
+}
+
+fn trace_runtime_task_completed(
+    meta: &ExportMeta,
+    runtime_kind: &'static str,
+    context: &ExportJobContext,
+) {
+    tracing::trace!(
+        target: target::RUNTIME,
+        event = event::RUNTIME_TASK_COMPLETED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %meta.id(),
+        export_name = %meta.name(),
+        runtime_kind = runtime_kind,
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+        duration_ms = observability::duration_ms(context.elapsed()),
+    );
+}
+
+fn trace_admission_registered(context: &ExportJobContext, waiter: &AdmissionWaiter) {
+    let op = waiter.op();
+    tracing::trace!(
+        target: target::ADMISSION,
+        event = event::ADMISSION_REGISTERED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        admission_ticket = waiter.ticket().as_u64(),
+        admission_op = op.kind(),
+        range_start = ?op.range().map(crate::ByteRange::start),
+        range_len = ?op.range().map(crate::ByteRange::len),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+    );
+}
+
+fn trace_admission_granted(context: &ExportJobContext, permit: &AdmissionPermit) {
+    let op = permit.op();
+    tracing::trace!(
+        target: target::ADMISSION,
+        event = event::ADMISSION_GRANTED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        admission_ticket = permit.ticket().as_u64(),
+        admission_op = op.kind(),
+        range_start = ?op.range().map(crate::ByteRange::start),
+        range_len = ?op.range().map(crate::ByteRange::len),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+    );
+}
+
+fn trace_engine_execute_started(
+    meta: &ExportMeta,
+    runtime_kind: &'static str,
+    context: &ExportJobContext,
+) {
+    tracing::trace!(
+        target: target::ENGINE,
+        event = event::ENGINE_EXECUTE_STARTED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %meta.id(),
+        export_name = %meta.name(),
+        engine_kind = %meta.engine_kind(),
+        runtime_kind = runtime_kind,
+        command = context.command(),
+        offset = ?context.offset(),
+        length = ?context.length(),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+    );
+}
+
+fn trace_engine_execute_finished(
+    meta: &ExportMeta,
+    runtime_kind: &'static str,
+    context: &ExportJobContext,
+    result: &ExportResult,
+) {
+    match result {
+        Ok(_) => {
+            let event_name = if context.command() == "flush" {
+                event::ENGINE_FLUSH_COMPLETED
+            } else {
+                event::ENGINE_EXECUTE_COMPLETED
+            };
+            tracing::trace!(
+                target: target::ENGINE,
+                event = event_name,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                export_id = %meta.id(),
+                export_name = %meta.name(),
+                engine_kind = %meta.engine_kind(),
+                runtime_kind = runtime_kind,
+                command = context.command(),
+                offset = ?context.offset(),
+                length = ?context.length(),
+                connection_id = context.connection_id().raw(),
+                request_sequence = context.request_sequence().raw(),
+                cookie = context.cookie().raw(),
+                status = "ok",
+                duration_ms = observability::duration_ms(context.elapsed()),
+            );
+        }
+        Err(error) => {
+            trace_engine_execute_failed(meta, runtime_kind, context, error);
+            trace_request_failed(context, "engine", error);
+        }
+    }
+}
+
+fn trace_engine_execute_failed(
+    meta: &ExportMeta,
+    runtime_kind: &'static str,
+    context: &ExportJobContext,
+    error: &ServerError,
+) {
+    observability::request_failure_event!(
+        target: target::ENGINE,
+        error: error,
+        event = event::ENGINE_EXECUTE_FAILED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %meta.id(),
+        export_name = %meta.name(),
+        engine_kind = %meta.engine_kind(),
+        runtime_kind = runtime_kind,
+        command = context.command(),
+        offset = ?context.offset(),
+        length = ?context.length(),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+        status = "error",
+        duration_ms = observability::duration_ms(context.elapsed()),
+    );
+}
+
+fn trace_request_failed(context: &ExportJobContext, phase: &'static str, error: &ServerError) {
+    observability::request_failure_event!(
+        target: target::REQUEST,
+        error: error,
+        event = event::REQUEST_FAILED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+        command = context.command(),
+        offset = ?context.offset(),
+        length = ?context.length(),
+        phase = phase,
+        duration_ms = observability::duration_ms(context.elapsed()),
+    );
 }
 
 impl SerialRuntimeLifecycle {
@@ -406,6 +637,7 @@ impl ExportRuntime for SerialExportRuntime {
     }
 
     async fn submit(&self, job: ExportJob) -> Result<()> {
+        trace_runtime_submit(&self.meta, "serial", job.context());
         self.lifecycle.begin_submit()?;
         self.sender.send(job).await.map_err(|_| {
             self.lifecycle.finish_job();
@@ -445,17 +677,31 @@ impl ExportRuntime for ConcurrentExportRuntime {
     }
 
     async fn submit(&self, job: ExportJob) -> Result<()> {
+        trace_runtime_submit(&self.meta, "concurrent", job.context());
         let active_job = self.lifecycle.begin_submit()?;
+        let span = observability::request_span(&self.meta, "concurrent", job.context());
         let prepared =
             prepare_admitted_job(self.admission_policy.clone(), self.admission.clone(), job);
         let engine = self.engine.clone();
-        tokio::spawn(async move {
-            match prepared {
-                PreparedExportJob::Registered(job) => execute_registered_job(engine, job).await,
-                PreparedExportJob::Rejected(job) => complete_rejected_job(job).await,
+        let meta = self.meta.clone();
+        tokio::spawn(
+            async move {
+                let context = match &prepared {
+                    PreparedExportJob::Registered(job) => job.context.clone(),
+                    PreparedExportJob::Rejected(job) => job.context.clone(),
+                };
+                trace_runtime_task_started(&meta, "concurrent", &context);
+                match prepared {
+                    PreparedExportJob::Registered(job) => {
+                        execute_registered_job(&meta, "concurrent", engine, job).await
+                    }
+                    PreparedExportJob::Rejected(job) => complete_rejected_job(job).await,
+                }
+                trace_runtime_task_completed(&meta, "concurrent", &context);
+                active_job.finish();
             }
-            active_job.finish();
-        });
+            .instrument(span),
+        );
         Ok(())
     }
 

@@ -42,6 +42,12 @@ pub enum ServerError {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestFailureLogLevel {
+    Debug,
+    Warn,
+}
+
 impl ServerError {
     pub(crate) fn io(context: &'static str, source: std::io::Error) -> Self {
         Self::Io {
@@ -53,6 +59,19 @@ impl ServerError {
     pub(crate) fn catalog(source: nbd_control_plane::CatalogError) -> Self {
         Self::Catalog {
             message: source.to_string(),
+        }
+    }
+
+    pub(crate) fn request_failure_log_level(&self) -> RequestFailureLogLevel {
+        match self {
+            Self::OutOfBounds { .. } | Self::Protocol { .. } => RequestFailureLogLevel::Debug,
+            Self::ExportTooLarge { .. }
+            | Self::ExportBusy { .. }
+            | Self::ExportOwnerMismatch { .. }
+            | Self::LockPoisoned { .. }
+            | Self::RuntimeClosed { .. }
+            | Self::Io { .. }
+            | Self::Catalog { .. } => RequestFailureLogLevel::Warn,
         }
     }
 }
@@ -97,3 +116,53 @@ impl fmt::Display for ServerError {
 }
 
 impl Error for ServerError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbd_protocol::ProtocolError;
+
+    #[test]
+    fn expected_client_request_errors_are_debug() {
+        assert_eq!(
+            ServerError::OutOfBounds {
+                operation: "read",
+                offset: 4096,
+                length: 4096,
+                size_bytes: 4096,
+            }
+            .request_failure_log_level(),
+            RequestFailureLogLevel::Debug,
+        );
+        assert_eq!(
+            ServerError::Protocol {
+                source: ProtocolError::InvalidMagic {
+                    context: "test",
+                    expected: 1,
+                    actual: 2,
+                },
+            }
+            .request_failure_log_level(),
+            RequestFailureLogLevel::Debug,
+        );
+    }
+
+    #[test]
+    fn server_side_request_errors_are_warn() {
+        assert_eq!(
+            ServerError::RuntimeClosed {
+                resource: "connection reply queue",
+            }
+            .request_failure_log_level(),
+            RequestFailureLogLevel::Warn,
+        );
+        assert_eq!(
+            ServerError::Io {
+                context: "write reply",
+                message: "broken pipe".to_owned(),
+            }
+            .request_failure_log_level(),
+            RequestFailureLogLevel::Warn,
+        );
+    }
+}

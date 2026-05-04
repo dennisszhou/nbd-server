@@ -3,6 +3,7 @@
 mod logging;
 
 use nbd_config::{ConfigSource, NbdConfig};
+use nbd_server::observability::{self, event, target};
 use nbd_server::NbdServer;
 use std::env;
 use std::error::Error;
@@ -30,8 +31,20 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let _logging_guard = logging::init_logging(logging_policy)?;
 
     tracing::info!(
-        target: "nbd_server::ops",
-        event = "server.starting",
+        target: target::OPS,
+        event = event::LOGGING_INITIALIZED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        log_file_path = %config.logging.file_path.display(),
+    );
+
+    tracing::info!(
+        target: target::OPS,
+        event = event::SERVER_STARTING,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
         listen_addr = %args.listen,
         config_source = %config_source,
         log_file_path = %config.logging.file_path.display(),
@@ -39,8 +52,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     let server = NbdServer::start_on(config, args.listen).await?;
     tracing::info!(
-        target: "nbd_server::ops",
-        event = "server.listening",
+        target: target::OPS,
+        event = event::SERVER_LISTENING,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
         listen_addr = %server.addr(),
     );
 
