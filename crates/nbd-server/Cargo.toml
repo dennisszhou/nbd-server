@@ -11,6 +11,9 @@ nbd-config = { path = "../nbd-config" }
 nbd-control-plane = { path = "../nbd-control-plane" }
 nbd-protocol = { path = "../nbd-protocol" }
 tokio = { version = "1.37", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 [dev-dependencies]
 nbd-us-client = { path = "../nbd-us-client" }
