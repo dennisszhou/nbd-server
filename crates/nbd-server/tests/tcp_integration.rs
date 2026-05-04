@@ -1,5 +1,6 @@
 mod support;
 
+use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_protocol::constants::{
     NBD_CMD_WRITE, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT,
     NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
@@ -8,6 +9,7 @@ use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCo
 use nbd_protocol::{OptionReply, RequestHeader};
 use nbd_us_client::{ClientError, NbdClient};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use support::nbd::{
     EngineProfile, RawNbdConnection, RawNbdOptionClient, RawNbdReply, ServerFixture,
 };
@@ -340,6 +342,72 @@ async fn raw_write_flush_and_read_replies_echo_cookies() {
 
     client
         .disconnect(NbdCookie::new(103))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn concurrent_runtime_handles_pipelined_protocol_smoke() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .configure_server(ServerConfig {
+            export_runtime: ExportRuntimeKind::Concurrent,
+            export_queue_depth: NonZeroUsize::new(4).expect("nonzero queue depth"),
+            ..ServerConfig::default()
+        })
+        .expect("configure concurrent runtime");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let first_read = NbdCookie::new(150);
+    let write = NbdCookie::new(151);
+    let independent_read = NbdCookie::new(152);
+    let conflicting_read = NbdCookie::new(153);
+
+    client
+        .send_read(first_read, 0, 4)
+        .await
+        .expect("send first read");
+    client
+        .send_write(write, 0, b"zzzz")
+        .await
+        .expect("send write");
+    client
+        .send_read(independent_read, 4, 4)
+        .await
+        .expect("send independent read");
+    client
+        .send_read(conflicting_read, 0, 4)
+        .await
+        .expect("send conflicting read");
+
+    let replies = collect_replies(
+        &mut client,
+        &[
+            (first_read, 4),
+            (independent_read, 4),
+            (conflicting_read, 4),
+        ],
+        4,
+    )
+    .await;
+    assert_read_data(&replies, first_read, &[0; 4]);
+    assert_simple_success(&replies, write);
+    assert_read_data(&replies, independent_read, &[0; 4]);
+    assert_read_data(&replies, conflicting_read, b"zzzz");
+
+    client
+        .disconnect(NbdCookie::new(154))
         .await
         .expect("disconnect raw client");
     server.shutdown().await.expect("shutdown server");

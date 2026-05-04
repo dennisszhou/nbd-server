@@ -1,4 +1,4 @@
-use nbd_config::{ConfigSource, NbdConfig};
+use nbd_config::{ConfigSource, NbdConfig, ServerConfig};
 use nbd_control_plane::{
     CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportMeta,
     ExportName, SQLiteExportCatalog,
@@ -79,6 +79,10 @@ impl ServerFixture {
             .catalog
             .delete_export(DeleteExport::new(export_name(name)))
             .await?)
+    }
+
+    pub fn configure_server(&self, server: ServerConfig) -> TestResult<()> {
+        Ok(self.runtime.write_server_config(server)?)
     }
 
     pub async fn start_server(&self) -> TestResult<NbdServer> {

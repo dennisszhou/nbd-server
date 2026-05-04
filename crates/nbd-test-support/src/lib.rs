@@ -36,22 +36,18 @@ impl TestRuntime {
             source,
         })?;
 
-        let config = NbdConfig {
-            catalog: CatalogConfig {
-                url: catalog_url.clone(),
+        write_config(
+            &config_path,
+            NbdConfig {
+                catalog: CatalogConfig {
+                    url: catalog_url.clone(),
+                },
+                runtime: RuntimeConfig {
+                    state_dir: state_dir.clone(),
+                },
+                server: ServerConfig::default(),
             },
-            runtime: RuntimeConfig {
-                state_dir: state_dir.clone(),
-            },
-            server: ServerConfig::default(),
-        };
-        let contents = toml::to_string_pretty(&config)
-            .map_err(|source| TestRuntimeError::SerializeConfig { source })?;
-
-        fs::write(&config_path, contents).map_err(|source| TestRuntimeError::WriteConfig {
-            path: config_path.clone(),
-            source,
-        })?;
+        )?;
 
         Ok(Self {
             root,
@@ -82,6 +78,22 @@ impl TestRuntime {
         &self.catalog_url
     }
 
+    /// Replace the fixture config's server policy.
+    pub fn write_server_config(&self, server: ServerConfig) -> Result<(), TestRuntimeError> {
+        write_config(
+            &self.config_path,
+            NbdConfig {
+                catalog: CatalogConfig {
+                    url: self.catalog_url.clone(),
+                },
+                runtime: RuntimeConfig {
+                    state_dir: self.state_dir.clone(),
+                },
+                server,
+            },
+        )
+    }
+
     /// Assert that a path is inside this fixture's root.
     pub fn assert_path_inside(&self, path: impl AsRef<Path>) {
         let path = path.as_ref();
@@ -92,6 +104,16 @@ impl TestRuntime {
             self.root.path().display()
         );
     }
+}
+
+fn write_config(path: &Path, config: NbdConfig) -> Result<(), TestRuntimeError> {
+    let contents = toml::to_string_pretty(&config)
+        .map_err(|source| TestRuntimeError::SerializeConfig { source })?;
+
+    fs::write(path, contents).map_err(|source| TestRuntimeError::WriteConfig {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// Errors returned while constructing a test runtime.
