@@ -18,6 +18,7 @@ const CONFIG_FILE: &str = "config.toml";
 const CATALOG_FILE: &str = "catalog.db";
 pub const DEFAULT_EXPORT_QUEUE_DEPTH: usize = 128;
 pub const DEFAULT_REPLY_QUEUE_CAPACITY: usize = 128;
+pub const DEFAULT_LOG_FILE_PATH: &str = "/tmp/nbd/current.log";
 
 /// Complete runtime configuration after startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +28,8 @@ pub struct NbdConfig {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 /// Catalog database configuration.
@@ -87,6 +90,14 @@ pub struct ServerConnectionConfig {
     pub reply_queue_capacity: NonZeroUsize,
 }
 
+/// Process logging configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingConfig {
+    #[serde(default = "default_log_file_path")]
+    pub file_path: PathBuf,
+}
+
 /// Export request execution policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +125,14 @@ impl Default for ServerConnectionConfig {
     }
 }
 
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            file_path: default_log_file_path(),
+        }
+    }
+}
+
 fn default_export_queue_depth() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_EXPORT_QUEUE_DEPTH).expect("default export queue depth is nonzero")
 }
@@ -121,6 +140,10 @@ fn default_export_queue_depth() -> NonZeroUsize {
 fn default_reply_queue_capacity() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_REPLY_QUEUE_CAPACITY)
         .expect("default reply queue capacity is nonzero")
+}
+
+pub fn default_log_file_path() -> PathBuf {
+    PathBuf::from(DEFAULT_LOG_FILE_PATH)
 }
 
 /// Where a configuration load should read from.
@@ -190,6 +213,7 @@ impl NbdConfig {
                 blob_dir,
             },
             server: ServerConfig::default(),
+            logging: LoggingConfig::default(),
         })
     }
 }

@@ -1,7 +1,7 @@
 use nbd_config::{
     catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
-    default_state_dir_for_home, ConfigSource, ExportRuntimeKind, NbdConfig,
-    DEFAULT_EXPORT_QUEUE_DEPTH, DEFAULT_REPLY_QUEUE_CAPACITY,
+    default_log_file_path, default_state_dir_for_home, ConfigSource, ExportRuntimeKind, NbdConfig,
+    DEFAULT_EXPORT_QUEUE_DEPTH, DEFAULT_LOG_FILE_PATH, DEFAULT_REPLY_QUEUE_CAPACITY,
 };
 use std::env;
 use std::fs;
@@ -39,6 +39,7 @@ fn explicit_config_loads_from_requested_path() {
         config.server.connection.reply_queue_capacity.get(),
         DEFAULT_REPLY_QUEUE_CAPACITY,
     );
+    assert_eq!(config.logging.file_path, default_log_file_path());
 }
 
 #[test]
@@ -98,10 +99,50 @@ fn default_user_path_bootstraps_absolute_config() {
         config.server.connection.reply_queue_capacity.get(),
         DEFAULT_REPLY_QUEUE_CAPACITY,
     );
+    assert_eq!(config.logging.file_path, default_log_file_path());
 
     let loaded = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
     assert_eq!(loaded, config);
     drop(old_home);
+}
+
+#[test]
+fn generated_default_config_includes_logging_section() {
+    let _guard = HOME_ENV_LOCK.lock().unwrap();
+    let temp = TempRoot::new();
+    let fake_home = temp.path().join("home");
+
+    fs::create_dir_all(&fake_home).unwrap();
+
+    let old_home = EnvVarGuard::set("HOME", &fake_home);
+    let config_path = default_config_path_for_home(&fake_home);
+    let config = NbdConfig::load(ConfigSource::DefaultUserPath).unwrap();
+    let contents = fs::read_to_string(config_path).unwrap();
+
+    assert_eq!(config.logging.file_path, default_log_file_path());
+    assert!(contents.contains("[logging]"));
+    assert!(contents.contains(&format!("file_path = \"{DEFAULT_LOG_FILE_PATH}\"")));
+    drop(old_home);
+}
+
+#[test]
+fn explicit_config_loads_logging_file_path() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let catalog_path = temp.path().join("catalog.db");
+    let log_path = temp.path().join("logs").join("current.log");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[logging]\nfile_path = {:?}\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir,
+        log_path,
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(config.logging.file_path, log_path);
 }
 
 #[test]

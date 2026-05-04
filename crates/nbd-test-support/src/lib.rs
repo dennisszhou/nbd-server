@@ -3,7 +3,8 @@
 #![forbid(unsafe_code)]
 
 use nbd_config::{
-    catalog_file_url_for_path, CatalogConfig, ConfigError, NbdConfig, RuntimeConfig, ServerConfig,
+    catalog_file_url_for_path, CatalogConfig, ConfigError, LoggingConfig, NbdConfig, RuntimeConfig,
+    ServerConfig,
 };
 use std::error::Error;
 use std::fmt;
@@ -48,6 +49,7 @@ impl TestRuntime {
                     blob_dir: blob_dir.clone(),
                 },
                 server: ServerConfig::default(),
+                logging: LoggingConfig::default(),
             },
         )?;
 
@@ -93,6 +95,7 @@ impl TestRuntime {
                     blob_dir: self.state_dir.join("blobs"),
                 },
                 server,
+                logging: LoggingConfig::default(),
             },
         )
     }
