@@ -17,8 +17,8 @@ behavior independently reviewable.
 
 The target end state is:
 
-- a catalog current-head model that no longer treats mutable serving state as
-  append-only historical generations;
+- a catalog current-head model that no longer uses export generations for
+  serving state;
 - explicit simple mutable tree metadata in SQLite;
 - admission policy mapping that lets simple durable serialize chunk-aligned
   writes while preserving current memory admission behavior;
@@ -62,16 +62,16 @@ inspect, delete, and load correctly.
 
 Review focus: schema truth, migration safety, source-of-truth naming, moving
 the catalog domain API to `ExportHead` terminology, keeping current head
-separate from future immutable history, and not exposing simple durable server
-behavior before the metadata foundation is stable.
+separate from future immutable layout semantics, and not exposing simple
+durable server behavior before the metadata foundation is stable.
 
-Done means: a new migration creates `export_heads`, `tree_nodes`,
-`tree_edges`, and `tree_leaf_refs`; existing export metadata is represented as
-one current head per export; the catalog model and SQLite implementation load
-current state from `export_heads`; `ExportMeta` exposes current head state
-through head-oriented naming instead of generation-oriented serving APIs; tests
-and server fixtures apply the current migration set consistently; memory
-export behavior remains unchanged.
+Done means: migrations create `export_heads`, `tree_nodes`, `tree_edges`, and
+`tree_leaf_refs`; new exports are represented as one current head per export;
+the catalog model and SQLite implementation load current state from
+`export_heads`; `ExportMeta` exposes current head state through head-oriented
+naming instead of generation-oriented serving APIs; tests and server fixtures
+apply the current migration set consistently; memory export behavior remains
+unchanged.
 
 Approval: finished
 
@@ -180,14 +180,17 @@ through the existing runtime path, and successful writes persist across server
 restart.
 
 Review focus: engine construction boundaries, registry config plumbing,
-admission permit lifetime, chunk pagination, DB-after-fsync ordering,
-multi-chunk write limitation truthfulness, protocol persistence proof, and no
-regression to memory default behavior.
+admission permit lifetime, chunk pagination, DB-after-fsync ordering, keeping
+all simple tree metadata mutation behind `SimpleMutableTree`, multi-chunk write
+limitation truthfulness, protocol persistence proof, and no regression to
+memory default behavior.
 
 Done means: the `simple_durable` engine kind is accepted by the catalog schema,
-domain model, and CLI parser; `nbdcli create --engine simple_durable` creates a
-simple durable export; `LocalExportRegistry` constructs `SimpleDurableEngine`
-for that engine kind using configured `runtime.blob_dir`; reads zero-fill
+domain model, and CLI parser; `nbdcli create --engine simple_durable` creates
+an export whose persistent head uses `layout_kind = simple_mutable_tree`;
+`LocalExportRegistry` constructs `SimpleDurableEngine` for that engine kind
+using configured `runtime.blob_dir`; the engine owns a loaded
+`SimpleMutableTree` and does not write tree metadata directly; reads zero-fill
 sparse chunks; writes materialize or replace 32 MiB blobs; flush remains a
 barrier no-op; protocol integration proves write/read behavior and data
 survival across server restart; memory remains the default create engine and
@@ -209,9 +212,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 make docker-smoke
 ```
 
-Not included: WAL durability, replay, read view, compaction, immutable COW
-roots, clone, S3, GC, online resize, dynamic blob sizing, or atomic
-all-or-nothing semantics across multi-chunk write failures.
+Not included: WAL durability, replay, `ExportReadView`, read-view refresh,
+time-based WAL retention, compaction, immutable COW roots, clone, S3, GC,
+online resize, dynamic blob sizing, or atomic all-or-nothing semantics across
+multi-chunk write failures.
 
 ## Completion
 

@@ -134,7 +134,8 @@ as immutable COW blobs.
 - holds admitted requests through the existing `AdmittedExportRequest` type;
 - paginates reads and writes into 32 MiB chunk operations;
 - coordinates `SimpleMutableTree` and `LocalBlobStore`;
-- keeps admission permits live through file I/O and metadata commits.
+- keeps admission permits live through file I/O and metadata commits;
+- never writes tree metadata directly.
 
 `SimpleMutableTree`
 
@@ -142,7 +143,9 @@ as immutable COW blobs.
 - loads the current head and tree rows from SQLite on open;
 - resolves chunk indexes to blob keys or sparse zeroes;
 - commits new chunk metadata after blob files are durable;
-- updates its in-memory view only after the database transaction commits.
+- updates its in-memory view only after the database transaction commits;
+- is the only simple durable request-path owner allowed to mutate simple tree
+  metadata.
 
 `LocalBlobStore`
 
@@ -214,9 +217,10 @@ tree_leaf_refs
   created_at
 ```
 
-The old `export_generations` name should not remain the serving source of
-truth. If a compatibility migration needs to preserve the old table during the
-transition, runtime code should still load current state from `export_heads`.
+The old `export_generations` model should not remain in the active schema or
+serving path. Future immutable roots should also publish through
+`export_heads` with a different layout kind rather than reintroducing
+generation-oriented serving state.
 
 The catalog domain API should mirror that source of truth:
 
@@ -236,8 +240,8 @@ pub enum ExportLayoutKind {
 
 `ExportMeta` should expose the current head through head-oriented naming.
 Serving paths should not expose normal simple durable writes as generation
-advancement. Any historical generation API belongs with the future immutable
-WAL/COW root model.
+advancement. Future immutable WAL/COW root publication should still advance
+`export_heads` rather than introduce a separate generation API.
 
 The v1 simple mutable tree is a sparse database tree with one internal root
 node and direct leaf edges keyed by chunk index. All nodes and edges are rows
@@ -279,14 +283,23 @@ pub struct SimpleChunkRef {
 }
 
 pub struct SimpleMutableTree {
+    catalog: Arc<dyn SimpleTreeMetadataStore>,
+    commit_lock: Mutex<()>,
+    state: RwLock<SimpleTreeState>,
+}
+
+struct SimpleTreeState {
     export_id: ExportId,
     size_bytes: u64,
     root_node_id: Option<NodeId>,
-    catalog: Arc<dyn ExportCatalog>,
+    chunks: BTreeMap<ChunkIndex, SimpleChunkRef>,
 }
 
 impl SimpleMutableTree {
-    async fn load(catalog: Arc<dyn ExportCatalog>, meta: &ExportMeta)
+    async fn load(
+        catalog: Arc<dyn SimpleTreeMetadataStore>,
+        meta: &ExportMeta,
+    )
         -> Result<Self>;
 
     async fn lookup_chunk(&self, chunk_index: ChunkIndex)
@@ -302,16 +315,42 @@ mutex. Two writes to different sparse chunks may perform file work in
 parallel, but root creation and tree row insertion must serialize so both
 writes are represented in the current head.
 
+`SimpleDurableEngine` reads metadata through `SimpleMutableTree` and requests
+new metadata through `SimpleMutableTree::commit_new_chunks`. Engine code must
+not call raw SQLite or `SimpleTreeMetadataStore` directly. That boundary keeps
+the simple mutable tree replaceable by a future lazy reader without changing
+engine request orchestration.
+
 `ChunkIndex` is the logical 32 MiB chunk number. In the v1 root-to-leaf tree it
 maps directly to `tree_edges.slot`.
 
 ```rust
 pub struct SimpleDurableEngine {
     meta: ExportMeta,
+    admission_policy: Arc<SimpleDurableAdmissionPolicy>,
     tree: SimpleMutableTree,
     blob_store: Arc<LocalBlobStore>,
 }
 ```
+
+Create-time and open-time state are separate:
+
+```text
+nbdcli create --engine simple_durable
+  -> exports.engine_kind = simple_durable
+  -> export_heads.layout_kind = simple_mutable_tree
+  -> export_heads.root_node_id = null
+
+LocalExportRegistry::open
+  -> loads ExportMeta
+  -> SimpleMutableTree::load(...)
+  -> LocalBlobStore::new(runtime.blob_dir)
+  -> SimpleDurableEngine::new(meta, tree, blob_store)
+```
+
+The catalog records the persistent simple mutable tree head. The runtime
+`SimpleDurableEngine` owns the loaded `SimpleMutableTree` object while the
+export is open.
 
 Admission should keep the existing byte-range operation shape:
 
@@ -411,6 +450,9 @@ work and any needed metadata commits have completed.
 - `SimpleMutableTree` in-memory state is a cache loaded from SQLite.
 - In-memory tree state is updated only after the corresponding DB transaction
   commits.
+- `SimpleMutableTree` is the only simple durable request-path component that
+  mutates tree metadata.
+- `SimpleDurableEngine` must not issue catalog tree writes directly.
 - `LocalBlobStore` never updates metadata.
 - `ExportAdmissionCtl` never reads or writes storage metadata.
 - DB metadata for a newly materialized chunk is committed only after its blob
@@ -458,8 +500,8 @@ Add a `metadata_version` now:
 # Migration / Rollout
 
 Add catalog migrations that create `export_heads` and the tree metadata
-tables. The head migration should populate `export_heads` from the latest
-existing `export_generations` row for each export.
+tables. New exports should create one current head transactionally with the
+export row.
 
 Stage the public `simple_durable` engine kind with the engine rollout, not the
 schema foundation. Today `nbdcli create` parses `ExportEngineKind` directly, so
