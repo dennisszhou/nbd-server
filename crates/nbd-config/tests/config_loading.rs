@@ -1,6 +1,7 @@
 use nbd_config::{
     catalog_file_url_for_path, default_config_path_for_home, default_state_dir_for_home,
-    ConfigSource, ExportRuntimeKind, NbdConfig,
+    ConfigSource, ExportRuntimeKind, NbdConfig, DEFAULT_EXPORT_QUEUE_DEPTH,
+    DEFAULT_REPLY_QUEUE_CAPACITY,
 };
 use std::env;
 use std::fs;
@@ -27,6 +28,14 @@ fn explicit_config_loads_from_requested_path() {
         catalog_file_url_for_path(catalog_path).unwrap()
     );
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(
+        config.server.export_queue_depth.get(),
+        DEFAULT_EXPORT_QUEUE_DEPTH
+    );
+    assert_eq!(
+        config.server.connection.reply_queue_capacity.get(),
+        DEFAULT_REPLY_QUEUE_CAPACITY,
+    );
 }
 
 #[test]
@@ -72,6 +81,14 @@ fn default_user_path_bootstraps_absolute_config() {
     );
     assert!(config.catalog.url.starts_with("file:"));
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(
+        config.server.export_queue_depth.get(),
+        DEFAULT_EXPORT_QUEUE_DEPTH
+    );
+    assert_eq!(
+        config.server.connection.reply_queue_capacity.get(),
+        DEFAULT_REPLY_QUEUE_CAPACITY,
+    );
 
     let loaded = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
     assert_eq!(loaded, config);
@@ -106,6 +123,53 @@ fn explicit_server_config_loads_runtime_choice() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(
+        config.server.export_queue_depth.get(),
+        DEFAULT_EXPORT_QUEUE_DEPTH
+    );
+    assert_eq!(
+        config.server.connection.reply_queue_capacity.get(),
+        DEFAULT_REPLY_QUEUE_CAPACITY,
+    );
+}
+
+#[test]
+fn explicit_server_config_loads_queue_sizing() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\nexport_queue_depth = 7\n\n[server.connection]\nreply_queue_capacity = 3\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(config.server.export_queue_depth.get(), 7);
+    assert_eq!(config.server.connection.reply_queue_capacity.get(), 3);
+}
+
+#[test]
+fn zero_queue_sizing_is_rejected() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_queue_depth = 0\n\n[server.connection]\nreply_queue_capacity = 1\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let error = NbdConfig::load(ConfigSource::ExplicitPath(config_path))
+        .expect_err("zero export queue depth should fail");
+
+    assert!(error.to_string().contains("failed to parse config"));
 }
 
 fn write_config(config_path: &Path, state_dir: &Path, catalog_path: &Path) {

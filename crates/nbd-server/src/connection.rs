@@ -2,7 +2,6 @@ use crate::export::ExportCompletionSink;
 use crate::{
     CompletedExport, ExportCompletion, ExportJob, ExportOwner, ExportQueueSlot, ExportReply,
     ExportRequest, ExportResult, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
-    DEFAULT_EXPORT_QUEUE_CAPACITY,
 };
 use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_CMD_DISC, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
@@ -117,10 +116,10 @@ impl ExportCompletionSink for ConnectionExportCompletion {
 }
 
 impl ConnectionRuntime {
-    fn new(runtime: ExportRuntimeHandle) -> Self {
+    fn new(runtime: ExportRuntimeHandle, reply_capacity: usize) -> Self {
         Self {
             runtime,
-            reply_capacity: DEFAULT_EXPORT_QUEUE_CAPACITY,
+            reply_capacity,
         }
     }
 
@@ -142,12 +141,16 @@ impl ConnectionRuntime {
     }
 }
 
-pub async fn serve(mut stream: TcpStream, registry: Arc<LocalExportRegistry>) -> Result<()> {
+pub async fn serve(
+    mut stream: TcpStream,
+    registry: Arc<LocalExportRegistry>,
+    reply_capacity: usize,
+) -> Result<()> {
     write_handshake(&mut stream).await?;
     let Some(export) = negotiate_options(&mut stream, registry.clone()).await? else {
         return Ok(());
     };
-    let result = ConnectionRuntime::new(export.runtime.clone())
+    let result = ConnectionRuntime::new(export.runtime.clone(), reply_capacity)
         .run(stream)
         .await;
     let close_result = registry.close(&export.name, &export.owner).await;

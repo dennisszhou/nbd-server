@@ -27,6 +27,7 @@ impl NbdServer {
             Arc::new(catalog),
             config.server.clone(),
         ));
+        let reply_capacity = config.server.connection.reply_queue_capacity.get();
         let listener = TcpListener::bind(listen)
             .await
             .map_err(|source| ServerError::io("bind NBD server", source))?;
@@ -45,7 +46,7 @@ impl NbdServer {
                         };
                         let registry = registry.clone();
                         tokio::spawn(async move {
-                            let _ = connection::serve(stream, registry).await;
+                            let _ = connection::serve(stream, registry, reply_capacity).await;
                         });
                     }
                 }

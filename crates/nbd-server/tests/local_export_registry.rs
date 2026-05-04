@@ -4,6 +4,7 @@ use nbd_control_plane::{
 };
 use nbd_server::{ExportOwner, LocalExportRegistry, ServerError, MAX_MEMORY_EXPORT_BYTES};
 use nbd_test_support::TestRuntime;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 const MIGRATION: &str =
@@ -76,6 +77,45 @@ async fn failed_open_removes_opening_reservation() {
                 && max_size_bytes == MAX_MEMORY_EXPORT_BYTES,
         ));
     }
+}
+
+#[tokio::test]
+async fn registry_applies_configured_export_queue_depth() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(create_export("disk-a", 4096, 4096))
+        .await
+        .expect("create export");
+    let config = ServerConfig {
+        export_queue_depth: NonZeroUsize::new(1).expect("nonzero queue depth"),
+        ..ServerConfig::default()
+    };
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let owner = ExportOwner::unique_connection();
+
+    let export_runtime = registry
+        .open(export_name("disk-a"), owner)
+        .await
+        .expect("open export");
+    let first_slot = export_runtime.reserve().await.expect("reserve first slot");
+    let waiter_runtime = export_runtime.clone();
+    let waiter =
+        tokio::spawn(async move { waiter_runtime.reserve().await.expect("reserve second slot") });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !waiter.is_finished(),
+        "configured queue depth should limit export reservations",
+    );
+
+    drop(first_slot);
+    let second_slot = waiter.await.expect("reservation task");
+    drop(second_slot);
+    registry
+        .close(&export_name("disk-a"), &owner)
+        .await
+        .expect("close export");
 }
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {

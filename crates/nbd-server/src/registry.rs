@@ -140,7 +140,11 @@ impl LocalExportRegistry {
             ExportEngineKind::Memory => Arc::new(MemoryExportEngine::new(&meta)?),
         };
         let runtime: ExportRuntimeHandle = match self.config.export_runtime {
-            ExportRuntimeKind::Serial => Arc::new(SerialExportRuntime::new(meta, engine)),
+            ExportRuntimeKind::Serial => Arc::new(SerialExportRuntime::with_capacity(
+                meta,
+                engine,
+                self.config.export_queue_depth.get(),
+            )),
         };
         Ok(runtime)
     }

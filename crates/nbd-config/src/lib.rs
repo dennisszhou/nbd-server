@@ -8,11 +8,14 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 const CONFIG_DIR: &str = ".nbd";
 const CONFIG_FILE: &str = "config.toml";
 const CATALOG_FILE: &str = "catalog.db";
+pub const DEFAULT_EXPORT_QUEUE_DEPTH: usize = 128;
+pub const DEFAULT_REPLY_QUEUE_CAPACITY: usize = 128;
 
 /// Complete runtime configuration after startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,11 +42,23 @@ pub struct RuntimeConfig {
 }
 
 /// NBD server runtime policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     #[serde(default)]
     pub export_runtime: ExportRuntimeKind,
+    #[serde(default = "default_export_queue_depth")]
+    pub export_queue_depth: NonZeroUsize,
+    #[serde(default)]
+    pub connection: ServerConnectionConfig,
+}
+
+/// NBD server per-connection runtime policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConnectionConfig {
+    #[serde(default = "default_reply_queue_capacity")]
+    pub reply_queue_capacity: NonZeroUsize,
 }
 
 /// Export request execution policy.
@@ -52,6 +67,33 @@ pub struct ServerConfig {
 pub enum ExportRuntimeKind {
     #[default]
     Serial,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            export_runtime: ExportRuntimeKind::default(),
+            export_queue_depth: default_export_queue_depth(),
+            connection: ServerConnectionConfig::default(),
+        }
+    }
+}
+
+impl Default for ServerConnectionConfig {
+    fn default() -> Self {
+        Self {
+            reply_queue_capacity: default_reply_queue_capacity(),
+        }
+    }
+}
+
+fn default_export_queue_depth() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_EXPORT_QUEUE_DEPTH).expect("default export queue depth is nonzero")
+}
+
+fn default_reply_queue_capacity() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_REPLY_QUEUE_CAPACITY)
+        .expect("default reply queue capacity is nonzero")
 }
 
 /// Where a configuration load should read from.
