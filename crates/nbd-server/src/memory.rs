@@ -1,5 +1,5 @@
 use crate::{
-    AdmissionOp, AdmittedExportRequest, ByteRange, Export, ExportAdmissionProfile,
+    AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionProfile,
     ExportAdmissionProfileHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
 };
@@ -16,9 +16,6 @@ pub struct MemoryExportEngine {
     block_size: u64,
     data: Mutex<Vec<u8>>,
 }
-
-/// Compatibility name for the direct `ExportHandle` path.
-pub type MemoryExport = MemoryExportEngine;
 
 #[derive(Debug)]
 pub struct MemoryAdmissionProfile {
@@ -107,36 +104,21 @@ impl MemoryExportEngine {
         })
     }
 
-    pub async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
         let start = self.validate_range("read", offset, u64::from(len))?;
         let end = start + len as usize;
         Ok(self.data()?[start..end].to_vec())
     }
 
-    pub async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+    async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
         let start = self.validate_range("write", offset, data.len() as u64)?;
         let end = start + data.len();
         self.data()?[start..end].copy_from_slice(data);
         Ok(())
     }
 
-    pub async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl Export for MemoryExportEngine {
-    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
-        Self::read(self, offset, len).await
-    }
-
-    async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
-        Self::write(self, offset, data).await
-    }
-
     async fn flush(&self) -> Result<()> {
-        Self::flush(self).await
+        Ok(())
     }
 }
 

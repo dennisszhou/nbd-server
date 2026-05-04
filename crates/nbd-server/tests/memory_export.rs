@@ -2,33 +2,61 @@ use nbd_control_plane::{
     CommittedRoot, ExportEngineKind, ExportGeneration, ExportId, ExportMeta, ExportName,
     ExportState, Timestamp, WalSeq,
 };
-use nbd_server::{MemoryExport, ServerError, MAX_MEMORY_EXPORT_BYTES};
+use nbd_server::{
+    ExportJob, ExportReply, ExportRequest, ExportRuntime, MemoryExportEngine, Result,
+    SerialExportRuntime, ServerError, MAX_MEMORY_EXPORT_BYTES,
+};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn memory_export_reads_zeroes_then_written_bytes() {
-    let export = MemoryExport::new(&export_meta("disk-a", 4096)).expect("memory export");
+    let meta = export_meta("disk-a", 4096);
+    let export = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
 
     assert_eq!(export.name().as_str(), "disk-a");
     assert_eq!(export.size_bytes(), 4096);
     assert_eq!(export.block_size(), 4096);
-    assert_eq!(export.read(4, 5).await.expect("zero read"), vec![0; 5]);
 
-    export.write(4, b"hello").await.expect("write");
-    assert_eq!(export.read(0, 12).await.expect("readback"), {
-        let mut expected = vec![0; 12];
-        expected[4..9].copy_from_slice(b"hello");
-        expected
-    });
+    let runtime = SerialExportRuntime::new(meta, export);
 
-    export.flush().await.expect("flush");
+    assert_eq!(
+        submit(&runtime, ExportRequest::Read { offset: 4, len: 5 })
+            .await
+            .expect("zero read"),
+        ExportReply::Read { data: vec![0; 5] },
+    );
+
+    submit(
+        &runtime,
+        ExportRequest::Write {
+            offset: 4,
+            data: b"hello".to_vec(),
+        },
+    )
+    .await
+    .expect("write");
+
+    let mut expected = vec![0; 12];
+    expected[4..9].copy_from_slice(b"hello");
+    assert_eq!(
+        submit(&runtime, ExportRequest::Read { offset: 0, len: 12 })
+            .await
+            .expect("readback"),
+        ExportReply::Read { data: expected },
+    );
+
+    assert_eq!(
+        submit(&runtime, ExportRequest::Flush).await.expect("flush"),
+        ExportReply::Done,
+    );
 }
 
 #[tokio::test]
 async fn memory_export_rejects_out_of_bounds_ranges() {
-    let export = MemoryExport::new(&export_meta("disk-a", 8)).expect("memory export");
+    let runtime = memory_runtime("disk-a", 8);
 
     assert!(matches!(
-        export.read(7, 2).await,
+        submit(&runtime, ExportRequest::Read { offset: 7, len: 2 }).await,
         Err(ServerError::OutOfBounds {
             operation: "read",
             offset: 7,
@@ -37,7 +65,14 @@ async fn memory_export_rejects_out_of_bounds_ranges() {
         }),
     ));
     assert!(matches!(
-        export.write(8, b"x").await,
+        submit(
+            &runtime,
+            ExportRequest::Write {
+                offset: 8,
+                data: b"x".to_vec(),
+            },
+        )
+        .await,
         Err(ServerError::OutOfBounds {
             operation: "write",
             offset: 8,
@@ -52,7 +87,7 @@ fn memory_export_rejects_oversized_catalog_exports() {
     let meta = export_meta("huge", MAX_MEMORY_EXPORT_BYTES + 1);
 
     assert!(matches!(
-        MemoryExport::new(&meta),
+        MemoryExportEngine::new(&meta),
         Err(ServerError::ExportTooLarge {
             size_bytes,
             max_size_bytes,
@@ -60,6 +95,21 @@ fn memory_export_rejects_oversized_catalog_exports() {
         }) if size_bytes == MAX_MEMORY_EXPORT_BYTES + 1
             && max_size_bytes == MAX_MEMORY_EXPORT_BYTES,
     ));
+}
+
+async fn submit(runtime: &SerialExportRuntime, request: ExportRequest) -> Result<ExportReply> {
+    let queue_slot = runtime.reserve().await?;
+    let (job, receiver) = ExportJob::oneshot(request, queue_slot);
+    runtime.submit(job).await?;
+    let completed = receiver.await.expect("runtime completion");
+    let (result, _queue_slot) = completed.into_parts();
+    result
+}
+
+fn memory_runtime(name: &str, size_bytes: u64) -> SerialExportRuntime {
+    let meta = export_meta(name, size_bytes);
+    let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
+    SerialExportRuntime::new(meta, engine)
 }
 
 fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
