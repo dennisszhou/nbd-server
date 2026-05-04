@@ -159,6 +159,41 @@ async fn registry_can_open_concurrent_runtime_from_config() {
 }
 
 #[tokio::test]
+async fn registry_can_open_serial_runtime_from_config() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(create_export("disk-a", 4096, 4096))
+        .await
+        .expect("create export");
+    let config = ServerConfig {
+        export_runtime: ExportRuntimeKind::Serial,
+        ..ServerConfig::default()
+    };
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let owner = ExportOwner::unique_connection();
+
+    let export_runtime = registry
+        .open(export_name("disk-a"), owner)
+        .await
+        .expect("open serial runtime");
+    let queue_slot = export_runtime
+        .reserve()
+        .await
+        .expect("reserve from serial runtime");
+    drop(queue_slot);
+
+    registry
+        .close(&export_name("disk-a"), &owner)
+        .await
+        .expect("close serial runtime");
+    assert!(matches!(
+        export_runtime.reserve().await,
+        Err(ServerError::RuntimeClosed { resource }) if resource == "serial export runtime",
+    ));
+}
+
+#[tokio::test]
 async fn registry_shares_active_runtime_for_same_owner() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;

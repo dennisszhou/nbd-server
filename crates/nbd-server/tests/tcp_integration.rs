@@ -414,6 +414,72 @@ async fn concurrent_runtime_handles_pipelined_protocol_smoke() {
 }
 
 #[tokio::test]
+async fn serial_runtime_handles_pipelined_protocol_smoke() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    fixture
+        .configure_server(ServerConfig {
+            export_runtime: ExportRuntimeKind::Serial,
+            export_queue_depth: NonZeroUsize::new(4).expect("nonzero queue depth"),
+            ..ServerConfig::default()
+        })
+        .expect("configure serial runtime");
+    fixture
+        .create_export("disk-a", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
+        .await
+        .expect("connect raw client");
+
+    let first_read = NbdCookie::new(160);
+    let write = NbdCookie::new(161);
+    let independent_read = NbdCookie::new(162);
+    let conflicting_read = NbdCookie::new(163);
+
+    client
+        .send_read(first_read, 0, 4)
+        .await
+        .expect("send first read");
+    client
+        .send_write(write, 0, b"yyyy")
+        .await
+        .expect("send write");
+    client
+        .send_read(independent_read, 4, 4)
+        .await
+        .expect("send independent read");
+    client
+        .send_read(conflicting_read, 0, 4)
+        .await
+        .expect("send conflicting read");
+
+    let replies = collect_replies(
+        &mut client,
+        &[
+            (first_read, 4),
+            (independent_read, 4),
+            (conflicting_read, 4),
+        ],
+        4,
+    )
+    .await;
+    assert_read_data(&replies, first_read, &[0; 4]);
+    assert_simple_success(&replies, write);
+    assert_read_data(&replies, independent_read, &[0; 4]);
+    assert_read_data(&replies, conflicting_read, b"yyyy");
+
+    client
+        .disconnect(NbdCookie::new(164))
+        .await
+        .expect("disconnect raw client");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
 async fn unsupported_transmission_command_returns_nbd_error() {
     let fixture = ServerFixture::new(EngineProfile::MEMORY)
         .await
