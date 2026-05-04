@@ -3,8 +3,9 @@ use nbd_control_plane::{
     ExportState, Timestamp, WalSeq,
 };
 use nbd_server::{
-    ExportEngine, ExportJob, ExportReply, ExportRequest, ExportResult, ExportRuntime,
-    MemoryExportEngine, SerialExportRuntime, ServerError,
+    AdmittedExportRequest, ExportAdmissionProfileHandle, ExportEngine, ExportJob, ExportReply,
+    ExportRequest, ExportResult, ExportRuntime, MemoryAdmissionProfile, MemoryExportEngine,
+    SerialExportRuntime, ServerError,
 };
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
@@ -139,7 +140,11 @@ impl BlockingEngine {
 
 #[async_trait::async_trait]
 impl ExportEngine for BlockingEngine {
-    async fn execute(&self, _request: ExportRequest) -> ExportResult {
+    fn admission_profile(&self) -> ExportAdmissionProfileHandle {
+        Arc::new(MemoryAdmissionProfile::new(4096))
+    }
+
+    async fn execute_admitted(&self, _request: AdmittedExportRequest) -> ExportResult {
         if let Some(entered) = self.entered.lock().expect("entered lock").take() {
             let _ = entered.send(());
         }

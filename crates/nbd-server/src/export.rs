@@ -1,4 +1,8 @@
-use crate::{runtime::ExportQueueSlot, Result};
+use crate::{
+    admission::{AdmissionOp, AdmissionPermit},
+    runtime::ExportQueueSlot,
+    Result,
+};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -32,10 +36,39 @@ pub enum ExportReply {
 
 pub type ExportResult = Result<ExportReply>;
 
+/// Backing-store-specific mapping from export requests to admission operations.
+pub trait ExportAdmissionProfile: Send + Sync {
+    fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp>;
+}
+
+pub type ExportAdmissionProfileHandle = Arc<dyn ExportAdmissionProfile>;
+
+/// Export request bundled with the admission permit that authorizes it.
+#[derive(Debug)]
+pub struct AdmittedExportRequest {
+    request: ExportRequest,
+    _permit: AdmissionPermit,
+}
+
+impl AdmittedExportRequest {
+    pub(crate) fn new(request: ExportRequest, permit: AdmissionPermit) -> Self {
+        Self {
+            request,
+            _permit: permit,
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (ExportRequest, AdmissionPermit) {
+        (self.request, self._permit)
+    }
+}
+
 /// Data behavior for one active export.
 #[async_trait::async_trait]
 pub trait ExportEngine: Send + Sync {
-    async fn execute(&self, request: ExportRequest) -> ExportResult;
+    fn admission_profile(&self) -> ExportAdmissionProfileHandle;
+
+    async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult;
 }
 
 pub type ExportEngineHandle = Arc<dyn ExportEngine>;

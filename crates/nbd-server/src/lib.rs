@@ -17,10 +17,13 @@ pub use admission::{
 };
 pub use error::{Result, ServerError};
 pub use export::{
-    CompletedExport, Export, ExportCompletion, ExportEngine, ExportEngineHandle, ExportHandle,
+    AdmittedExportRequest, CompletedExport, Export, ExportAdmissionProfile,
+    ExportAdmissionProfileHandle, ExportCompletion, ExportEngine, ExportEngineHandle, ExportHandle,
     ExportJob, ExportReply, ExportRequest, ExportResult,
 };
-pub use memory::{MemoryExport, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
+pub use memory::{
+    MemoryAdmissionProfile, MemoryExport, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES,
+};
 pub use registry::{ExportOwner, LocalExportRegistry};
 pub use runtime::{
     ExportQueueSlot, ExportRuntime, ExportRuntimeHandle, SerialExportRuntime,

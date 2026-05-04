@@ -1,4 +1,6 @@
-use crate::{ExportEngineHandle, ExportJob, Result, ServerError};
+use crate::{
+    AdmittedExportRequest, ExportAdmissionCtl, ExportEngineHandle, ExportJob, Result, ServerError,
+};
 use nbd_control_plane::ExportMeta;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -53,6 +55,8 @@ impl SerialExportRuntime {
     }
 
     pub fn with_capacity(meta: ExportMeta, engine: ExportEngineHandle, capacity: usize) -> Self {
+        let admission = ExportAdmissionCtl::new(meta.size_bytes());
+        let admission_profile = engine.admission_profile();
         let queue_depth = Arc::new(Semaphore::new(capacity));
         let lifecycle = Arc::new(SerialRuntimeLifecycle {
             state: Mutex::new(SerialRuntimeState {
@@ -67,9 +71,21 @@ impl SerialExportRuntime {
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
                 let (request, completion, queue_slot) = job.into_parts();
-                completion
-                    .complete(engine.execute(request).await, queue_slot)
-                    .await;
+                let result = match admission_profile.operation_for(&request) {
+                    Ok(op) => match admission.register(op) {
+                        Ok(waiter) => match waiter.wait().await {
+                            Ok(permit) => {
+                                engine
+                                    .execute_admitted(AdmittedExportRequest::new(request, permit))
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        },
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => Err(error),
+                };
+                completion.complete(result, queue_slot).await;
                 worker_lifecycle.finish_job();
             }
         });

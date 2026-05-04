@@ -1,5 +1,10 @@
-use crate::{Export, ExportEngine, ExportReply, ExportRequest, ExportResult, Result, ServerError};
+use crate::{
+    AdmissionOp, AdmittedExportRequest, ByteRange, Export, ExportAdmissionProfile,
+    ExportAdmissionProfileHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
+    ServerError,
+};
 use nbd_control_plane::{ExportMeta, ExportName};
+use std::sync::Arc;
 use std::sync::Mutex;
 
 pub const MAX_MEMORY_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
@@ -14,6 +19,37 @@ pub struct MemoryExportEngine {
 
 /// Compatibility name for the direct `ExportHandle` path.
 pub type MemoryExport = MemoryExportEngine;
+
+#[derive(Debug)]
+pub struct MemoryAdmissionProfile {
+    size_bytes: u64,
+}
+
+impl MemoryAdmissionProfile {
+    pub fn new(size_bytes: u64) -> Self {
+        Self { size_bytes }
+    }
+}
+
+impl ExportAdmissionProfile for MemoryAdmissionProfile {
+    fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp> {
+        match request {
+            ExportRequest::Read { offset, len } => {
+                Ok(AdmissionOp::Read(ByteRange::new(*offset, *len)))
+            }
+            ExportRequest::Write { offset, data } => {
+                let len = u32::try_from(data.len()).map_err(|_| ServerError::OutOfBounds {
+                    operation: "write",
+                    offset: *offset,
+                    length: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                    size_bytes: self.size_bytes,
+                })?;
+                Ok(AdmissionOp::Write(ByteRange::new(*offset, len)))
+            }
+            ExportRequest::Flush => Ok(AdmissionOp::Flush),
+        }
+    }
+}
 
 impl MemoryExportEngine {
     pub fn new(meta: &ExportMeta) -> Result<Self> {
@@ -106,7 +142,12 @@ impl Export for MemoryExportEngine {
 
 #[async_trait::async_trait]
 impl ExportEngine for MemoryExportEngine {
-    async fn execute(&self, request: ExportRequest) -> ExportResult {
+    fn admission_profile(&self) -> ExportAdmissionProfileHandle {
+        Arc::new(MemoryAdmissionProfile::new(self.size_bytes))
+    }
+
+    async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
+        let (request, _permit) = request.into_parts();
         match request {
             ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
                 data: self.read(offset, len).await?,
