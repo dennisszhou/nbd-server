@@ -1,13 +1,15 @@
 Title: Connection Admission Concurrency Execution
 Date: 2026-05-03
-Status: approved
+Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 5 approved and in progress
+- current state: Series 5 finished; connection admission concurrency execution
+  complete
 Completion:
-- execution complete: no
-- completed series: Series 1, Series 2, Series 3, Series 4
-- next series: Series 5 approved
+- execution complete: yes
+- completed series: Series 1, Series 2, Series 3, Series 4, Series 5
+- next series: none; durable engine work should start a new design and
+  execution artifact
 
 ## Goal
 
@@ -900,7 +902,7 @@ jobs without detached mutations, config can opt newly opened exports into the
 concurrent runtime with nonzero queue sizing, userspace concurrent smoke
 passes, and Docker kernel smoke still passes on the default serial path.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
@@ -918,6 +920,15 @@ Not included: `DurableExportEngine`, WAL, read views, storage work queues,
 cross-process serving leases, authentication/client identity, advertising
 `NBD_FLAG_CAN_MULTI_CONN`, dynamic Tokio worker-thread sizing from config, or
 making the concurrent runtime the default.
+
+Closeout notes: review found no blocking findings. Verification passed:
+`make test-protocol`, `cargo test --workspace`, `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`make docker-smoke`. Docker smoke remained on the default serial kernel path
+and confirmed mounted NBD write/readback. Concurrent runtime remains opt-in;
+durable storage, real client identity for production multi-connection,
+concurrent kernel smoke, dynamic Tokio worker sizing, and making concurrent
+runtime the default are deferred to future design and execution work.
 
 Commit 1/7: docs/execution: plan concurrent runtime series
 
