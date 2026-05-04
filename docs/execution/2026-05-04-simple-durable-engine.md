@@ -3,11 +3,11 @@ Date: 2026-05-04
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 3 finished; Series 4 pending design review
+- current state: Series 3 finished; Series 4 approved
 Completion:
 - execution complete: no
 - completed series: Series 1, Series 2, and Series 3
-- next series: Series 4, pending approval
+- next series: Series 4, approved
 
 ## Goal
 
@@ -196,7 +196,7 @@ barrier no-op; protocol integration proves write/read behavior and data
 survival across server restart; memory remains the default create engine and
 existing Docker smoke still passes.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
