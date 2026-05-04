@@ -28,7 +28,8 @@ The engine should:
 - store tree metadata in the catalog database;
 - update catalog metadata only after all blob writes for a request are durable;
 - support sparse zero reads when a chunk has no tree leaf;
-- allow reads when no active write overlaps the read byte range;
+- allow reads when no active write overlaps the policy-provided admitted byte
+  range;
 - allow one writer per 32 MiB chunk at a time;
 - keep `memory` as the `nbdcli create` default engine;
 - leave WAL, immutable COW roots, clone, compaction, and S3 for later.
@@ -469,8 +470,8 @@ Validation should prove each boundary at the layer where it matters:
 
 - catalog tests for migration, `export_heads`, tree nodes, edges, leaf refs,
   and simple durable engine kind parsing once the engine kind is exposed;
-- admission tests for chunk-aware write conflicts, non-overlapping reads, and
-  flush barriers;
+- admission tests for policy-provided write ranges, whole-chunk simple durable
+  conflicts once the durable policy exists, and flush barriers;
 - local blob store tests for create, full replacement, ranged read, fsync/rename
   behavior as far as unit tests can observe, and path containment;
 - simple mutable tree tests for sparse zero resolution, root creation, leaf

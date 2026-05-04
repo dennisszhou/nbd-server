@@ -20,8 +20,8 @@ The target end state is:
 - a catalog current-head model that no longer treats mutable serving state as
   append-only historical generations;
 - explicit simple mutable tree metadata in SQLite;
-- chunk-aware admission that can serialize writes per 32 MiB chunk while
-  allowing non-overlapping reads;
+- admission policy mapping that lets simple durable serialize chunk-aligned
+  writes while preserving current memory admission behavior;
 - a local `LocalBlobStore` that owns one-blob file create, replace, and read
   operations;
 - a `SimpleMutableTree` that owns tree interpretation and metadata commits;
@@ -45,7 +45,7 @@ The split keeps each risky boundary testable before layering the next one on
 top:
 
 1. catalog current-head and tree metadata;
-2. chunk-aware admission;
+2. admission policy boundary;
 3. local blob store plus simple mutable tree owner;
 4. opt-in simple durable engine and protocol restart proof.
 
@@ -88,7 +88,7 @@ Not included: admission changes, `LocalBlobStore`, `SimpleMutableTree`,
 `SimpleDurableEngine`, public `simple_durable` engine kind parsing, server
 registry rollout, protocol durable tests, WAL, clone, compaction, S3, or GC.
 
-## Series 2: Chunk-Aware Admission
+## Series 2: Admission Policy Boundary
 
 Depends on: Series 1
 
