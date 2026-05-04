@@ -3,11 +3,11 @@ Date: 2026-05-03
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 4 approved
+- current state: Series 4 finished; Series 5 pending
 Completion:
 - execution complete: no
-- completed series: Series 1, Series 2, Series 3
-- next series: Series 4 approved
+- completed series: Series 1, Series 2, Series 3, Series 4
+- next series: Series 5 pending
 
 ## Goal
 
@@ -680,7 +680,7 @@ while conflicting operations and flush barriers are ordered by admission,
 serial runtime and protocol tests still pass through the admitted engine path,
 and Docker kernel smoke still passes on the default serial path.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
