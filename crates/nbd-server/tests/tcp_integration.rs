@@ -348,17 +348,10 @@ async fn raw_write_flush_and_read_replies_echo_cookies() {
 }
 
 #[tokio::test]
-async fn concurrent_runtime_handles_pipelined_protocol_smoke() {
+async fn default_runtime_handles_pipelined_protocol_smoke() {
     let fixture = ServerFixture::new(EngineProfile::MEMORY)
         .await
         .expect("server fixture");
-    fixture
-        .configure_server(ServerConfig {
-            export_runtime: ExportRuntimeKind::Concurrent,
-            export_queue_depth: NonZeroUsize::new(4).expect("nonzero queue depth"),
-            ..ServerConfig::default()
-        })
-        .expect("configure concurrent runtime");
     fixture
         .create_export("disk-a", 4096, 4096)
         .await

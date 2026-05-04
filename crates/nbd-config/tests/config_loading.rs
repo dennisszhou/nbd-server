@@ -29,7 +29,7 @@ fn explicit_config_loads_from_requested_path() {
         config.catalog.url,
         catalog_file_url_for_path(catalog_path).unwrap()
     );
-    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
     assert_eq!(
         config.server.export_queue_depth.get(),
         DEFAULT_EXPORT_QUEUE_DEPTH
@@ -82,7 +82,7 @@ fn default_user_path_bootstraps_absolute_config() {
         catalog_file_url_for_path(fake_home.join(".nbd").join("catalog.db")).unwrap()
     );
     assert!(config.catalog.url.starts_with("file:"));
-    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
     assert_eq!(
         config.server.export_queue_depth.get(),
         DEFAULT_EXPORT_QUEUE_DEPTH

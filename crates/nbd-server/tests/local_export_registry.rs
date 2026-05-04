@@ -38,7 +38,7 @@ async fn registry_rejects_second_unique_owner_until_close() {
         .expect("close first owner");
     assert!(matches!(
         first_runtime.reserve().await,
-        Err(ServerError::RuntimeClosed { resource }) if resource == "serial export runtime",
+        Err(ServerError::RuntimeClosed { resource }) if resource == "concurrent export runtime",
     ));
     drop(first_runtime);
 
