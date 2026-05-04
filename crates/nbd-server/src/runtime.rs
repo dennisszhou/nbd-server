@@ -1,7 +1,7 @@
 use crate::{
     AdmissionWaiter, AdmittedExportRequest, ExportAdmissionCtl, ExportAdmissionPolicyHandle,
-    ExportCompletion, ExportEngineHandle, ExportJob, ExportRequest, ExportResult, Result,
-    ServerError,
+    ExportCompletion, ExportEngineHandle, ExportJob, ExportJobContext, ExportRequest, ExportResult,
+    Result, ServerError,
 };
 use nbd_control_plane::ExportMeta;
 use std::sync::Arc;
@@ -80,6 +80,7 @@ struct ConcurrentActiveJob {
 }
 
 struct RegisteredExportJob {
+    context: ExportJobContext,
     request: ExportRequest,
     completion: ExportCompletion,
     queue_slot: ExportQueueSlot,
@@ -87,6 +88,7 @@ struct RegisteredExportJob {
 }
 
 struct RejectedExportJob {
+    context: ExportJobContext,
     result: ExportResult,
     completion: ExportCompletion,
     queue_slot: ExportQueueSlot,
@@ -180,7 +182,7 @@ fn prepare_admitted_job(
     admission: ExportAdmissionCtl,
     job: ExportJob,
 ) -> PreparedExportJob {
-    let (request, completion, queue_slot) = job.into_parts();
+    let (context, request, completion, queue_slot) = job.into_parts();
     let waiter = match admission_policy
         .operation_for(&request)
         .and_then(|op| admission.register(op))
@@ -188,6 +190,7 @@ fn prepare_admitted_job(
         Ok(waiter) => waiter,
         Err(error) => {
             return PreparedExportJob::Rejected(RejectedExportJob {
+                context,
                 result: Err(error),
                 completion,
                 queue_slot,
@@ -196,6 +199,7 @@ fn prepare_admitted_job(
     };
 
     PreparedExportJob::Registered(RegisteredExportJob {
+        context,
         request,
         completion,
         queue_slot,
@@ -205,6 +209,7 @@ fn prepare_admitted_job(
 
 async fn execute_registered_job(engine: ExportEngineHandle, job: RegisteredExportJob) {
     let RegisteredExportJob {
+        context: _context,
         request,
         completion,
         queue_slot,
@@ -222,6 +227,7 @@ async fn execute_registered_job(engine: ExportEngineHandle, job: RegisteredExpor
 }
 
 async fn complete_rejected_job(job: RejectedExportJob) {
+    let _context = job.context;
     job.completion.complete(job.result, job.queue_slot).await;
 }
 

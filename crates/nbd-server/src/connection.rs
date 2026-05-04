@@ -1,7 +1,9 @@
 use crate::export::ExportCompletionSink;
+use crate::observability::RequestSequenceGenerator;
 use crate::{
-    CompletedExport, ExportCompletion, ExportJob, ExportOwner, ExportQueueSlot, ExportReply,
-    ExportRequest, ExportResult, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
+    CompletedExport, ConnectionId, ExportCompletion, ExportJob, ExportJobContext, ExportOwner,
+    ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntimeHandle,
+    LocalExportRegistry, Result, ServerError,
 };
 use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_CMD_DISC, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
@@ -31,6 +33,7 @@ struct ConnectionExport {
 }
 
 struct ConnectionRuntime {
+    connection_id: ConnectionId,
     runtime: ExportRuntimeHandle,
     reply_capacity: usize,
 }
@@ -55,6 +58,7 @@ pub(crate) struct ConnectionReply {
 #[derive(Debug)]
 enum ConnectionReplyPayload {
     Export {
+        context: ExportJobContext,
         kind: ReplyKind,
         result: ExportResult,
         _queue_slot: ExportQueueSlot,
@@ -66,21 +70,23 @@ enum ConnectionReplyPayload {
 
 #[derive(Debug)]
 struct ConnectionExportCompletion {
-    cookie: NbdCookie,
+    context: ExportJobContext,
     kind: ReplyKind,
     replies: mpsc::Sender<ConnectionReply>,
 }
 
 impl ConnectionReply {
     pub(crate) fn export_result(
-        cookie: NbdCookie,
+        context: ExportJobContext,
         kind: ReplyKind,
         result: ExportResult,
         queue_slot: ExportQueueSlot,
     ) -> Self {
+        let cookie = context.cookie();
         Self {
             cookie,
             payload: ConnectionReplyPayload::Export {
+                context,
                 kind,
                 result,
                 _queue_slot: queue_slot,
@@ -97,9 +103,13 @@ impl ConnectionReply {
 }
 
 impl ConnectionExportCompletion {
-    fn new(cookie: NbdCookie, kind: ReplyKind, replies: mpsc::Sender<ConnectionReply>) -> Self {
+    fn new(
+        context: ExportJobContext,
+        kind: ReplyKind,
+        replies: mpsc::Sender<ConnectionReply>,
+    ) -> Self {
         Self {
-            cookie,
+            context,
             kind,
             replies,
         }
@@ -110,14 +120,19 @@ impl ConnectionExportCompletion {
 impl ExportCompletionSink for ConnectionExportCompletion {
     async fn complete(self: Box<Self>, completed: CompletedExport) {
         let (result, queue_slot) = completed.into_parts();
-        let reply = ConnectionReply::export_result(self.cookie, self.kind, result, queue_slot);
+        let reply = ConnectionReply::export_result(self.context, self.kind, result, queue_slot);
         let _ = self.replies.send(reply).await;
     }
 }
 
 impl ConnectionRuntime {
-    fn new(runtime: ExportRuntimeHandle, reply_capacity: usize) -> Self {
+    fn new(
+        connection_id: ConnectionId,
+        runtime: ExportRuntimeHandle,
+        reply_capacity: usize,
+    ) -> Self {
         Self {
+            connection_id,
             runtime,
             reply_capacity,
         }
@@ -134,7 +149,12 @@ impl ConnectionRuntime {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (reply_sender, reply_receiver) = mpsc::channel(self.reply_capacity);
-        let reader_task = tokio::spawn(read_requests(reader, self.runtime, reply_sender));
+        let reader_task = tokio::spawn(read_requests(
+            reader,
+            self.connection_id,
+            self.runtime,
+            reply_sender,
+        ));
         let writer_task = tokio::spawn(write_replies(writer, reply_receiver));
 
         run_connection_tasks(reader_task, writer_task).await
@@ -146,11 +166,12 @@ pub async fn serve(
     registry: Arc<LocalExportRegistry>,
     reply_capacity: usize,
 ) -> Result<()> {
+    let connection_id = ConnectionId::next();
     write_handshake(&mut stream).await?;
     let Some(export) = negotiate_options(&mut stream, registry.clone()).await? else {
         return Ok(());
     };
-    let result = ConnectionRuntime::new(export.runtime.clone(), reply_capacity)
+    let result = ConnectionRuntime::new(connection_id, export.runtime.clone(), reply_capacity)
         .run(stream)
         .await;
     let close_result = registry.close(&export.name, &export.owner).await;
@@ -285,12 +306,14 @@ async fn read_option_request(stream: &mut TcpStream) -> Result<OptionRequest> {
 
 async fn read_requests<R>(
     mut reader: R,
+    connection_id: ConnectionId,
     runtime: ExportRuntimeHandle,
     replies: mpsc::Sender<ConnectionReply>,
 ) -> RequestReaderExit
 where
     R: AsyncRead + Unpin,
 {
+    let mut request_sequences = RequestSequenceGenerator::new();
     loop {
         let mut bytes = vec![0; REQUEST_HEADER_BYTES];
         match reader.read_exact(&mut bytes).await {
@@ -354,7 +377,7 @@ where
             }
         };
 
-        let (cookie, kind, request) = match request {
+        let (cookie, kind, request, offset, length) = match request {
             TransmissionRequest::Read {
                 cookie,
                 offset,
@@ -366,6 +389,8 @@ where
                     offset,
                     len: length,
                 },
+                Some(offset),
+                Some(u64::from(length)),
             ),
             TransmissionRequest::Write {
                 cookie,
@@ -375,9 +400,11 @@ where
                 cookie,
                 ReplyKind::Simple,
                 ExportRequest::Write { offset, data },
+                Some(offset),
+                Some(payload_len as u64),
             ),
             TransmissionRequest::Flush { cookie } => {
-                (cookie, ReplyKind::Simple, ExportRequest::Flush)
+                (cookie, ReplyKind::Simple, ExportRequest::Flush, None, None)
             }
             TransmissionRequest::Disconnect { .. } => {
                 drop(queue_slot);
@@ -385,12 +412,21 @@ where
             }
         };
 
-        let completion = ExportCompletion::sink(ConnectionExportCompletion::new(
+        let context = ExportJobContext::new(
+            connection_id,
+            request_sequences.next(),
             cookie,
+            request.command_name(),
+            offset,
+            length,
+            kind.as_str(),
+        );
+        let completion = ExportCompletion::sink(ConnectionExportCompletion::new(
+            context.clone(),
             kind,
             replies.clone(),
         ));
-        let job = ExportJob::new(request, completion, queue_slot);
+        let job = ExportJob::with_context(context, request, completion, queue_slot);
         if let Err(error) = runtime.submit(job).await {
             return RequestReaderExit::drain(
                 send_simple_error(&replies, cookie).await.and(Err(error)),
@@ -498,6 +534,7 @@ where
 {
     match reply.payload {
         ConnectionReplyPayload::Export {
+            context: _context,
             kind,
             result,
             _queue_slot: queue_slot,
@@ -523,6 +560,15 @@ where
             .write_all(&encode_simple_reply(reply.cookie, error))
             .await
             .map_err(|source| ServerError::io("write NBD error reply", source)),
+    }
+}
+
+impl ReplyKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Simple => "simple",
+        }
     }
 }
 
@@ -564,6 +610,14 @@ mod tests {
 
         let first_job = submitted.recv().await.expect("first job");
         let second_job = submitted.recv().await.expect("second job");
+        assert_eq!(first_job.context().cookie(), first_cookie);
+        assert_eq!(first_job.context().request_sequence().raw(), 1);
+        assert_eq!(first_job.context().offset(), Some(0));
+        assert_eq!(first_job.context().length(), Some(4));
+        assert_eq!(second_job.context().cookie(), second_cookie);
+        assert_eq!(second_job.context().request_sequence().raw(), 2);
+        assert_eq!(second_job.context().offset(), Some(4));
+        assert_eq!(second_job.context().length(), Some(4));
 
         complete_job(
             second_job,
@@ -669,7 +723,7 @@ mod tests {
         let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
         let queue_slot = runtime.reserve().await.expect("reserve queue slot");
         let reply = ConnectionReply::export_result(
-            NbdCookie::new(301),
+            ExportJobContext::internal(NbdCookie::new(301), "read"),
             ReplyKind::Read,
             Ok(ExportReply::Read {
                 data: vec![7; 1024],
@@ -709,7 +763,7 @@ mod tests {
     }
 
     async fn complete_job(job: ExportJob, expected: ExportRequest, result: ExportResult) {
-        let (request, completion, queue_slot) = job.into_parts();
+        let (_context, request, completion, queue_slot) = job.into_parts();
         assert_eq!(request, expected);
         completion.complete(result, queue_slot).await;
     }
@@ -769,6 +823,7 @@ mod tests {
         let (reader, writer) = split(server);
         let task = tokio::spawn(
             ConnectionRuntime {
+                connection_id: ConnectionId::next(),
                 runtime,
                 reply_capacity,
             }

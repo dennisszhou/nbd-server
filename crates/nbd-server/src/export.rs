@@ -1,8 +1,10 @@
 use crate::{
     admission::{AdmissionOp, AdmissionPermit},
+    observability::ExportJobContext,
     runtime::ExportQueueSlot,
     Result,
 };
+use nbd_protocol::wire::NbdCookie;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -140,6 +142,7 @@ impl CompletedExport {
 /// Work item accepted by an export runtime.
 #[derive(Debug)]
 pub struct ExportJob {
+    context: ExportJobContext,
     request: ExportRequest,
     completion: ExportCompletion,
     queue_slot: ExportQueueSlot,
@@ -151,7 +154,22 @@ impl ExportJob {
         completion: ExportCompletion,
         queue_slot: ExportQueueSlot,
     ) -> Self {
+        Self::with_context(
+            ExportJobContext::internal(NbdCookie::new(0), request.command_name()),
+            request,
+            completion,
+            queue_slot,
+        )
+    }
+
+    pub fn with_context(
+        context: ExportJobContext,
+        request: ExportRequest,
+        completion: ExportCompletion,
+        queue_slot: ExportQueueSlot,
+    ) -> Self {
         Self {
+            context,
             request,
             completion,
             queue_slot,
@@ -166,8 +184,29 @@ impl ExportJob {
         (Self::new(request, completion, queue_slot), receiver)
     }
 
-    pub fn into_parts(self) -> (ExportRequest, ExportCompletion, ExportQueueSlot) {
-        (self.request, self.completion, self.queue_slot)
+    pub fn context(&self) -> &ExportJobContext {
+        &self.context
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ExportJobContext,
+        ExportRequest,
+        ExportCompletion,
+        ExportQueueSlot,
+    ) {
+        (self.context, self.request, self.completion, self.queue_slot)
+    }
+}
+
+impl ExportRequest {
+    pub fn command_name(&self) -> &'static str {
+        match self {
+            Self::Read { .. } => "read",
+            Self::Write { .. } => "write",
+            Self::Flush => "flush",
+        }
     }
 }
 
