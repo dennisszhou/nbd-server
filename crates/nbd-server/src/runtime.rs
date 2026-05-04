@@ -1,5 +1,6 @@
 use crate::{
-    AdmittedExportRequest, ExportAdmissionCtl, ExportEngineHandle, ExportJob, Result, ServerError,
+    AdmittedExportRequest, ExportAdmissionCtl, ExportAdmissionProfileHandle, ExportEngineHandle,
+    ExportJob, Result, ServerError,
 };
 use nbd_control_plane::ExportMeta;
 use std::sync::Arc;
@@ -70,22 +71,13 @@ impl SerialExportRuntime {
 
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
-                let (request, completion, queue_slot) = job.into_parts();
-                let result = match admission_profile.operation_for(&request) {
-                    Ok(op) => match admission.register(op) {
-                        Ok(waiter) => match waiter.wait().await {
-                            Ok(permit) => {
-                                engine
-                                    .execute_admitted(AdmittedExportRequest::new(request, permit))
-                                    .await
-                            }
-                            Err(error) => Err(error),
-                        },
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => Err(error),
-                };
-                completion.complete(result, queue_slot).await;
+                execute_admitted_job(
+                    engine.clone(),
+                    admission_profile.clone(),
+                    admission.clone(),
+                    job,
+                )
+                .await;
                 worker_lifecycle.finish_job();
             }
         });
@@ -97,6 +89,30 @@ impl SerialExportRuntime {
             sender,
         }
     }
+}
+
+async fn execute_admitted_job(
+    engine: ExportEngineHandle,
+    admission_profile: ExportAdmissionProfileHandle,
+    admission: ExportAdmissionCtl,
+    job: ExportJob,
+) {
+    let (request, completion, queue_slot) = job.into_parts();
+    let result = match admission_profile.operation_for(&request) {
+        Ok(op) => match admission.register(op) {
+            Ok(waiter) => match waiter.wait().await {
+                Ok(permit) => {
+                    engine
+                        .execute_admitted(AdmittedExportRequest::new(request, permit))
+                        .await
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        },
+        Err(error) => Err(error),
+    };
+    completion.complete(result, queue_slot).await;
 }
 
 impl SerialRuntimeLifecycle {
