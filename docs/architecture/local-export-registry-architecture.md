@@ -41,8 +41,9 @@ Use structured records instead of passing many loose fields.
 struct ActiveExportRecord {
     export_id: ExportId,
     name: ExportName,
-    generation: ExportGeneration,
+    layout_kind: ExportLayoutKind,
     root_node_id: Option<NodeId>,
+    size_bytes: u64,
     checkpoint_wal_seq: WalSeq,
     connection_id: ConnectionId,
     lease: ExportLeaseSnapshot,

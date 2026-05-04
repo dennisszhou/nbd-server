@@ -4,10 +4,11 @@ Status: draft
 
 # Problem
 
-The system needs a durable metadata source for export lifecycle, committed tree
-roots, WAL checkpoints, and immutable tree metadata. This metadata is shared by
-`ExportLifecycleManager`, `LocalExportRegistry`, `CommittedTreeReader`, and
-`CompactionManager`.
+The system needs a durable metadata source for export lifecycle, current
+serving heads, WAL checkpoints, simple mutable tree metadata, and future
+immutable COW tree metadata. This metadata is shared by
+`ExportLifecycleManager`, `LocalExportRegistry`, `CommittedTreeReader`,
+`SimpleMutableTree`, and `CompactionManager`.
 
 The API should avoid long parameter lists. Callers should pass structured
 requests and receive structured records.
@@ -19,8 +20,9 @@ architecture keeps `Export`, `ExportCatalog`, and the `exports` table for that
 protocol-aligned concept. In product language, an export is the durable network
 block device that clients mount by name.
 
-`exports` owns stable identity and lifecycle. `export_generations` owns the
-append-only committed-root history for that export.
+`exports` owns stable identity and lifecycle. `export_heads` owns the current
+serving view for each export. There is no separate export generation table in
+the active catalog model.
 
 # Goal
 
@@ -32,8 +34,10 @@ Define `ExportCatalog` as the durable metadata API for:
 - listing and inspecting exports;
 - marking exports deleted when lifecycle orchestration has acquired the
   per-export lease;
-- inserting immutable tree metadata;
-- publishing new root/checkpoint generations after compaction.
+- storing the current export head;
+- inserting simple mutable tree metadata for `SimpleDurableEngine`;
+- inserting immutable tree metadata for future WAL/COW compaction;
+- publishing future root/checkpoint updates by advancing `export_heads`.
 
 # Catalog-Owned State
 
@@ -50,34 +54,43 @@ exports
   updated_at
   deleted_at
 
-export_generations
-  id
-  export_id
-  generation
+export_heads
+  export_id primary key
+  layout_kind
   root_node_id
   checkpoint_wal_seq
   size_bytes
-  created_at
+  updated_at
 
-  unique(export_id, generation)
-
-nodes
+tree_nodes
   id
+  layout_kind
+  owner_export_id/null
   kind
   level
   span_start_bytes
   span_len_bytes
-  blob_key/null
   created_at
 
-node_edges
+tree_edges
   parent_node_id
   slot
   child_node_id
+
+tree_leaf_refs
+  node_id
+  storage_kind
+  storage_key
+  len_bytes
+  created_at
 ```
 
-`root_node_id = null` on an export generation represents an all-zero committed
-tree. This avoids creating malformed empty internal nodes.
+`root_node_id = null` on `export_heads` represents an all-zero current tree.
+This avoids creating malformed empty internal nodes.
+
+`export_heads` is the serving source of truth. Normal `simple_mutable_tree`
+writes do not append root history, and future COW checkpoint publication
+should advance the current head rather than reintroducing a generation table.
 
 The catalog stores blob references. Blob bytes live behind `StorageEngine`.
 
@@ -89,20 +102,26 @@ Use explicit structs at API boundaries.
 struct ExportMeta {
     id: ExportId,
     name: ExportName,
-    size_bytes: u64,
     block_size: u64,
     engine_kind: ExportEngineKind,
     state: ExportState,
-    committed: CommittedRoot,
+    head: ExportHead,
     created_at: Timestamp,
     updated_at: Timestamp,
     deleted_at: Option<Timestamp>,
 }
 
-struct CommittedRoot {
+struct ExportHead {
+    layout_kind: ExportLayoutKind,
     root_node_id: Option<NodeId>,
+    size_bytes: u64,
     checkpoint_wal_seq: WalSeq,
-    generation: ExportGeneration,
+}
+
+enum ExportLayoutKind {
+    MemoryEmpty,
+    SimpleMutableTree,
+    CowImmutableTree,
 }
 
 enum ExportState {
@@ -134,8 +153,15 @@ struct DeleteExport {
 Tree publication structs:
 
 ```rust
+struct SimpleChunkRef {
+    chunk_index: ChunkIndex,
+    blob_key: BlobKey,
+    len_bytes: u64,
+}
+
 struct TreeNodeRecord {
     id: NodeId,
+    layout_kind: ExportLayoutKind,
     kind: NodeKind,
     level: u8,
     span_start_bytes: u64,
@@ -190,10 +216,13 @@ trait ExportCatalog {
 }
 ```
 
+The simple durable request path should use a narrower metadata boundary, such
+as `SimpleTreeMetadataStore`, so only `SimpleMutableTree` mutates simple tree
+rows on behalf of the engine.
+
 # Create Export
 
-Create initializes a new export with its own generation history and empty WAL
-checkpoint:
+Create initializes a new export with a current head and empty WAL checkpoint:
 
 ```text
 insert exports row:
@@ -201,24 +230,29 @@ insert exports row:
   deleted_at = null
   engine_kind = requested engine kind
 
-insert export_generations row:
-  generation = 0
+insert export_heads row:
+  layout_kind = layout implied by engine_kind
   root_node_id = null
   checkpoint_wal_seq = 0
+  size_bytes = requested size
 ```
 
-`root_node_id = null` means the committed tree is all zeroes.
+`root_node_id = null` means the current tree is all zeroes.
+
+`memory` creates `layout_kind = memory_empty`. `simple_durable` creates
+`layout_kind = simple_mutable_tree`.
 
 # Clone Export
 
-Clone copies the source export's latest committed root. It does not include the
-source export's uncheckpointed WAL.
+Clone is a future `cow_immutable_tree` operation. It copies the source
+export's latest committed COW root. It does not include the source export's
+uncheckpointed WAL.
 
 ```text
 source = load active source export
 insert destination exports row
-insert destination export_generations row:
-  generation = 0
+insert destination export_heads row:
+  layout_kind = cow_immutable_tree
   root_node_id = source.root_node_id
   checkpoint_wal_seq = 0
 ```
@@ -245,40 +279,41 @@ belongs to `ExportLifecycleManager`, which composes the catalog with
 `ExportLeaseStore`.
 
 Physical deletion of tree nodes, blobs, and WAL records belongs to future GC.
-Delete never immediately removes committed data because other exports may share
-the same immutable nodes and blobs.
+Delete never immediately removes committed data because future COW exports may
+share the same immutable nodes and blobs, and simple durable may leave orphan
+mutable blobs after file-first failures.
 
 # Root And Checkpoint Publication
 
-`publish_checkpoint` is called after compaction has written any new blobs and
-inserted the corresponding immutable tree metadata. Publication must preserve
-the size from the generation it compacted unless compaction explicitly observes
-and incorporates a newer resize generation.
+`publish_checkpoint` is a future WAL/COW operation. It is called after
+compaction has written any new blobs and inserted the corresponding immutable
+tree metadata. Publication must preserve the size from the head it compacted
+unless compaction explicitly observes and incorporates a newer resize head.
 
-Publication appends a new export generation in a single catalog transaction:
+Publication advances the current head in a single catalog transaction:
 
 ```text
 begin transaction
   load latest export row
-  load latest export_generation row
+  load current export_heads row
   verify state = active
   verify compacted_through > checkpoint_wal_seq
-  insert export_generations row:
-    generation = previous_generation + 1
+  update export_heads:
     root_node_id = new_root_node_id
     checkpoint_wal_seq = compacted_through
-    size_bytes = compacted_generation.size_bytes
+    size_bytes = compacted_head.size_bytes
 commit
 ```
 
-Callers do not pass `expected_generation`. The catalog owns loading the latest
-generation. The architecture relies on a single checkpoint publisher per export
-until writer fencing or multi-publisher compaction is designed.
+Callers do not pass a historical generation token. The catalog owns loading the
+current head. The architecture relies on a single checkpoint publisher per
+export until writer fencing or multi-publisher compaction is designed.
 
-Future resize should append an export generation with the new `size_bytes`.
+Future resize should update the current head with the new `size_bytes` and may
+need its own fencing against checkpoint publication.
 If resize and compaction can run concurrently, checkpoint publication must avoid
-publishing a generation that rolls the size backward. That conflict policy needs
-a dedicated resize design before online resize is implemented.
+publishing a head update that rolls the size backward. That conflict policy
+needs a dedicated resize design before online resize is implemented.
 
 # Close-Time Compaction
 
@@ -304,16 +339,16 @@ the write durability contract.
 - `ExportCatalog` is the durable metadata source.
 - API calls use structured request/response types.
 - `exports` owns stable identity and lifecycle.
-- `export_generations` owns committed roots, checkpoints, and generation
-  numbers.
-- Every export has at least one export generation.
-- New exports create generation zero transactionally with the export row.
-- Cloned exports create their own generation zero and checkpoint zero.
-- Export generations are append-only.
+- `export_heads` owns the current serving layout, root, size, and checkpoint.
+- Every export has exactly one current head.
+- New exports create the current head transactionally with the export row.
+- `simple_mutable_tree` writes update simple tree metadata through
+  `SimpleMutableTree`, not by appending generations.
+- Cloned COW exports create their own head and checkpoint zero.
 - Clone copies the latest committed root only.
 - Clone does not include source uncheckpointed WAL records.
-- `root_node_id = null` means an all-zero committed tree.
-- `publish_checkpoint` appends the next generation.
+- `root_node_id = null` means an all-zero current tree.
+- `publish_checkpoint` advances the current head.
 - `checkpoint_wal_seq` advances monotonically.
 - Clean export close attempts close-time compaction.
 - Delete race prevention belongs to `ExportLifecycleManager`.
@@ -325,5 +360,4 @@ the write durability contract.
 
 - Whether the first catalog implementation should use SQLite or structured
   files.
-- Whether root history should be recorded now for debugging or deferred to GC.
 - Exact catalog error type for stale or no-op checkpoint publication attempts.

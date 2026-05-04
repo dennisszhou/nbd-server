@@ -12,25 +12,10 @@ model Export {
   createdAt   String             @map("created_at")
   updatedAt   String             @map("updated_at")
   deletedAt   String?            @map("deleted_at")
-  generations ExportGeneration[]
   head        ExportHead?
   treeNodes   TreeNode[]
 
   @@map("exports")
-}
-
-model ExportGeneration {
-  id               String @id
-  exportId         String @map("export_id")
-  generation       BigInt
-  sizeBytes        BigInt @map("size_bytes")
-  rootNodeId       String? @map("root_node_id")
-  checkpointWalSeq BigInt @map("checkpoint_wal_seq")
-  createdAt        String @map("created_at")
-  export           Export @relation(fields: [exportId], references: [id], onDelete: Restrict)
-
-  @@unique([exportId, generation])
-  @@map("export_generations")
 }
 
 model ExportHead {

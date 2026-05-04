@@ -74,27 +74,3 @@ CREATE TABLE "export_heads" (
         ON DELETE RESTRICT
         ON UPDATE CASCADE
 );
-
-INSERT INTO "export_heads" (
-    "export_id",
-    "layout_kind",
-    "root_node_id",
-    "size_bytes",
-    "checkpoint_wal_seq",
-    "updated_at"
-)
-SELECT
-    e."id",
-    'memory_empty',
-    g."root_node_id",
-    g."size_bytes",
-    g."checkpoint_wal_seq",
-    e."updated_at"
-FROM "exports" e
-JOIN "export_generations" g
-    ON g."export_id" = e."id"
-   AND g."generation" = (
-       SELECT MAX(g2."generation")
-       FROM "export_generations" g2
-       WHERE g2."export_id" = e."id"
-   );

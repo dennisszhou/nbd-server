@@ -86,7 +86,6 @@ impl SQLiteExportCatalog {
 impl ExportCatalog for SQLiteExportCatalog {
     async fn create_export(&self, request: CreateExport) -> Result<ExportMeta> {
         let export_id = ExportId::new(Uuid::new_v4().to_string())?;
-        let generation_id = Uuid::new_v4().to_string();
         let now = current_timestamp()?;
         let size_bytes = u64_to_i64("size_bytes", request.size_bytes())?;
         let block_size = u64_to_i64("block_size", request.block_size())?;
@@ -119,25 +118,6 @@ impl ExportCatalog for SQLiteExportCatalog {
                 map_sqlx_error(error)
             }
         })?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO export_generations (
-              id, export_id, generation, size_bytes, root_node_id,
-              checkpoint_wal_seq, created_at
-            )
-            VALUES (?, ?, ?, ?, NULL, ?, ?)
-            "#,
-        )
-        .bind(generation_id)
-        .bind(export_id.as_str())
-        .bind(0_i64)
-        .bind(size_bytes)
-        .bind(u64_to_i64("checkpoint_wal_seq", checkpoint_wal_seq.get())?)
-        .bind(now.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
 
         sqlx::query(
             r#"

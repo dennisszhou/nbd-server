@@ -4,16 +4,30 @@ Status: draft
 
 # Problem
 
-The system needs durable metadata that can represent large sparse disks, cheap
-clone/fork, committed checkpoints, and immutable S3-friendly data blobs without
-copying whole exports on update.
+The system needs durable metadata for two related but different tree layouts:
+
+- `simple_mutable_tree`, the current direct-commit local layout used by
+  `SimpleDurableEngine`;
+- `cow_immutable_tree`, the future WAL/compaction layout used for clone,
+  checkpoints, and immutable S3-friendly blobs.
+
+The old version of this document described only the future immutable COW model.
+That made it too easy to read immutable-node and generation rules as if they
+also applied to `simple_mutable_tree`.
 
 # Goal
 
-Use `ExportCatalog` to track export lifecycle, root pointers, checkpoints, and
-a sparse tree of committed data. Updates create new immutable nodes and move an
-export root by appending a new generation instead of copying or rewriting the
-full tree.
+Use `ExportCatalog` to track export lifecycle, the current export head, and
+layout-specific sparse tree metadata without conflating mutable direct-commit
+state with future immutable checkpoint history.
+
+The current serving source of truth is `export_heads`.
+
+For `simple_mutable_tree`, updates mutate export-private metadata under the
+current head through `SimpleMutableTree`.
+
+For future `cow_immutable_tree`, compaction creates immutable nodes and
+publishes a new root/checkpoint by advancing `export_heads`.
 
 # ExportCatalog Responsibilities
 
@@ -25,8 +39,10 @@ full tree.
 - logically delete exports;
 - load export metadata on NBD open;
 - store export size, block size, and lifecycle state;
-- store append-only committed-root generations;
-- publish root/checkpoint updates by appending a generation.
+- store one current `export_heads` row per export;
+- store simple mutable tree rows for `SimpleDurableEngine`;
+- publish future WAL/COW root/checkpoint updates by advancing the current head
+  to an immutable tree root.
 
 It is not the local active export registry.
 
@@ -45,49 +61,74 @@ exports
   updated_at
   deleted_at
 
-export_generations
-  id
-  export_id
-  generation
+export_heads
+  export_id primary key
+  layout_kind        -- memory_empty | simple_mutable_tree | cow_immutable_tree
   root_node_id
   checkpoint_wal_seq
   size_bytes
-  created_at
+  updated_at
 
-  unique(export_id, generation)
-
-nodes
+tree_nodes
   id
+  layout_kind
+  owner_export_id/null
   kind
   level
   span_start_bytes
   span_len_bytes
-  blob_key/null
   created_at
 
-child pointers
-  immutable edges from internal tree nodes to child nodes
+tree_edges
+  parent_node_id
+  slot
+  child_node_id
+
+tree_leaf_refs
+  node_id
+  storage_kind       -- mutable_blob | immutable_blob
+  storage_key
+  len_bytes
+  created_at
 ```
 
+`export_heads` is the serving source of truth for every layout. Future COW
+checkpoints advance the current head; they do not create a separate generation
+history.
+
 The implementation may choose normalized edge rows, embedded child pointers, or
-serialized node objects. The architectural invariant is more important than the
-initial table shape:
+serialized node objects. The layout invariant is more important than the
+initial table shape.
+
+# Layout Semantics
+
+## `simple_mutable_tree`
+
+`simple_mutable_tree` is the direct-commit local layout.
+
+- tree nodes are export-private;
+- leaf refs use `storage_kind = mutable_blob`;
+- blob files may be replaced in place by `LocalBlobStore`;
+- normal writes do not create root history;
+- `SimpleMutableTree` is the request-path owner that mutates tree metadata;
+- clone and COW sharing are not supported.
+
+The simple tree can use the same sparse geometry and table names as the future
+COW tree, but its rows are not immutable COW publication artifacts.
+
+## `cow_immutable_tree`
+
+`cow_immutable_tree` is the future WAL/compaction layout.
 
 Published nodes are immutable. Updating an export creates new nodes and moves
-the export root by appending a new export generation.
+the current head to a new immutable root/checkpoint.
 
-The export checkpoint is a global WAL prefix. If the latest export generation
-has `root_node_id = R` and `checkpoint_wal_seq = S`, root `R` represents every
-WAL record with sequence `<= S`. Startup recovery must replay every durable
-WAL record with sequence `> S`.
+The export checkpoint is a global WAL prefix. If the current head has
+`root_node_id = R` and `checkpoint_wal_seq = S`, root `R` represents every WAL
+record with sequence `<= S`. Startup recovery must replay every durable WAL
+record with sequence `> S`.
 
-`generation` is the committed-root generation. It starts at zero when an export
-is created or cloned. Every successful root/checkpoint publication appends a
-new row with the next generation number. Generation is per export; a cloned
-export starts its own generation history even when it initially shares the
-source root node.
-
-`root_node_id = null` means the committed tree is all zeroes.
+`root_node_id = null` means the current tree is all zeroes.
 
 # Sparse Tree Shape
 
@@ -96,7 +137,7 @@ Use a sparse tree over logical disk offsets.
 Target fanout:
 
 ```text
-leaf:       32 MiB immutable data blob
+leaf:       32 MiB data blob
 level 1:     1 GiB = 32 leaves
 level 2:    32 GiB
 level 3:     1 TiB
@@ -107,7 +148,8 @@ Internal nodes:
 
 - metadata only;
 - sparse child pointers;
-- immutable once published.
+- immutable once published for `cow_immutable_tree`;
+- export-private for `simple_mutable_tree`.
 
 A materialized internal node should have at least one reachable leaf descendant.
 Sparse missing child pointers are valid, but an internal node with no reachable
@@ -115,27 +157,29 @@ leaf data is malformed metadata.
 
 Leaf nodes:
 
-- point to full 32 MiB immutable data blobs;
+- point to full 32 MiB data blobs;
 - represent a dense logical leaf range;
-- are immutable once published.
+- are mutable blob refs for `simple_mutable_tree`;
+- are immutable blob refs for `cow_immutable_tree`.
 
-Missing committed data zero-fills. Clone/fork sharing is represented by shared
-immutable tree nodes, not by parent-root fallback during reads.
+Missing committed data zero-fills.
 
 # Copy-On-Write Roots And Clone
+
+This section applies only to future `cow_immutable_tree`.
 
 The committed tree is a persistent copy-on-write tree. Edges are immutable once
 published. Updates create new leaf blobs and new nodes along changed paths to a
 new root. Unchanged subtrees are shared by reference.
 
 Clone is O(1) because it copies the source export's current root pointer into a
-new export generation.
+new export head.
 
 ```text
 clone src -> dst
   -> create dst export metadata
-  -> create dst export_generation:
-       generation = 0
+  -> create dst export_head:
+       layout_kind = cow_immutable_tree
        root_node_id = src.root_node_id
        checkpoint_wal_seq = 0
   -> copy no leaf blobs
@@ -151,6 +195,10 @@ When the child later compacts writes, it creates a new root for the child only.
 The source export keeps pointing at its prior root. Both exports may continue
 sharing unchanged immutable nodes and leaf blobs.
 
+`simple_mutable_tree` is intentionally not clone-ready. Its blob files are
+mutable and export-private, so copying only a root pointer would not produce a
+stable snapshot.
+
 # Root Identity
 
 Roots must be identifiable even if the prototype keeps every old root forever.
@@ -159,18 +207,21 @@ The identifying tuple for a committed export view is:
 ```text
 root_node_id
 checkpoint_wal_seq
-generation
 size_bytes
 ```
 
 `root_node_id` identifies the immutable tree root. `checkpoint_wal_seq`
 identifies which prefix of the export's WAL is represented by that root.
-`generation` identifies the committed-root version used for ordering and
-debugging. `size_bytes` identifies the logical device size for that committed
-serving view.
+`size_bytes` identifies the logical device size for that committed serving
+view.
 
-The prototype may keep all old roots and blobs. Future GC can add root history,
-pinning, and retention policy.
+For `simple_mutable_tree`, the serving identity is the current `export_heads`
+row plus export-private tree rows. Normal writes keep the same current head and
+do not create a new generation.
+
+The prototype may keep old roots and blobs physically present after head
+movement. Future GC can add pinning and retention policy without making old
+roots part of the normal serving source of truth.
 
 # Root Publication
 
@@ -185,10 +236,9 @@ struct PublishCheckpoint {
 }
 ```
 
-`ExportCatalog` loads the latest export generation inside the publication
-transaction. On success, `new_root_node_id` must represent every WAL record
-with sequence `<= compacted_through`, and the catalog appends the next export
-generation row.
+`ExportCatalog` loads the current head inside the publication transaction. On
+success, `new_root_node_id` must represent every WAL record with sequence
+`<= compacted_through`, and the catalog advances `export_heads`.
 This relies on a single checkpoint publisher per export until writer fencing or
 multi-publisher compaction is designed.
 
@@ -197,15 +247,18 @@ multi-publisher compaction is designed.
 - `ExportCatalog` is the durable export metadata source.
 - `LocalExportRegistry` is not used for durable metadata.
 - `exports` owns export identity and lifecycle.
-- `export_generations` owns committed roots and checkpoints.
-- Export generations are append-only.
-- Published nodes and leaf blobs are immutable.
-- Child pointers are immutable once published.
-- Export root publication appends a generation.
+- `export_heads` owns the current serving root, size, layout, and checkpoint.
+- `simple_mutable_tree` rows are export-private direct-commit metadata.
+- `cow_immutable_tree` rows are immutable publication metadata.
+- Published COW nodes and leaf blobs are immutable.
+- COW child pointers are immutable once published.
+- COW root publication advances the current head.
 - Checkpoints advance monotonically as a global WAL prefix.
-- Clones copy a root pointer and do not copy leaf blobs.
+- Clones copy a COW root pointer and do not copy leaf blobs.
 - Clones include only the source export's latest committed checkpoint.
-- New and cloned exports start at generation zero.
+- New simple durable exports start with one current head and no materialized
+  tree.
+- New and cloned COW exports start with one current head.
 - Delete is logical first; physical deletion belongs to GC.
 - Missing tree data means zero-fill, never uninitialized bytes.
 - Materialized internal nodes with no reachable leaf descendants are

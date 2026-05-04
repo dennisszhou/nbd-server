@@ -66,20 +66,6 @@ async fn export_head_owns_serving_size() {
 
     sqlx::query(
         r#"
-        INSERT INTO export_generations (
-          id, export_id, generation, size_bytes, root_node_id,
-          checkpoint_wal_seq, created_at
-        )
-        VALUES ('generation-1', ?, 1, 2048, NULL, 0, 'later')
-        "#,
-    )
-    .bind(created.id().as_str())
-    .execute(catalog.pool())
-    .await
-    .expect("insert newer generation");
-
-    sqlx::query(
-        r#"
         UPDATE export_heads
         SET size_bytes = 3072
         WHERE export_id = ?
@@ -101,6 +87,24 @@ async fn export_head_owns_serving_size() {
         inspected.head().layout_kind(),
         ExportLayoutKind::MemoryEmpty
     );
+}
+
+#[tokio::test]
+async fn migration_does_not_create_export_generations() {
+    let (_runtime, catalog) = migrated_catalog().await;
+
+    let table_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'export_generations'
+        "#,
+    )
+    .fetch_one(catalog.pool())
+    .await
+    .expect("inspect sqlite schema");
+
+    assert_eq!(table_count, 0);
 }
 
 #[tokio::test]

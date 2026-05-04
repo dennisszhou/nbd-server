@@ -206,8 +206,8 @@ clients.
 ## ExportCatalog
 
 Owns durable export metadata: create, clone, inspect, list, delete, stable
-export identity/lifecycle rows, append-only committed-root generations,
-immutable tree metadata, and checkpoint publication.
+export identity/lifecycle rows, current export heads, immutable tree metadata,
+and checkpoint publication.
 
 ## ExportLifecycleManager
 
@@ -302,7 +302,7 @@ Flush does not need to compact WAL records into committed leaf blobs.
 - Lease loss halts the active export.
 - Published tree nodes and leaf blobs are immutable.
 - Tree child pointers are immutable once published.
-- Publishing an export root/checkpoint appends a new generation through
+- Publishing an export root/checkpoint advances the current head through
   `ExportCatalog`.
 - `checkpoint_wal_seq` is a global WAL prefix: the committed root represents
   every WAL record with `seq <= checkpoint_wal_seq`.

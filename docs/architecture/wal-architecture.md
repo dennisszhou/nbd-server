@@ -174,6 +174,92 @@ The published root must represent every WAL record with sequence
 remain needed until active read views have installed the checkpoint and GC
 decides they are unreachable.
 
+# WAL Lifecycle And Pruning
+
+WAL records move through these states:
+
+```text
+appended
+  -> durable
+  -> applied to ExportReadView overlay
+  -> represented by a published tree checkpoint
+  -> demoted from authoritative overlay state
+  -> eligible for physical pruning
+  -> deleted
+```
+
+Durability and visibility are write-path requirements. Pruning is not.
+Deletion is asynchronous cleanup and must not be required for write, flush, or
+read correctness.
+
+The authoritative read truth is:
+
+```text
+published tree at checkpoint C
+  + durable WAL overlay entries where seq > C
+```
+
+After compaction publishes checkpoint `C`, WAL records `<= C` are no longer
+needed by a fresh read view. They may still be needed by an active stale view
+that has not installed checkpoint `C`, so physical deletion must obey a
+retention policy.
+
+The first pruning policy can be time based:
+
+```text
+WAL segment is prune-eligible when:
+  segment.max_seq <= published_checkpoint_wal_seq
+  AND segment.closed_at <= now - wal_retention_window
+```
+
+Serving processes must refresh export head/read-view state more frequently
+than `wal_retention_window`. A process that cannot refresh in time must fail
+closed for the export and force a reopen. This keeps external cleanup simple:
+it can delete old checkpointed WAL asynchronously without coordinating with
+every connection.
+
+Future multi-host or long-stalled serving may add explicit retention leases:
+
+```text
+wal_retention_leases
+  owner
+  export_id
+  min_required_wal_seq
+  expires_at
+```
+
+Until leases exist, time-based retention is an operational contract. It relies
+on bounded serving staleness and reasonably correct cleanup clocks.
+
+# ReadView Interaction
+
+`ExportReadView` is the single in-process owner of materialized WAL overlay
+state for an active export. `WALManager` appends and replays durable records,
+but request-path reads consult the read view.
+
+Write flow:
+
+```text
+append WAL record seq S
+  -> fsync according to policy
+  -> insert S into ExportReadView.wal_overlay
+  -> reply success
+```
+
+Checkpoint refresh:
+
+```text
+catalog publishes checkpoint C
+  -> ExportReadView installs root/checkpoint C
+  -> overlay entries with seq > C remain authoritative
+  -> overlay entries with seq <= C are demoted or dropped after old read
+     epochs drain
+```
+
+Demoted entries may become optional cache entries only if they do not rely on
+WAL storage that can be pruned. Otherwise they must be removed before their WAL
+segment is deleted.
+
 # Invariants
 
 - `WALManager` assigns durable sequence numbers.
@@ -187,6 +273,11 @@ decides they are unreachable.
 - WAL truncation or deletion is a GC decision, not a write-path side effect.
 - `Export` depends on `WALManager`, not on a specific local or remote WAL
   backend.
+- Pruning requires a published checkpoint that represents the WAL records being
+  pruned.
+- Time-based pruning requires serving read views to refresh or close before
+  they become older than the retention window.
+- WAL-backed cache entries must not outlive the WAL segment they reference.
 
 # Open Questions
 
@@ -197,3 +288,6 @@ decides they are unreachable.
 - Whether flush should write an explicit flush marker for debugging or recovery
   evidence.
 - How to represent failed or abandoned partial append attempts.
+- Default retention window and refresh interval.
+- Whether leases are needed before multi-host serving or can remain a later
+  strengthening.

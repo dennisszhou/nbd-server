@@ -24,8 +24,8 @@ Define `StorageEngine` as a blobstore-like API:
 `StorageEngine` stores opaque blob bytes. It does not store or interpret
 catalog metadata.
 
-`ExportCatalog` owns export metadata, export generation history, tree node
-metadata, child pointers, root pointers, checkpoints, and blob references.
+`ExportCatalog` owns export metadata, current export heads, tree node metadata,
+child pointers, root pointers, checkpoints, and blob references.
 
 `WALManager` does not use `StorageEngine`. The WAL has its own replaceable
 `WalStore` backend.

@@ -36,6 +36,21 @@ Compaction must preserve the global WAL prefix invariant:
 root R at checkpoint S represents every WAL record with seq <= S
 ```
 
+# In-Process And External Compaction
+
+Compaction may run in the serving process or as an outside process. The
+publication contract is the same in both cases:
+
+```text
+write immutable compaction output
+  -> publish catalog root/checkpoint
+  -> active read views catch up by notification or refresh
+```
+
+Correctness must not depend on synchronous notification. An active server that
+misses the notification can continue serving from its older root plus WAL
+overlay as long as the WAL needed by that older view remains retained.
+
 # API Shape
 
 Use request and result structs rather than long parameter lists.
@@ -106,8 +121,8 @@ load latest export metadata from ExportCatalog
 ```
 
 If no WAL records are available after the current checkpoint, compaction should
-return a no-op result with `changed = false` and should not append a new export
-generation.
+return a no-op result with `changed = false` and should not advance the export
+head.
 
 # Checkpoint Selection
 
@@ -181,10 +196,9 @@ Publication uses:
 ExportCatalog::publish_checkpoint(PublishCheckpoint)
 ```
 
-`ExportCatalog` loads the latest generation internally and appends the next
-`export_generations` row on success. The architecture assumes one checkpoint
-publisher per export until writer fencing or multi-publisher compaction is
-designed.
+`ExportCatalog` loads the current export head internally and advances
+`export_heads` on success. The architecture assumes one checkpoint publisher
+per export until writer fencing or multi-publisher compaction is designed.
 
 If publication fails after blobs or metadata were written, those objects are
 unpublished garbage. Future GC is responsible for deleting them.
@@ -210,6 +224,32 @@ published. The active read view may continue serving correctly from its old root
 plus WAL overlay, and it can catch up by reloading the catalog checkpoint or by
 receiving a later notification. Notification failure delays memory cleanup; it
 does not roll back catalog publication.
+
+If compaction runs outside the serving process, notification may be replaced by
+polling or periodic head refresh. The active `ExportReadView` is still the only
+owner that demotes authoritative WAL overlay entries for that process.
+
+# WAL Cleanup Handoff
+
+Compaction publication makes WAL records at or below the checkpoint represented
+by the committed tree. It does not immediately delete those WAL records.
+
+Cleanup may prune a WAL segment only after both are true:
+
+```text
+segment.max_seq <= published_checkpoint_wal_seq
+segment.closed_at <= now - wal_retention_window
+```
+
+The retention window gives active serving processes time to refresh their read
+views to the newer checkpoint. A process that cannot refresh before its view
+becomes older than the retention window must stop serving that export and force
+a reopen.
+
+This keeps external cleanup asynchronous and avoids requiring the compactor to
+coordinate directly with every connection. A future lease protocol can tighten
+the rule for multi-host serving, but time-based retention is enough for the
+first lifecycle model.
 
 # Close-Time Compaction
 
@@ -240,7 +280,11 @@ leave the export recoverable from the previous catalog checkpoint plus WAL.
 - Compaction does not directly retire `ExportReadView` overlay entries.
 - Read-view notification failure delays cleanup but does not invalidate the
   published catalog checkpoint.
-- No-op compaction does not publish a new generation.
+- External compaction is valid because active read views can refresh from the
+  catalog checkpoint and retain WAL overlay until then.
+- WAL physical cleanup is asynchronous and gated by checkpoint publication plus
+  the retention policy.
+- No-op compaction does not advance the export head.
 - Failed unpublished compaction output is garbage-collectable later.
 - Only one checkpoint publisher per export is assumed until fencing is
   designed.
@@ -253,3 +297,5 @@ leave the export recoverable from the previous catalog checkpoint plus WAL.
   records first.
 - How much parallelism to allow while building leaf blobs.
 - Exact read-view catch-up mechanism after notification failure.
+- Default WAL retention window and refresh interval.
+- Whether external cleanup needs serving leases before multi-host serving.
