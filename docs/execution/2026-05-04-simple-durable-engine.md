@@ -3,11 +3,11 @@ Date: 2026-05-04
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 3 approved
+- current state: Series 3 finished; Series 4 pending design review
 Completion:
 - execution complete: no
-- completed series: Series 1 and Series 2
-- next series: Series 3, approved for implementation
+- completed series: Series 1, Series 2, and Series 3
+- next series: Series 4, pending approval
 
 ## Goal
 
@@ -152,7 +152,7 @@ sparse zeroes using a v1 root node with direct leaf edges keyed by
 work succeeds, and update its in-memory view only after DB commit; tests cover
 a 128 MiB example with sparse chunk reads and later leaf insertion.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
