@@ -1,12 +1,14 @@
 //! SQLite implementation of the export catalog.
 
 use crate::{
-    CatalogError, CatalogProvider, CatalogUrl, CreateExport, DeleteExport, ExportCatalog,
-    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta, ExportName, ExportState,
-    InspectExport, ListExports, NodeId, Result, Timestamp, WalSeq,
+    BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex, CreateExport, DeleteExport,
+    ExportCatalog, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta,
+    ExportName, ExportState, InspectExport, ListExports, NodeId, Result, SimpleChunkRef,
+    SimpleTreeMetadataStore, SimpleTreeSnapshot, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -249,6 +251,452 @@ impl ExportCatalog for SQLiteExportCatalog {
 
         rows.iter().map(row_to_export_meta).collect()
     }
+}
+
+#[async_trait::async_trait]
+impl SimpleTreeMetadataStore for SQLiteExportCatalog {
+    async fn load_simple_tree(&self, export_id: &ExportId) -> Result<SimpleTreeSnapshot> {
+        load_simple_tree_snapshot(&self.pool, export_id).await
+    }
+
+    async fn commit_simple_chunks(
+        &self,
+        export_id: &ExportId,
+        chunks: Vec<SimpleChunkRef>,
+    ) -> Result<SimpleTreeSnapshot> {
+        if chunks.is_empty() {
+            return self.load_simple_tree(export_id).await;
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut pending = BTreeMap::new();
+        for chunk in chunks {
+            if !seen.insert(chunk.chunk_index()) {
+                return Err(CatalogError::invalid_field(
+                    "chunk_index",
+                    format!("duplicate chunk index {}", chunk.chunk_index()),
+                ));
+            }
+            pending.insert(chunk.chunk_index(), chunk);
+        }
+
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let row = sqlx::query(
+            r#"
+            SELECT layout_kind, root_node_id, size_bytes
+            FROM export_heads
+            WHERE export_id = ?
+            "#,
+        )
+        .bind(export_id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| export_head_not_found(export_id))?;
+
+        let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
+        let layout_kind = layout_kind.parse::<ExportLayoutKind>()?;
+        if layout_kind != ExportLayoutKind::SimpleMutableTree {
+            return Err(CatalogError::invalid_field(
+                "layout_kind",
+                "simple tree metadata requires a simple_mutable_tree export head",
+            ));
+        }
+
+        let size_bytes = i64_to_u64(
+            "size_bytes",
+            row.try_get("size_bytes").map_err(map_sqlx_error)?,
+        )?;
+        for chunk in pending.values() {
+            validate_simple_chunk_in_export(chunk.chunk_index(), size_bytes)?;
+        }
+
+        let mut root_node_id = row
+            .try_get::<Option<String>, _>("root_node_id")
+            .map_err(map_sqlx_error)?
+            .map(NodeId::new)
+            .transpose()?;
+
+        let now = current_timestamp()?;
+        if root_node_id.is_none() {
+            let root = NodeId::new(Uuid::new_v4().to_string())?;
+            sqlx::query(
+                r#"
+                INSERT INTO tree_nodes (
+                  id, layout_kind, owner_export_id, kind, level,
+                  span_start_bytes, span_len_bytes, created_at
+                )
+                VALUES (?, 'simple_mutable_tree', ?, 'internal', 1, 0, ?, ?)
+                "#,
+            )
+            .bind(root.as_str())
+            .bind(export_id.as_str())
+            .bind(u64_to_i64("size_bytes", size_bytes)?)
+            .bind(now.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            sqlx::query(
+                r#"
+                UPDATE export_heads
+                SET root_node_id = ?
+                WHERE export_id = ?
+                "#,
+            )
+            .bind(root.as_str())
+            .bind(export_id.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            root_node_id = Some(root);
+        }
+
+        let root_node_id = root_node_id.expect("root must exist after creation");
+        validate_simple_root_in_tx(&mut tx, export_id, &root_node_id).await?;
+
+        for chunk in pending.values() {
+            let slot = u64_to_i64("chunk_index", chunk.chunk_index().get())?;
+            let existing = sqlx::query(
+                r#"
+                SELECT child_node_id
+                FROM tree_edges
+                WHERE parent_node_id = ? AND slot = ?
+                "#,
+            )
+            .bind(root_node_id.as_str())
+            .bind(slot)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+            if existing.is_some() {
+                return Err(CatalogError::invalid_field(
+                    "chunk_index",
+                    format!("chunk {} is already materialized", chunk.chunk_index()),
+                ));
+            }
+
+            let leaf = NodeId::new(Uuid::new_v4().to_string())?;
+            let span_start = chunk
+                .chunk_index()
+                .get()
+                .checked_mul(SIMPLE_CHUNK_BYTES)
+                .ok_or_else(|| {
+                    CatalogError::invalid_field(
+                        "chunk_index",
+                        format!("chunk {} overflows byte offset", chunk.chunk_index()),
+                    )
+                })?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO tree_nodes (
+                  id, layout_kind, owner_export_id, kind, level,
+                  span_start_bytes, span_len_bytes, created_at
+                )
+                VALUES (?, 'simple_mutable_tree', ?, 'leaf', 0, ?, ?, ?)
+                "#,
+            )
+            .bind(leaf.as_str())
+            .bind(export_id.as_str())
+            .bind(u64_to_i64("span_start_bytes", span_start)?)
+            .bind(u64_to_i64("len_bytes", chunk.len_bytes())?)
+            .bind(now.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO tree_leaf_refs (
+                  node_id, storage_kind, storage_key, len_bytes, created_at
+                )
+                VALUES (?, 'mutable_blob', ?, ?, ?)
+                "#,
+            )
+            .bind(leaf.as_str())
+            .bind(chunk.blob_key().as_str())
+            .bind(u64_to_i64("len_bytes", chunk.len_bytes())?)
+            .bind(now.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO tree_edges (parent_node_id, slot, child_node_id)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(root_node_id.as_str())
+            .bind(slot)
+            .bind(leaf.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE export_heads
+            SET updated_at = ?
+            WHERE export_id = ?
+            "#,
+        )
+        .bind(now.as_str())
+        .bind(export_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        tx.commit().await.map_err(map_sqlx_error)?;
+        self.load_simple_tree(export_id).await
+    }
+}
+
+async fn load_simple_tree_snapshot(
+    pool: &SqlitePool,
+    export_id: &ExportId,
+) -> Result<SimpleTreeSnapshot> {
+    let row = sqlx::query(
+        r#"
+        SELECT layout_kind, root_node_id, size_bytes
+        FROM export_heads
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(export_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| export_head_not_found(export_id))?;
+
+    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
+    let layout_kind = layout_kind.parse::<ExportLayoutKind>()?;
+    if layout_kind != ExportLayoutKind::SimpleMutableTree {
+        return Err(CatalogError::invalid_field(
+            "layout_kind",
+            "simple tree metadata requires a simple_mutable_tree export head",
+        ));
+    }
+
+    let size_bytes = i64_to_u64(
+        "size_bytes",
+        row.try_get("size_bytes").map_err(map_sqlx_error)?,
+    )?;
+    let root_node_id = row
+        .try_get::<Option<String>, _>("root_node_id")
+        .map_err(map_sqlx_error)?
+        .map(NodeId::new)
+        .transpose()?;
+
+    let mut chunks = BTreeMap::new();
+    if let Some(root_node_id) = root_node_id.as_ref() {
+        validate_simple_root(pool, export_id, root_node_id).await?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT
+              e.slot,
+              n.layout_kind,
+              n.owner_export_id,
+              n.kind,
+              n.level,
+              r.storage_kind,
+              r.storage_key,
+              r.len_bytes
+            FROM tree_edges e
+            JOIN tree_nodes n
+              ON n.id = e.child_node_id
+            LEFT JOIN tree_leaf_refs r
+              ON r.node_id = n.id
+            WHERE e.parent_node_id = ?
+            ORDER BY e.slot ASC
+            "#,
+        )
+        .bind(root_node_id.as_str())
+        .fetch_all(pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        for row in rows {
+            let slot = i64_to_u64("chunk_index", row.try_get("slot").map_err(map_sqlx_error)?)?;
+            let chunk_index = ChunkIndex::new(slot);
+            validate_simple_chunk_in_export(chunk_index, size_bytes)?;
+            validate_simple_leaf_row(&row, export_id, chunk_index)?;
+            let key = row
+                .try_get::<Option<String>, _>("storage_key")
+                .map_err(map_sqlx_error)?
+                .ok_or_else(|| {
+                    CatalogError::database(format!(
+                        "simple tree leaf for chunk {chunk_index} is missing storage key"
+                    ))
+                })?;
+            let len_bytes = i64_to_u64(
+                "len_bytes",
+                row.try_get::<Option<i64>, _>("len_bytes")
+                    .map_err(map_sqlx_error)?
+                    .ok_or_else(|| {
+                        CatalogError::database(format!(
+                            "simple tree leaf for chunk {chunk_index} is missing length"
+                        ))
+                    })?,
+            )?;
+            let chunk = SimpleChunkRef::new(chunk_index, BlobKey::new(key)?, len_bytes)?;
+            chunks.insert(chunk_index, chunk);
+        }
+    }
+
+    SimpleTreeSnapshot::new(export_id.clone(), size_bytes, root_node_id, chunks)
+}
+
+async fn validate_simple_root(
+    pool: &SqlitePool,
+    export_id: &ExportId,
+    root_node_id: &NodeId,
+) -> Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT layout_kind, owner_export_id, kind, level
+        FROM tree_nodes
+        WHERE id = ?
+        "#,
+    )
+    .bind(root_node_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| {
+        CatalogError::database(format!("simple tree root `{root_node_id}` was not found"))
+    })?;
+
+    validate_simple_root_row(&row, export_id, root_node_id)
+}
+
+async fn validate_simple_root_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    export_id: &ExportId,
+    root_node_id: &NodeId,
+) -> Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT layout_kind, owner_export_id, kind, level
+        FROM tree_nodes
+        WHERE id = ?
+        "#,
+    )
+    .bind(root_node_id.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| {
+        CatalogError::database(format!("simple tree root `{root_node_id}` was not found"))
+    })?;
+
+    validate_simple_root_row(&row, export_id, root_node_id)
+}
+
+fn validate_simple_root_row(
+    row: &SqliteRow,
+    export_id: &ExportId,
+    root_node_id: &NodeId,
+) -> Result<()> {
+    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
+    if layout_kind != ExportLayoutKind::SimpleMutableTree.to_string() {
+        return Err(CatalogError::database(format!(
+            "simple tree root `{root_node_id}` has layout `{layout_kind}`"
+        )));
+    }
+
+    let owner_export_id: Option<String> = row.try_get("owner_export_id").map_err(map_sqlx_error)?;
+    if owner_export_id.as_deref() != Some(export_id.as_str()) {
+        return Err(CatalogError::database(format!(
+            "simple tree root `{root_node_id}` is not owned by export `{export_id}`"
+        )));
+    }
+
+    let kind: String = row.try_get("kind").map_err(map_sqlx_error)?;
+    if kind != "internal" {
+        return Err(CatalogError::database(format!(
+            "simple tree root `{root_node_id}` has kind `{kind}`"
+        )));
+    }
+
+    let level: i64 = row.try_get("level").map_err(map_sqlx_error)?;
+    if level != 1 {
+        return Err(CatalogError::database(format!(
+            "simple tree root `{root_node_id}` has level {level}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_simple_leaf_row(
+    row: &SqliteRow,
+    export_id: &ExportId,
+    chunk_index: ChunkIndex,
+) -> Result<()> {
+    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
+    if layout_kind != ExportLayoutKind::SimpleMutableTree.to_string() {
+        return Err(CatalogError::database(format!(
+            "simple tree leaf for chunk {chunk_index} has layout `{layout_kind}`"
+        )));
+    }
+
+    let owner_export_id: Option<String> = row.try_get("owner_export_id").map_err(map_sqlx_error)?;
+    if owner_export_id.as_deref() != Some(export_id.as_str()) {
+        return Err(CatalogError::database(format!(
+            "simple tree leaf for chunk {chunk_index} is not owned by export `{export_id}`"
+        )));
+    }
+
+    let kind: String = row.try_get("kind").map_err(map_sqlx_error)?;
+    if kind != "leaf" {
+        return Err(CatalogError::database(format!(
+            "simple tree child for chunk {chunk_index} has kind `{kind}`"
+        )));
+    }
+
+    let level: i64 = row.try_get("level").map_err(map_sqlx_error)?;
+    if level != 0 {
+        return Err(CatalogError::database(format!(
+            "simple tree leaf for chunk {chunk_index} has level {level}"
+        )));
+    }
+
+    let storage_kind: Option<String> = row.try_get("storage_kind").map_err(map_sqlx_error)?;
+    if storage_kind.as_deref() != Some("mutable_blob") {
+        return Err(CatalogError::database(format!(
+            "simple tree leaf for chunk {chunk_index} has invalid storage kind"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_simple_chunk_in_export(chunk_index: ChunkIndex, size_bytes: u64) -> Result<()> {
+    let start = chunk_index
+        .get()
+        .checked_mul(SIMPLE_CHUNK_BYTES)
+        .ok_or_else(|| {
+            CatalogError::invalid_field(
+                "chunk_index",
+                format!("chunk {chunk_index} overflows byte offset"),
+            )
+        })?;
+    if start >= size_bytes {
+        return Err(CatalogError::invalid_field(
+            "chunk_index",
+            format!("chunk {chunk_index} starts beyond export size {size_bytes}"),
+        ));
+    }
+    Ok(())
+}
+
+fn export_head_not_found(export_id: &ExportId) -> CatalogError {
+    CatalogError::database(format!("export head `{export_id}` not found"))
 }
 
 fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {

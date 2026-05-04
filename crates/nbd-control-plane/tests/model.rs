@@ -1,6 +1,7 @@
 use nbd_control_plane::{
-    CatalogProvider, CatalogUrl, CreateExport, ExportEngineKind, ExportHead, ExportLayoutKind,
-    ExportName, ExportState, ListExports, WalSeq,
+    BlobKey, CatalogProvider, CatalogUrl, ChunkIndex, CreateExport, ExportEngineKind, ExportHead,
+    ExportLayoutKind, ExportName, ExportState, ListExports, SimpleChunkRef, WalSeq,
+    SIMPLE_CHUNK_BYTES,
 };
 use std::str::FromStr;
 
@@ -63,6 +64,39 @@ fn export_head_can_represent_empty_memory() {
     assert_eq!(head.size_bytes(), 4096);
     assert_eq!(head.checkpoint_wal_seq(), WalSeq::zero());
     assert!(ExportHead::memory_empty(0).is_err());
+}
+
+#[test]
+fn blob_keys_are_safe_path_components() {
+    let key = BlobKey::new("blob-123").expect("valid blob key");
+
+    assert_eq!(key.as_str(), "blob-123");
+    assert!(BlobKey::new("").is_err());
+    assert!(BlobKey::new(".").is_err());
+    assert!(BlobKey::new("..").is_err());
+    assert!(BlobKey::new("dir/blob").is_err());
+    assert!(BlobKey::new("dir\\blob").is_err());
+    assert!(BlobKey::new("bad\0blob").is_err());
+}
+
+#[test]
+fn simple_chunk_refs_are_full_sized_blob_refs() {
+    let chunk = SimpleChunkRef::new(
+        ChunkIndex::new(7),
+        BlobKey::new("blob-7").expect("valid blob key"),
+        SIMPLE_CHUNK_BYTES,
+    )
+    .expect("valid simple chunk");
+
+    assert_eq!(chunk.chunk_index(), ChunkIndex::new(7));
+    assert_eq!(chunk.blob_key().as_str(), "blob-7");
+    assert_eq!(chunk.len_bytes(), SIMPLE_CHUNK_BYTES);
+    assert!(SimpleChunkRef::new(
+        ChunkIndex::new(7),
+        BlobKey::new("blob-7").expect("valid blob key"),
+        SIMPLE_CHUNK_BYTES - 1,
+    )
+    .is_err());
 }
 
 #[test]

@@ -2,8 +2,12 @@
 
 use crate::error::{CatalogError, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+use uuid::Uuid;
+
+pub const SIMPLE_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExportId(String);
@@ -15,10 +19,16 @@ pub struct ExportName(String);
 pub struct NodeId(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BlobKey(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Timestamp(String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct WalSeq(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ChunkIndex(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +56,21 @@ pub struct ExportHead {
     root_node_id: Option<NodeId>,
     size_bytes: u64,
     checkpoint_wal_seq: WalSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimpleChunkRef {
+    chunk_index: ChunkIndex,
+    blob_key: BlobKey,
+    len_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimpleTreeSnapshot {
+    export_id: ExportId,
+    size_bytes: u64,
+    root_node_id: Option<NodeId>,
+    chunks: BTreeMap<ChunkIndex, SimpleChunkRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +152,45 @@ impl NodeId {
     }
 }
 
+impl BlobKey {
+    pub fn new(key: impl Into<String>) -> Result<Self> {
+        let key = key.into();
+        if key.is_empty() {
+            return Err(CatalogError::invalid_field(
+                "blob_key",
+                "value must not be empty",
+            ));
+        }
+        if key == "." || key == ".." {
+            return Err(CatalogError::invalid_field(
+                "blob_key",
+                "value must not be a relative path component",
+            ));
+        }
+        if key.contains('\0') {
+            return Err(CatalogError::invalid_field(
+                "blob_key",
+                "value must not contain NUL bytes",
+            ));
+        }
+        if key.contains('/') || key.contains('\\') {
+            return Err(CatalogError::invalid_field(
+                "blob_key",
+                "value must be one path component",
+            ));
+        }
+        Ok(Self(key))
+    }
+
+    pub fn random() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 impl Timestamp {
     pub fn new(timestamp: impl Into<String>) -> Result<Self> {
         non_empty_string("timestamp", timestamp.into()).map(Self)
@@ -144,6 +208,16 @@ impl WalSeq {
 
     pub const fn zero() -> Self {
         Self(0)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl ChunkIndex {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
     }
 
     pub const fn get(self) -> u64 {
@@ -197,6 +271,85 @@ impl ExportHead {
 
     pub fn checkpoint_wal_seq(&self) -> WalSeq {
         self.checkpoint_wal_seq
+    }
+}
+
+impl SimpleChunkRef {
+    pub fn new(chunk_index: ChunkIndex, blob_key: BlobKey, len_bytes: u64) -> Result<Self> {
+        if len_bytes != SIMPLE_CHUNK_BYTES {
+            return Err(CatalogError::invalid_field(
+                "len_bytes",
+                format!("simple chunks must be exactly {SIMPLE_CHUNK_BYTES} bytes"),
+            ));
+        }
+
+        Ok(Self {
+            chunk_index,
+            blob_key,
+            len_bytes,
+        })
+    }
+
+    pub fn chunk_index(&self) -> ChunkIndex {
+        self.chunk_index
+    }
+
+    pub fn blob_key(&self) -> &BlobKey {
+        &self.blob_key
+    }
+
+    pub fn len_bytes(&self) -> u64 {
+        self.len_bytes
+    }
+}
+
+impl SimpleTreeSnapshot {
+    pub fn new(
+        export_id: ExportId,
+        size_bytes: u64,
+        root_node_id: Option<NodeId>,
+        chunks: BTreeMap<ChunkIndex, SimpleChunkRef>,
+    ) -> Result<Self> {
+        validate_non_zero("size_bytes", size_bytes)?;
+        for (index, chunk) in &chunks {
+            if *index != chunk.chunk_index() {
+                return Err(CatalogError::invalid_field(
+                    "chunks",
+                    format!(
+                        "map key {} does not match chunk index {}",
+                        index,
+                        chunk.chunk_index()
+                    ),
+                ));
+            }
+        }
+
+        Ok(Self {
+            export_id,
+            size_bytes,
+            root_node_id,
+            chunks,
+        })
+    }
+
+    pub fn export_id(&self) -> &ExportId {
+        &self.export_id
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    pub fn root_node_id(&self) -> Option<&NodeId> {
+        self.root_node_id.as_ref()
+    }
+
+    pub fn chunks(&self) -> &BTreeMap<ChunkIndex, SimpleChunkRef> {
+        &self.chunks
+    }
+
+    pub fn chunk(&self, chunk_index: ChunkIndex) -> Option<&SimpleChunkRef> {
+        self.chunks.get(&chunk_index)
     }
 }
 
@@ -402,6 +555,12 @@ impl fmt::Display for NodeId {
     }
 }
 
+impl fmt::Display for BlobKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl fmt::Display for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -435,6 +594,12 @@ impl fmt::Display for ExportLayoutKind {
 }
 
 impl fmt::Display for WalSeq {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.get())
+    }
+}
+
+impl fmt::Display for ChunkIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.get())
     }

@@ -1,7 +1,7 @@
 use nbd_control_plane::{
-    CatalogError, CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind,
-    ExportLayoutKind, ExportName, ExportState, InspectExport, ListExports, SQLiteExportCatalog,
-    WalSeq,
+    BlobKey, CatalogError, CatalogUrl, ChunkIndex, CreateExport, DeleteExport, ExportCatalog,
+    ExportEngineKind, ExportLayoutKind, ExportName, ExportState, InspectExport, ListExports,
+    SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore, WalSeq, SIMPLE_CHUNK_BYTES,
 };
 use nbd_test_support::TestRuntime;
 
@@ -205,6 +205,98 @@ async fn migration_rejects_zero_sized_heads() {
     assert!(error.to_string().contains("CHECK constraint failed"));
 }
 
+#[tokio::test]
+async fn simple_tree_loads_empty_sparse_head() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export("disk-a", 128 * 1024 * 1024, 4096))
+        .await
+        .expect("create export");
+    mark_simple_tree_head(&catalog, created.id().as_str()).await;
+
+    let snapshot = catalog
+        .load_simple_tree(created.id())
+        .await
+        .expect("load simple tree");
+
+    assert_eq!(snapshot.export_id(), created.id());
+    assert_eq!(snapshot.size_bytes(), 128 * 1024 * 1024);
+    assert!(snapshot.root_node_id().is_none());
+    assert!(snapshot.chunks().is_empty());
+}
+
+#[tokio::test]
+async fn simple_tree_commits_new_leaf_metadata() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export("disk-a", 128 * 1024 * 1024, 4096))
+        .await
+        .expect("create export");
+    mark_simple_tree_head(&catalog, created.id().as_str()).await;
+    let chunk = SimpleChunkRef::new(
+        ChunkIndex::new(2),
+        BlobKey::new("blob-two").expect("valid blob key"),
+        SIMPLE_CHUNK_BYTES,
+    )
+    .expect("valid chunk");
+
+    let snapshot = catalog
+        .commit_simple_chunks(created.id(), vec![chunk.clone()])
+        .await
+        .expect("commit simple chunk");
+
+    let root_node_id = snapshot.root_node_id().expect("root node should exist");
+    assert_eq!(
+        snapshot
+            .chunk(ChunkIndex::new(2))
+            .expect("chunk should be materialized"),
+        &chunk
+    );
+
+    let reloaded = catalog
+        .load_simple_tree(created.id())
+        .await
+        .expect("reload simple tree");
+    assert_eq!(reloaded.root_node_id(), Some(root_node_id));
+    assert_eq!(reloaded.chunk(ChunkIndex::new(2)), Some(&chunk));
+    assert!(reloaded.chunk(ChunkIndex::new(1)).is_none());
+}
+
+#[tokio::test]
+async fn simple_tree_rejects_existing_leaf_metadata() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export("disk-a", 128 * 1024 * 1024, 4096))
+        .await
+        .expect("create export");
+    mark_simple_tree_head(&catalog, created.id().as_str()).await;
+    let first = SimpleChunkRef::new(
+        ChunkIndex::new(1),
+        BlobKey::new("blob-one").expect("valid blob key"),
+        SIMPLE_CHUNK_BYTES,
+    )
+    .expect("valid chunk");
+    catalog
+        .commit_simple_chunks(created.id(), vec![first])
+        .await
+        .expect("commit first chunk");
+
+    let second = SimpleChunkRef::new(
+        ChunkIndex::new(1),
+        BlobKey::new("blob-one-replacement").expect("valid blob key"),
+        SIMPLE_CHUNK_BYTES,
+    )
+    .expect("valid chunk");
+    let error = catalog
+        .commit_simple_chunks(created.id(), vec![second])
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("chunk 1 is already materialized"));
+}
+
 async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
@@ -220,6 +312,20 @@ async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
     }
 
     (runtime, catalog)
+}
+
+async fn mark_simple_tree_head(catalog: &SQLiteExportCatalog, export_id: &str) {
+    sqlx::query(
+        r#"
+        UPDATE export_heads
+        SET layout_kind = 'simple_mutable_tree'
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(export_id)
+    .execute(catalog.pool())
+    .await
+    .expect("mark simple tree head");
 }
 
 fn export_name(name: &str) -> ExportName {
