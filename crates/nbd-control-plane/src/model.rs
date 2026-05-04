@@ -41,6 +41,7 @@ pub enum ExportState {
 #[serde(rename_all = "snake_case")]
 pub enum ExportEngineKind {
     Memory,
+    SimpleDurable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -251,6 +252,15 @@ impl ExportHead {
     pub fn memory_empty(size_bytes: u64) -> Result<Self> {
         Self::new(
             ExportLayoutKind::MemoryEmpty,
+            None,
+            size_bytes,
+            WalSeq::zero(),
+        )
+    }
+
+    pub fn simple_mutable_tree(size_bytes: u64) -> Result<Self> {
+        Self::new(
+            ExportLayoutKind::SimpleMutableTree,
             None,
             size_bytes,
             WalSeq::zero(),
@@ -515,6 +525,7 @@ impl FromStr for ExportEngineKind {
     fn from_str(engine_kind: &str) -> Result<Self> {
         match engine_kind {
             "memory" => Ok(Self::Memory),
+            "simple_durable" => Ok(Self::SimpleDurable),
             engine_kind => Err(CatalogError::InvalidExportEngineKind {
                 engine_kind: engine_kind.to_owned(),
             }),
@@ -580,6 +591,7 @@ impl fmt::Display for ExportEngineKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Memory => f.write_str("memory"),
+            Self::SimpleDurable => f.write_str("simple_durable"),
         }
     }
 }

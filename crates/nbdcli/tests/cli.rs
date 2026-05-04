@@ -8,6 +8,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
     ),
+    include_str!(
+        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
+    ),
 ];
 
 #[tokio::test]
@@ -75,6 +78,33 @@ async fn cli_uses_explicit_config_and_reports_missing_exports() {
 
     assert!(!inspect.status.success(), "inspect unexpectedly succeeded");
     assert!(stderr(&inspect).contains("export `missing` not found"));
+}
+
+#[tokio::test]
+async fn cli_creates_simple_durable_exports() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+
+    let create = nbdcli(
+        &runtime,
+        &[
+            "create",
+            "disk-durable",
+            "--size",
+            "1048576",
+            "--engine",
+            "simple_durable",
+        ],
+    );
+    assert_success(&create);
+    assert!(stdout(&create).contains("engine=simple_durable"));
+
+    let inspect = nbdcli(&runtime, &["inspect", "disk-durable", "--json"]);
+    assert_success(&inspect);
+    let inspected = json_stdout(&inspect);
+    assert_eq!(inspected["engine_kind"], "simple_durable");
+    assert_eq!(inspected["head"]["layout_kind"], "simple_mutable_tree");
+    assert!(inspected["head"]["root_node_id"].is_null());
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {

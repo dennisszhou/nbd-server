@@ -2,7 +2,9 @@ use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
 };
-use nbd_server::{ExportOwner, LocalExportRegistry, ServerError, MAX_MEMORY_EXPORT_BYTES};
+use nbd_server::{
+    ExportOwner, ExportReply, LocalExportRegistry, ServerError, MAX_MEMORY_EXPORT_BYTES,
+};
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -12,6 +14,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
     include_str!(
         "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
+    ),
+    include_str!(
+        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
     ),
 ];
 
@@ -252,6 +257,67 @@ async fn registry_shares_active_runtime_for_same_owner() {
     ));
 }
 
+#[tokio::test]
+async fn registry_opens_simple_durable_runtime_from_catalog() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(create_export_with_engine(
+            "disk-durable",
+            4096,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create export");
+    let registry = LocalExportRegistry::new(
+        Arc::new(catalog),
+        ServerConfig::default(),
+        blob_dir(&runtime),
+    );
+    let owner = ExportOwner::unique_connection();
+
+    let export_runtime = registry
+        .open(export_name("disk-durable"), owner)
+        .await
+        .expect("open simple durable runtime");
+    let write_slot = export_runtime.reserve().await.expect("reserve write slot");
+    let (write_job, write_receiver) = nbd_server::ExportJob::oneshot(
+        nbd_server::ExportRequest::Write {
+            offset: 0,
+            data: b"durable".to_vec(),
+        },
+        write_slot,
+    );
+    export_runtime
+        .submit(write_job)
+        .await
+        .expect("submit write");
+    let completed = write_receiver.await.expect("write completion");
+    let (result, _slot) = completed.into_parts();
+    assert_eq!(result.expect("write reply"), ExportReply::Done);
+
+    let read_slot = export_runtime.reserve().await.expect("reserve read slot");
+    let (read_job, read_receiver) = nbd_server::ExportJob::oneshot(
+        nbd_server::ExportRequest::Read { offset: 0, len: 7 },
+        read_slot,
+    );
+    export_runtime.submit(read_job).await.expect("submit read");
+    let completed = read_receiver.await.expect("read completion");
+    let (result, _slot) = completed.into_parts();
+    assert_eq!(
+        result.expect("read reply"),
+        ExportReply::Read {
+            data: b"durable".to_vec(),
+        },
+    );
+
+    registry
+        .close(&export_name("disk-durable"), &owner)
+        .await
+        .expect("close simple durable runtime");
+}
+
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -277,11 +343,15 @@ fn blob_dir(runtime: &TestRuntime) -> PathBuf {
 }
 
 fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {
-    CreateExport::new(
-        export_name(name),
-        size_bytes,
-        block_size,
-        ExportEngineKind::Memory,
-    )
-    .expect("valid create export request")
+    create_export_with_engine(name, size_bytes, block_size, ExportEngineKind::Memory)
+}
+
+fn create_export_with_engine(
+    name: &str,
+    size_bytes: u64,
+    block_size: u64,
+    engine_kind: ExportEngineKind,
+) -> CreateExport {
+    CreateExport::new(export_name(name), size_bytes, block_size, engine_kind)
+        .expect("valid create export request")
 }

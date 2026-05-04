@@ -17,6 +17,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
     ),
+    include_str!(
+        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
+    ),
 ];
 
 #[tokio::test]
@@ -359,29 +362,18 @@ async fn simple_tree_fixture_with_size(
             .expect("apply migration");
     }
 
-    let created = catalog
+    catalog
         .create_export(
             CreateExport::new(
                 ExportName::new(name).expect("export name"),
                 size_bytes,
                 4096,
-                ExportEngineKind::Memory,
+                ExportEngineKind::SimpleDurable,
             )
             .expect("create request"),
         )
         .await
         .expect("create export");
-    sqlx::query(
-        r#"
-        UPDATE export_heads
-        SET layout_kind = 'simple_mutable_tree'
-        WHERE export_id = ?
-        "#,
-    )
-    .bind(created.id().as_str())
-    .execute(catalog.pool())
-    .await
-    .expect("mark simple tree head");
 
     let meta = catalog
         .inspect_export(InspectExport::new(

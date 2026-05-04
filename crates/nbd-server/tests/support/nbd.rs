@@ -29,6 +29,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
     ),
+    include_str!(
+        "../../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
+    ),
 ];
 
 pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;

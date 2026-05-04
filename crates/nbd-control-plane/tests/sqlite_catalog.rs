@@ -10,6 +10,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
     ),
+    include_str!(
+        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
+    ),
 ];
 
 #[tokio::test]
@@ -36,6 +39,37 @@ async fn create_export_initializes_memory_head() {
         .await
         .expect("inspect export");
     assert_eq!(inspected, created);
+}
+
+#[tokio::test]
+async fn create_export_initializes_simple_durable_head() {
+    let (_runtime, catalog) = migrated_catalog().await;
+
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-durable",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create export");
+
+    assert_eq!(created.engine_kind(), ExportEngineKind::SimpleDurable);
+    assert_eq!(
+        created.head().layout_kind(),
+        ExportLayoutKind::SimpleMutableTree,
+    );
+    assert!(created.head().root_node_id().is_none());
+    assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
+
+    let snapshot = catalog
+        .load_simple_tree(created.id())
+        .await
+        .expect("load simple tree");
+    assert_eq!(snapshot.export_id(), created.id());
+    assert!(snapshot.root_node_id().is_none());
+    assert!(snapshot.chunks().is_empty());
 }
 
 #[tokio::test]
@@ -213,10 +247,14 @@ async fn migration_rejects_zero_sized_heads() {
 async fn simple_tree_loads_empty_sparse_head() {
     let (_runtime, catalog) = migrated_catalog().await;
     let created = catalog
-        .create_export(create_export("disk-a", 128 * 1024 * 1024, 4096))
+        .create_export(create_export_with_engine(
+            "disk-a",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
         .await
         .expect("create export");
-    mark_simple_tree_head(&catalog, created.id().as_str()).await;
 
     let snapshot = catalog
         .load_simple_tree(created.id())
@@ -233,10 +271,14 @@ async fn simple_tree_loads_empty_sparse_head() {
 async fn simple_tree_commits_new_leaf_metadata() {
     let (_runtime, catalog) = migrated_catalog().await;
     let created = catalog
-        .create_export(create_export("disk-a", 128 * 1024 * 1024, 4096))
+        .create_export(create_export_with_engine(
+            "disk-a",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
         .await
         .expect("create export");
-    mark_simple_tree_head(&catalog, created.id().as_str()).await;
     let chunk = SimpleChunkRef::new(
         ChunkIndex::new(2),
         BlobKey::new("blob-two").expect("valid blob key"),
@@ -270,10 +312,14 @@ async fn simple_tree_commits_new_leaf_metadata() {
 async fn simple_tree_rejects_existing_leaf_metadata() {
     let (_runtime, catalog) = migrated_catalog().await;
     let created = catalog
-        .create_export(create_export("disk-a", 128 * 1024 * 1024, 4096))
+        .create_export(create_export_with_engine(
+            "disk-a",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
         .await
         .expect("create export");
-    mark_simple_tree_head(&catalog, created.id().as_str()).await;
     let first = SimpleChunkRef::new(
         ChunkIndex::new(1),
         BlobKey::new("blob-one").expect("valid blob key"),
@@ -318,30 +364,20 @@ async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
     (runtime, catalog)
 }
 
-async fn mark_simple_tree_head(catalog: &SQLiteExportCatalog, export_id: &str) {
-    sqlx::query(
-        r#"
-        UPDATE export_heads
-        SET layout_kind = 'simple_mutable_tree'
-        WHERE export_id = ?
-        "#,
-    )
-    .bind(export_id)
-    .execute(catalog.pool())
-    .await
-    .expect("mark simple tree head");
-}
-
 fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
 }
 
 fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {
-    CreateExport::new(
-        export_name(name),
-        size_bytes,
-        block_size,
-        ExportEngineKind::Memory,
-    )
-    .expect("valid create export request")
+    create_export_with_engine(name, size_bytes, block_size, ExportEngineKind::Memory)
+}
+
+fn create_export_with_engine(
+    name: &str,
+    size_bytes: u64,
+    block_size: u64,
+    engine_kind: ExportEngineKind,
+) -> CreateExport {
+    CreateExport::new(export_name(name), size_bytes, block_size, engine_kind)
+        .expect("valid create export request")
 }

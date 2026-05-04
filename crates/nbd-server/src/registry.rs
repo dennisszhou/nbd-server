@@ -1,9 +1,9 @@
 use crate::{
-    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, MemoryExportEngine, Result,
-    SerialExportRuntime, ServerError,
+    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, LocalBlobStore,
+    MemoryExportEngine, Result, SerialExportRuntime, ServerError, SimpleDurableEngine,
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
-use nbd_control_plane::{ExportCatalog, ExportEngineKind, ExportName};
+use nbd_control_plane::{ExportCatalog, ExportEngineKind, ExportName, SimpleTreeMetadataStore};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +30,7 @@ pub struct ExportOwnerId(u64);
 
 pub struct LocalExportRegistry {
     catalog: Arc<dyn ExportCatalog>,
+    simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     config: ServerConfig,
     blob_dir: PathBuf,
     active: Mutex<HashMap<ExportName, ActiveExportState>>,
@@ -48,13 +49,15 @@ struct ActiveExport {
 }
 
 impl LocalExportRegistry {
-    pub fn new(
-        catalog: Arc<dyn ExportCatalog>,
-        config: ServerConfig,
-        blob_dir: impl Into<PathBuf>,
-    ) -> Self {
+    pub fn new<T>(catalog: Arc<T>, config: ServerConfig, blob_dir: impl Into<PathBuf>) -> Self
+    where
+        T: ExportCatalog + SimpleTreeMetadataStore + 'static,
+    {
+        let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
+        let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog;
         Self {
-            catalog,
+            catalog: export_catalog,
+            simple_tree_store,
             config,
             blob_dir: blob_dir.into(),
             active: Mutex::new(HashMap::new()),
@@ -149,6 +152,14 @@ impl LocalExportRegistry {
             .map_err(ServerError::catalog)?;
         let engine: ExportEngineHandle = match meta.engine_kind() {
             ExportEngineKind::Memory => Arc::new(MemoryExportEngine::new(&meta)?),
+            ExportEngineKind::SimpleDurable => Arc::new(
+                SimpleDurableEngine::load(
+                    &meta,
+                    LocalBlobStore::new(self.blob_dir.clone()),
+                    self.simple_tree_store.clone(),
+                )
+                .await?,
+            ),
         };
         let runtime: ExportRuntimeHandle = match self.config.export_runtime {
             ExportRuntimeKind::Serial => Arc::new(SerialExportRuntime::with_capacity(

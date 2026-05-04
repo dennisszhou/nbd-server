@@ -89,7 +89,12 @@ impl ExportCatalog for SQLiteExportCatalog {
         let now = current_timestamp()?;
         let size_bytes = u64_to_i64("size_bytes", request.size_bytes())?;
         let block_size = u64_to_i64("block_size", request.block_size())?;
-        let checkpoint_wal_seq = WalSeq::zero();
+        let head = match request.engine_kind() {
+            ExportEngineKind::Memory => ExportHead::memory_empty(request.size_bytes())?,
+            ExportEngineKind::SimpleDurable => {
+                ExportHead::simple_mutable_tree(request.size_bytes())?
+            }
+        };
 
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
 
@@ -125,12 +130,17 @@ impl ExportCatalog for SQLiteExportCatalog {
               export_id, layout_kind, root_node_id, size_bytes,
               checkpoint_wal_seq, updated_at
             )
-            VALUES (?, 'memory_empty', NULL, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(export_id.as_str())
+        .bind(head.layout_kind().to_string())
+        .bind(head.root_node_id().map(NodeId::as_str))
         .bind(size_bytes)
-        .bind(u64_to_i64("checkpoint_wal_seq", checkpoint_wal_seq.get())?)
+        .bind(u64_to_i64(
+            "checkpoint_wal_seq",
+            head.checkpoint_wal_seq().get(),
+        )?)
         .bind(now.as_str())
         .execute(&mut *tx)
         .await
@@ -144,7 +154,7 @@ impl ExportCatalog for SQLiteExportCatalog {
             request.block_size(),
             request.engine_kind(),
             ExportState::Active,
-            ExportHead::memory_empty(request.size_bytes())?,
+            head,
             now.clone(),
             now,
             None,
