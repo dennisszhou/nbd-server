@@ -1,7 +1,7 @@
 use nbd_config::{
-    catalog_file_url_for_path, default_config_path_for_home, default_state_dir_for_home,
-    ConfigSource, ExportRuntimeKind, NbdConfig, DEFAULT_EXPORT_QUEUE_DEPTH,
-    DEFAULT_REPLY_QUEUE_CAPACITY,
+    catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
+    default_state_dir_for_home, ConfigSource, ExportRuntimeKind, NbdConfig,
+    DEFAULT_EXPORT_QUEUE_DEPTH, DEFAULT_REPLY_QUEUE_CAPACITY,
 };
 use std::env;
 use std::fs;
@@ -25,6 +25,7 @@ fn explicit_config_loads_from_requested_path() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.runtime.state_dir, state_dir);
+    assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
     assert_eq!(
         config.catalog.url,
         catalog_file_url_for_path(catalog_path).unwrap()
@@ -58,6 +59,7 @@ fn explicit_config_does_not_bootstrap_user_default() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.runtime.state_dir, state_dir);
+    assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
     assert!(!default_state_dir_for_home(&fake_home).exists());
     drop(old_home);
 }
@@ -76,7 +78,12 @@ fn default_user_path_bootstraps_absolute_config() {
 
     assert!(config_path.exists());
     assert_eq!(config.runtime.state_dir, fake_home.join(".nbd"));
+    assert_eq!(
+        config.runtime.blob_dir,
+        default_blob_dir_for_home(&fake_home)
+    );
     assert!(config.runtime.state_dir.is_absolute());
+    assert!(config.runtime.blob_dir.is_absolute());
     assert_eq!(
         config.catalog.url,
         catalog_file_url_for_path(fake_home.join(".nbd").join("catalog.db")).unwrap()
@@ -95,6 +102,27 @@ fn default_user_path_bootstraps_absolute_config() {
     let loaded = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
     assert_eq!(loaded, config);
     drop(old_home);
+}
+
+#[test]
+fn explicit_config_loads_blob_directory() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let blob_dir = temp.path().join("isolated-blobs");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nblob_dir = {:?}\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir,
+        blob_dir,
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(config.runtime.state_dir, state_dir);
+    assert_eq!(config.runtime.blob_dir, blob_dir);
 }
 
 #[test]

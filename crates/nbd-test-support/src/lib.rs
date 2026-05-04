@@ -27,6 +27,7 @@ impl TestRuntime {
     pub fn new() -> Result<Self, TestRuntimeError> {
         let root = TempDir::new("nbd-runtime")?;
         let state_dir = root.path().join("state");
+        let blob_dir = state_dir.join("blobs");
         let config_path = root.path().join("config.toml");
         let catalog_path = root.path().join("catalog.db");
         let catalog_url = catalog_file_url_for_path(&catalog_path)?;
@@ -44,6 +45,7 @@ impl TestRuntime {
                 },
                 runtime: RuntimeConfig {
                     state_dir: state_dir.clone(),
+                    blob_dir: blob_dir.clone(),
                 },
                 server: ServerConfig::default(),
             },
@@ -88,6 +90,7 @@ impl TestRuntime {
                 },
                 runtime: RuntimeConfig {
                     state_dir: self.state_dir.clone(),
+                    blob_dir: self.state_dir.join("blobs"),
                 },
                 server,
             },

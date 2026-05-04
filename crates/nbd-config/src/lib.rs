@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::env;
 use std::error::Error;
 use std::fmt;
@@ -12,6 +12,8 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 const CONFIG_DIR: &str = ".nbd";
+const CACHE_DIR: &str = ".cache";
+const BLOB_DIR: &str = "blobs";
 const CONFIG_FILE: &str = "config.toml";
 const CATALOG_FILE: &str = "catalog.db";
 pub const DEFAULT_EXPORT_QUEUE_DEPTH: usize = 128;
@@ -35,10 +37,34 @@ pub struct CatalogConfig {
 }
 
 /// Local runtime paths used by server-side components.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuntimeConfig {
     pub state_dir: PathBuf,
+    pub blob_dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeConfigSource {
+    state_dir: PathBuf,
+    blob_dir: Option<PathBuf>,
+}
+
+impl<'de> Deserialize<'de> for RuntimeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let source = RuntimeConfigSource::deserialize(deserializer)?;
+        let blob_dir = source
+            .blob_dir
+            .unwrap_or_else(|| source.state_dir.join(BLOB_DIR));
+
+        Ok(Self {
+            state_dir: source.state_dir,
+            blob_dir,
+        })
+    }
 }
 
 /// NBD server runtime policy.
@@ -150,14 +176,19 @@ impl NbdConfig {
 
     /// Construct the default config for a specific home directory.
     pub fn default_for_home(home: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let home = home.as_ref();
         let state_dir = default_state_dir_for_home(home);
+        let blob_dir = default_blob_dir_for_home(home);
         let catalog_path = state_dir.join(CATALOG_FILE);
 
         Ok(Self {
             catalog: CatalogConfig {
                 url: catalog_file_url_for_path(catalog_path)?,
             },
-            runtime: RuntimeConfig { state_dir },
+            runtime: RuntimeConfig {
+                state_dir,
+                blob_dir,
+            },
             server: ServerConfig::default(),
         })
     }
@@ -171,6 +202,11 @@ pub fn default_config_path_for_home(home: impl AsRef<Path>) -> PathBuf {
 /// Return the default operator state directory for a given home directory.
 pub fn default_state_dir_for_home(home: impl AsRef<Path>) -> PathBuf {
     home.as_ref().join(CONFIG_DIR)
+}
+
+/// Return the default local blob directory for a generated user config.
+pub fn default_blob_dir_for_home(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref().join(CACHE_DIR).join("nbd").join(BLOB_DIR)
 }
 
 /// Convert a local SQLite database path into the canonical catalog URL shape.
