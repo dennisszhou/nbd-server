@@ -31,4 +31,6 @@ pub use runtime::{
     SerialExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY,
 };
 pub use server::NbdServer;
-pub use simple_durable::{LocalBlobStore, SimpleMutableTree};
+pub use simple_durable::{
+    LocalBlobStore, SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree,
+};

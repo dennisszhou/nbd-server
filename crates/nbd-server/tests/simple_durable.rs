@@ -1,8 +1,13 @@
 use nbd_control_plane::{
     BlobKey, CatalogUrl, ChunkIndex, CreateExport, ExportCatalog, ExportEngineKind, ExportMeta,
-    ExportName, InspectExport, SQLiteExportCatalog, SimpleChunkRef, SIMPLE_CHUNK_BYTES,
+    ExportName, InspectExport, SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore,
+    SIMPLE_CHUNK_BYTES,
 };
-use nbd_server::{LocalBlobStore, ServerError, SimpleMutableTree};
+use nbd_server::{
+    AdmissionOp, ByteRange, ConcurrentExportRuntime, ExportAdmissionPolicy, ExportJob, ExportReply,
+    ExportRequest, ExportRuntime, LocalBlobStore, ServerError, SimpleDurableAdmissionPolicy,
+    SimpleDurableEngine, SimpleMutableTree,
+};
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
 use tokio::fs;
@@ -179,7 +184,168 @@ async fn simple_mutable_tree_keeps_cache_after_failed_commit() {
     );
 }
 
+#[test]
+fn simple_durable_policy_maps_writes_to_chunk_aligned_ranges() {
+    let policy = SimpleDurableAdmissionPolicy::new(SIMPLE_CHUNK_BYTES * 2);
+    let request = ExportRequest::Write {
+        offset: SIMPLE_CHUNK_BYTES - 2,
+        data: b"abcd".to_vec(),
+    };
+
+    assert_eq!(
+        policy.operation_for(&request).expect("admission op"),
+        AdmissionOp::Write(ByteRange::new(0, (SIMPLE_CHUNK_BYTES * 2) as u32)),
+    );
+}
+
+#[test]
+fn simple_durable_policy_clamps_final_chunk_to_export_size() {
+    let policy = SimpleDurableAdmissionPolicy::new(SIMPLE_CHUNK_BYTES + 4096);
+    let request = ExportRequest::Write {
+        offset: SIMPLE_CHUNK_BYTES + 1,
+        data: b"ab".to_vec(),
+    };
+
+    assert_eq!(
+        policy.operation_for(&request).expect("admission op"),
+        AdmissionOp::Write(ByteRange::new(SIMPLE_CHUNK_BYTES, 4096)),
+    );
+}
+
+#[test]
+fn simple_durable_policy_rejects_original_out_of_bounds_write() {
+    let policy = SimpleDurableAdmissionPolicy::new(SIMPLE_CHUNK_BYTES + 4096);
+    let request = ExportRequest::Write {
+        offset: SIMPLE_CHUNK_BYTES + 4095,
+        data: b"ab".to_vec(),
+    };
+
+    assert!(matches!(
+        policy.operation_for(&request),
+        Err(ServerError::OutOfBounds {
+            operation: "write",
+            offset,
+            length: 2,
+            size_bytes,
+        }) if offset == SIMPLE_CHUNK_BYTES + 4095
+            && size_bytes == SIMPLE_CHUNK_BYTES + 4096,
+    ));
+}
+
+#[tokio::test]
+async fn simple_durable_engine_reads_sparse_zeroes_through_runtime() {
+    let (_runtime, _catalog, _meta, export_runtime) =
+        simple_durable_runtime("disk-sparse", SIMPLE_CHUNK_BYTES + 4096).await;
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Read {
+                offset: SIMPLE_CHUNK_BYTES - 2,
+                len: 4,
+            },
+        )
+        .await,
+        ExportReply::Read { data: vec![0; 4] },
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
+async fn simple_durable_engine_writes_and_reads_across_chunks() {
+    let (_runtime, _catalog, _meta, export_runtime) =
+        simple_durable_runtime("disk-cross", SIMPLE_CHUNK_BYTES + 4096).await;
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: SIMPLE_CHUNK_BYTES - 2,
+                data: b"abcd".to_vec(),
+            },
+        )
+        .await,
+        ExportReply::Done,
+    );
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Read {
+                offset: SIMPLE_CHUNK_BYTES - 4,
+                len: 8,
+            },
+        )
+        .await,
+        ExportReply::Read {
+            data: b"\0\0abcd\0\0".to_vec(),
+        },
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
+async fn simple_durable_engine_overwrites_existing_chunk_without_new_metadata() {
+    let (_runtime, catalog, meta, export_runtime) =
+        simple_durable_runtime("disk-overwrite", SIMPLE_CHUNK_BYTES).await;
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 10,
+                data: b"abcdef".to_vec(),
+            },
+        )
+        .await,
+        ExportReply::Done,
+    );
+    let first_key = simple_chunk_key(&catalog, &meta, 0).await;
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 12,
+                data: b"ZZ".to_vec(),
+            },
+        )
+        .await,
+        ExportReply::Done,
+    );
+    assert_eq!(simple_chunk_key(&catalog, &meta, 0).await, first_key);
+    assert_eq!(
+        execute_request(&export_runtime, ExportRequest::Read { offset: 10, len: 6 },).await,
+        ExportReply::Read {
+            data: b"abZZef".to_vec(),
+        },
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
+async fn simple_durable_engine_flush_is_done() {
+    let (_runtime, _catalog, _meta, export_runtime) =
+        simple_durable_runtime("disk-flush", SIMPLE_CHUNK_BYTES).await;
+
+    assert_eq!(
+        execute_request(&export_runtime, ExportRequest::Flush).await,
+        ExportReply::Done,
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
 async fn simple_tree_fixture(name: &str) -> (TestRuntime, SQLiteExportCatalog, ExportMeta) {
+    simple_tree_fixture_with_size(name, 128 * 1024 * 1024).await
+}
+
+async fn simple_tree_fixture_with_size(
+    name: &str,
+    size_bytes: u64,
+) -> (TestRuntime, SQLiteExportCatalog, ExportMeta) {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -197,7 +363,7 @@ async fn simple_tree_fixture(name: &str) -> (TestRuntime, SQLiteExportCatalog, E
         .create_export(
             CreateExport::new(
                 ExportName::new(name).expect("export name"),
-                128 * 1024 * 1024,
+                size_bytes,
                 4096,
                 ExportEngineKind::Memory,
             )
@@ -230,4 +396,49 @@ async fn load_tree(catalog: &SQLiteExportCatalog, meta: &ExportMeta) -> SimpleMu
     SimpleMutableTree::load(Arc::new(catalog.clone()), meta)
         .await
         .expect("load simple mutable tree")
+}
+
+async fn simple_durable_runtime(
+    name: &str,
+    size_bytes: u64,
+) -> (
+    TestRuntime,
+    SQLiteExportCatalog,
+    ExportMeta,
+    ConcurrentExportRuntime,
+) {
+    let (runtime, catalog, meta) = simple_tree_fixture_with_size(name, size_bytes).await;
+    let engine = SimpleDurableEngine::load(
+        &meta,
+        LocalBlobStore::new(runtime.state_dir().join("blobs")),
+        Arc::new(catalog.clone()),
+    )
+    .await
+    .expect("simple durable engine");
+    let export_runtime = ConcurrentExportRuntime::with_capacity(meta.clone(), Arc::new(engine), 4);
+
+    (runtime, catalog, meta, export_runtime)
+}
+
+async fn execute_request(
+    export_runtime: &ConcurrentExportRuntime,
+    request: ExportRequest,
+) -> ExportReply {
+    let queue_slot = export_runtime.reserve().await.expect("reserve queue slot");
+    let (job, receiver) = ExportJob::oneshot(request, queue_slot);
+    export_runtime.submit(job).await.expect("submit request");
+    let completed = receiver.await.expect("receive completion");
+    let (result, _queue_slot) = completed.into_parts();
+    result.expect("export reply")
+}
+
+async fn simple_chunk_key(catalog: &SQLiteExportCatalog, meta: &ExportMeta, index: u64) -> BlobKey {
+    catalog
+        .load_simple_tree(meta.id())
+        .await
+        .expect("load simple tree")
+        .chunk(ChunkIndex::new(index))
+        .expect("materialized chunk")
+        .blob_key()
+        .clone()
 }

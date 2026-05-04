@@ -1,7 +1,11 @@
-use crate::{Result, ServerError};
+use crate::{
+    AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
+    ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
+    ServerError,
+};
 use nbd_control_plane::{
-    BlobKey, ChunkIndex, ExportLayoutKind, ExportMeta, NodeId, SimpleChunkRef,
-    SimpleTreeMetadataStore, SimpleTreeSnapshot,
+    BlobKey, ChunkIndex, ExportLayoutKind, ExportMeta, ExportName, NodeId, SimpleChunkRef,
+    SimpleTreeMetadataStore, SimpleTreeSnapshot, SIMPLE_CHUNK_BYTES,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,9 +16,25 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, RwLock};
 
+const SIMPLE_CHUNK_BYTES_USIZE: usize = SIMPLE_CHUNK_BYTES as usize;
+
 #[derive(Debug, Clone)]
 pub struct LocalBlobStore {
     root: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct SimpleDurableEngine {
+    name: ExportName,
+    size_bytes: u64,
+    block_size: u64,
+    blob_store: LocalBlobStore,
+    tree: SimpleMutableTree,
+}
+
+#[derive(Debug)]
+pub struct SimpleDurableAdmissionPolicy {
+    size_bytes: u64,
 }
 
 pub struct SimpleMutableTree {
@@ -29,6 +49,269 @@ struct SimpleTreeState {
     size_bytes: u64,
     root_node_id: Option<NodeId>,
     chunks: BTreeMap<ChunkIndex, SimpleChunkRef>,
+}
+
+impl SimpleDurableEngine {
+    pub async fn load(
+        meta: &ExportMeta,
+        blob_store: LocalBlobStore,
+        catalog: Arc<dyn SimpleTreeMetadataStore>,
+    ) -> Result<Self> {
+        let tree = SimpleMutableTree::load(catalog, meta).await?;
+        Self::from_loaded_tree(meta, blob_store, tree)
+    }
+
+    fn from_loaded_tree(
+        meta: &ExportMeta,
+        blob_store: LocalBlobStore,
+        tree: SimpleMutableTree,
+    ) -> Result<Self> {
+        if meta.head().layout_kind() != ExportLayoutKind::SimpleMutableTree {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "export `{}` does not have a simple mutable tree head",
+                    meta.name()
+                ),
+            });
+        }
+
+        Ok(Self {
+            name: meta.name().clone(),
+            size_bytes: meta.size_bytes(),
+            block_size: meta.block_size(),
+            blob_store,
+            tree,
+        })
+    }
+
+    pub fn name(&self) -> &ExportName {
+        &self.name
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    pub fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    fn validate_range(&self, operation: &'static str, offset: u64, length: u64) -> Result<()> {
+        let end = offset.checked_add(length).ok_or(ServerError::OutOfBounds {
+            operation,
+            offset,
+            length,
+            size_bytes: self.size_bytes,
+        })?;
+        if end > self.size_bytes {
+            return Err(ServerError::OutOfBounds {
+                operation,
+                offset,
+                length,
+                size_bytes: self.size_bytes,
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
+        self.validate_range("read", offset, u64::from(len))?;
+        let mut data = vec![0; len as usize];
+        let mut copied = 0;
+
+        while copied < data.len() {
+            let current_offset = offset + copied as u64;
+            let chunk_index = ChunkIndex::new(current_offset / SIMPLE_CHUNK_BYTES);
+            let chunk_offset = current_offset % SIMPLE_CHUNK_BYTES;
+            let chunk_available = SIMPLE_CHUNK_BYTES - chunk_offset;
+            let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
+
+            if let Some(key) = self.tree.lookup_chunk(chunk_index).await? {
+                let chunk_data = self
+                    .blob_store
+                    .read_blob(&key, chunk_offset, copy_len as u64)
+                    .await?;
+                data[copied..copied + copy_len].copy_from_slice(&chunk_data);
+            }
+
+            copied += copy_len;
+        }
+
+        Ok(data)
+    }
+
+    async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
+        self.validate_range("write", offset, data.len() as u64)?;
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let mut new_chunks = Vec::new();
+        let mut copied = 0;
+
+        while copied < data.len() {
+            let current_offset = offset + copied as u64;
+            let chunk_index = ChunkIndex::new(current_offset / SIMPLE_CHUNK_BYTES);
+            let chunk_offset = (current_offset % SIMPLE_CHUNK_BYTES) as usize;
+            let chunk_available = SIMPLE_CHUNK_BYTES_USIZE - chunk_offset;
+            let copy_len = chunk_available.min(data.len() - copied);
+
+            match self.tree.lookup_chunk(chunk_index).await? {
+                Some(key) => {
+                    let mut chunk = self
+                        .blob_store
+                        .read_blob(&key, 0, SIMPLE_CHUNK_BYTES)
+                        .await?;
+                    chunk[chunk_offset..chunk_offset + copy_len]
+                        .copy_from_slice(&data[copied..copied + copy_len]);
+                    self.blob_store.replace_blob(&key, &chunk).await?;
+                }
+                None => {
+                    let mut chunk = vec![0; SIMPLE_CHUNK_BYTES_USIZE];
+                    chunk[chunk_offset..chunk_offset + copy_len]
+                        .copy_from_slice(&data[copied..copied + copy_len]);
+                    let key = self.blob_store.create_blob(&chunk).await?;
+                    new_chunks.push(
+                        SimpleChunkRef::new(chunk_index, key, SIMPLE_CHUNK_BYTES)
+                            .map_err(ServerError::catalog)?,
+                    );
+                }
+            }
+
+            copied += copy_len;
+        }
+
+        self.tree.commit_new_chunks(new_chunks).await
+    }
+
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl SimpleDurableAdmissionPolicy {
+    pub fn new(size_bytes: u64) -> Self {
+        Self { size_bytes }
+    }
+
+    fn validate_request_range(
+        &self,
+        operation: &'static str,
+        offset: u64,
+        length: u64,
+    ) -> Result<()> {
+        let end = offset.checked_add(length).ok_or(ServerError::OutOfBounds {
+            operation,
+            offset,
+            length,
+            size_bytes: self.size_bytes,
+        })?;
+        if end > self.size_bytes {
+            return Err(ServerError::OutOfBounds {
+                operation,
+                offset,
+                length,
+                size_bytes: self.size_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    fn chunk_aligned_write(&self, offset: u64, len: u64) -> Result<ByteRange> {
+        self.validate_request_range("write", offset, len)?;
+        if len == 0 {
+            return Ok(ByteRange::new(offset, 0));
+        }
+
+        let request_end = offset + len;
+        let chunk_bytes = SIMPLE_CHUNK_BYTES;
+        let start_chunk = offset / chunk_bytes;
+        let end_chunk = (request_end - 1) / chunk_bytes;
+        let start = start_chunk
+            .checked_mul(chunk_bytes)
+            .ok_or(ServerError::OutOfBounds {
+                operation: "write",
+                offset,
+                length: len,
+                size_bytes: self.size_bytes,
+            })?;
+        let next_chunk = end_chunk.checked_add(1).ok_or(ServerError::OutOfBounds {
+            operation: "write",
+            offset,
+            length: len,
+            size_bytes: self.size_bytes,
+        })?;
+        let unclamped_end =
+            next_chunk
+                .checked_mul(chunk_bytes)
+                .ok_or(ServerError::OutOfBounds {
+                    operation: "write",
+                    offset,
+                    length: len,
+                    size_bytes: self.size_bytes,
+                })?;
+        let end = unclamped_end.min(self.size_bytes);
+        let aligned_len = end.checked_sub(start).ok_or(ServerError::OutOfBounds {
+            operation: "write",
+            offset,
+            length: len,
+            size_bytes: self.size_bytes,
+        })?;
+        let aligned_len = u32::try_from(aligned_len).map_err(|_| ServerError::OutOfBounds {
+            operation: "write",
+            offset: start,
+            length: aligned_len,
+            size_bytes: self.size_bytes,
+        })?;
+
+        Ok(ByteRange::new(start, aligned_len))
+    }
+}
+
+impl ExportAdmissionPolicy for SimpleDurableAdmissionPolicy {
+    fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp> {
+        match request {
+            ExportRequest::Read { offset, len } => {
+                Ok(AdmissionOp::Read(ByteRange::new(*offset, *len)))
+            }
+            ExportRequest::Write { offset, data } => {
+                let len = u64::try_from(data.len()).map_err(|_| ServerError::OutOfBounds {
+                    operation: "write",
+                    offset: *offset,
+                    length: u64::MAX,
+                    size_bytes: self.size_bytes,
+                })?;
+                Ok(AdmissionOp::Write(self.chunk_aligned_write(*offset, len)?))
+            }
+            ExportRequest::Flush => Ok(AdmissionOp::Flush),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExportEngine for SimpleDurableEngine {
+    fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
+        Arc::new(SimpleDurableAdmissionPolicy::new(self.size_bytes))
+    }
+
+    async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
+        // Keep the admission permit live for the full blob/tree operation.
+        let (request, _admission_permit) = request.into_parts();
+        match request {
+            ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
+                data: self.read(offset, len).await?,
+            }),
+            ExportRequest::Write { offset, data } => {
+                self.write(offset, &data).await?;
+                Ok(ExportReply::Done)
+            }
+            ExportRequest::Flush => {
+                self.flush()?;
+                Ok(ExportReply::Done)
+            }
+        }
+    }
 }
 
 impl LocalBlobStore {
