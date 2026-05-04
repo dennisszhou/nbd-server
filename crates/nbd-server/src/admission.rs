@@ -15,6 +15,18 @@ impl ByteRange {
         Self { start, len }
     }
 
+    fn start(self) -> u64 {
+        self.start
+    }
+
+    fn len(self) -> u64 {
+        u64::from(self.len)
+    }
+
+    fn checked_end(self) -> Option<u64> {
+        self.start.checked_add(self.len())
+    }
+
     fn end(self) -> u64 {
         self.start.saturating_add(u64::from(self.len))
     }
@@ -55,20 +67,23 @@ impl AdmissionTicket {
 }
 
 /// Per-export semantic admission controller.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExportAdmissionCtl {
     inner: Arc<AdmissionInner>,
 }
 
 impl ExportAdmissionCtl {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(extent_bytes: u64) -> Self {
+        Self {
+            inner: Arc::new(AdmissionInner::new(extent_bytes)),
+        }
     }
 
     pub fn register(&self, op: AdmissionOp) -> Result<AdmissionWaiter> {
         let (grant, receiver) = oneshot::channel();
         let ticket = {
             let mut state = self.inner.state()?;
+            state.validate(op)?;
             let ticket = state.next_ticket();
             state
                 .waiting
@@ -172,12 +187,23 @@ impl Drop for AdmissionPermit {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AdmissionInner {
     state: Mutex<AdmissionState>,
 }
 
 impl AdmissionInner {
+    fn new(extent_bytes: u64) -> Self {
+        Self {
+            state: Mutex::new(AdmissionState {
+                extent_bytes,
+                next_ticket: 0,
+                waiting: VecDeque::new(),
+                active: Vec::new(),
+            }),
+        }
+    }
+
     fn cancel(self: &Arc<Self>, ticket: AdmissionTicket) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -201,14 +227,40 @@ impl AdmissionInner {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AdmissionState {
+    extent_bytes: u64,
     next_ticket: u64,
     waiting: VecDeque<WaitingAdmission>,
     active: Vec<ActiveAdmission>,
 }
 
 impl AdmissionState {
+    fn validate(&self, op: AdmissionOp) -> Result<()> {
+        let (operation, range) = match op {
+            AdmissionOp::Read(range) => ("read", range),
+            AdmissionOp::Write(range) => ("write", range),
+            AdmissionOp::Flush => return Ok(()),
+        };
+
+        let end = range.checked_end().ok_or(ServerError::OutOfBounds {
+            operation,
+            offset: range.start(),
+            length: range.len(),
+            size_bytes: self.extent_bytes,
+        })?;
+        if end > self.extent_bytes {
+            return Err(ServerError::OutOfBounds {
+                operation,
+                offset: range.start(),
+                length: range.len(),
+                size_bytes: self.extent_bytes,
+            });
+        }
+
+        Ok(())
+    }
+
     fn next_ticket(&mut self) -> AdmissionTicket {
         let ticket = AdmissionTicket(self.next_ticket);
         self.next_ticket += 1;

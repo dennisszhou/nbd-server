@@ -1,8 +1,10 @@
-use nbd_server::{AdmissionOp, ByteRange, ExportAdmissionCtl};
+use nbd_server::{AdmissionOp, ByteRange, ExportAdmissionCtl, ServerError};
+
+const EXTENT_BYTES: u64 = 8192;
 
 #[tokio::test]
 async fn admission_orders_later_read_behind_waiting_write() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
     let read_1 = admission
         .register(read(0, 4096))
         .expect("register first read")
@@ -33,7 +35,7 @@ async fn admission_orders_later_read_behind_waiting_write() {
 
 #[tokio::test]
 async fn admission_allows_non_overlapping_work() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
     let read_permit = admission
         .register(read(0, 4096))
         .expect("register read")
@@ -53,7 +55,7 @@ async fn admission_allows_non_overlapping_work() {
 
 #[tokio::test]
 async fn admission_serializes_overlapping_writes() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
     let write_1 = admission
         .register(write(0, 4096))
         .expect("register first write")
@@ -75,7 +77,7 @@ async fn admission_serializes_overlapping_writes() {
 
 #[tokio::test]
 async fn admission_flush_waits_and_blocks_later_work() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
     let read_permit = admission
         .register(read(0, 4096))
         .expect("register read")
@@ -108,7 +110,7 @@ async fn admission_flush_waits_and_blocks_later_work() {
 
 #[tokio::test]
 async fn admission_cancelled_waiter_does_not_block_later_work() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
     let write_1 = admission
         .register(write(0, 4096))
         .expect("register active write")
@@ -134,7 +136,7 @@ async fn admission_cancelled_waiter_does_not_block_later_work() {
 
 #[tokio::test]
 async fn admission_dropping_granted_waiter_releases_active_permit() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
     let granted_read = admission
         .register(read(0, 4096))
         .expect("register granted read");
@@ -151,7 +153,7 @@ async fn admission_dropping_granted_waiter_releases_active_permit() {
 
 #[tokio::test]
 async fn admission_has_no_lost_wake_between_register_and_release() {
-    let admission = ExportAdmissionCtl::new();
+    let admission = admission();
 
     let write_before_register = admission
         .register(write(0, 4096))
@@ -185,6 +187,56 @@ async fn admission_has_no_lost_wake_between_register_and_release() {
         .await
         .expect("ready read permit");
     drop(read_after_release);
+}
+
+#[tokio::test]
+async fn admission_rejects_out_of_bounds_ranges_without_tickets() {
+    let admission = admission();
+    let first = admission
+        .register(read(0, 4096))
+        .expect("register first read");
+    assert_eq!(first.ticket().as_u64(), 0);
+
+    assert!(matches!(
+        admission.register(read(EXTENT_BYTES - 1, 2)),
+        Err(ServerError::OutOfBounds {
+            operation: "read",
+            offset,
+            length: 2,
+            size_bytes: EXTENT_BYTES,
+        }) if offset == EXTENT_BYTES - 1,
+    ));
+    assert!(matches!(
+        admission.register(write(u64::MAX, 1)),
+        Err(ServerError::OutOfBounds {
+            operation: "write",
+            offset: u64::MAX,
+            length: 1,
+            size_bytes: EXTENT_BYTES,
+        }),
+    ));
+
+    let second = admission
+        .register(write(4096, 4096))
+        .expect("register in-bounds write");
+    assert_eq!(
+        second.ticket().as_u64(),
+        1,
+        "rejected admissions should not consume tickets",
+    );
+
+    let first_permit = first.wait().await.expect("first permit");
+    let second_task = tokio::spawn(async move { second.wait().await.expect("second permit") });
+    tokio::task::yield_now().await;
+    assert!(second_task.is_finished());
+
+    drop(first_permit);
+    let second_permit = second_task.await.expect("second task");
+    drop(second_permit);
+}
+
+fn admission() -> ExportAdmissionCtl {
+    ExportAdmissionCtl::new(EXTENT_BYTES)
 }
 
 fn read(start: u64, len: u32) -> AdmissionOp {
