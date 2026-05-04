@@ -54,21 +54,20 @@ impl SQLiteExportCatalog {
             SELECT
               e.id,
               e.name,
-              g.size_bytes,
               e.block_size,
               e.engine_kind,
               e.state,
               e.created_at,
               e.updated_at,
               e.deleted_at,
-              g.root_node_id,
-              g.checkpoint_wal_seq
+              h.layout_kind,
+              h.root_node_id,
+              h.size_bytes,
+              h.checkpoint_wal_seq
             FROM exports e
-            JOIN export_generations g
-              ON g.export_id = e.id
+            JOIN export_heads h
+              ON h.export_id = e.id
             WHERE e.name = ?
-            ORDER BY g.generation DESC
-            LIMIT 1
             "#,
         )
         .bind(name.as_str())
@@ -131,6 +130,23 @@ impl ExportCatalog for SQLiteExportCatalog {
         .bind(generation_id)
         .bind(export_id.as_str())
         .bind(0_i64)
+        .bind(size_bytes)
+        .bind(u64_to_i64("checkpoint_wal_seq", checkpoint_wal_seq.get())?)
+        .bind(now.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO export_heads (
+              export_id, layout_kind, root_node_id, size_bytes,
+              checkpoint_wal_seq, updated_at
+            )
+            VALUES (?, 'memory_empty', NULL, ?, ?, ?)
+            "#,
+        )
+        .bind(export_id.as_str())
         .bind(size_bytes)
         .bind(u64_to_i64("checkpoint_wal_seq", checkpoint_wal_seq.get())?)
         .bind(now.as_str())
@@ -209,23 +225,19 @@ impl ExportCatalog for SQLiteExportCatalog {
             SELECT
               e.id,
               e.name,
-              g.size_bytes,
               e.block_size,
               e.engine_kind,
               e.state,
               e.created_at,
               e.updated_at,
               e.deleted_at,
-              g.root_node_id,
-              g.checkpoint_wal_seq
+              h.layout_kind,
+              h.root_node_id,
+              h.size_bytes,
+              h.checkpoint_wal_seq
             FROM exports e
-            JOIN export_generations g
-              ON g.export_id = e.id
-             AND g.generation = (
-              SELECT MAX(g2.generation)
-              FROM export_generations g2
-              WHERE g2.export_id = e.id
-            )
+            JOIN export_heads h
+              ON h.export_id = e.id
             WHERE (? = 1 OR e.state != 'deleted')
             ORDER BY e.name ASC
             "#,
@@ -242,6 +254,7 @@ impl ExportCatalog for SQLiteExportCatalog {
 fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
     let state: String = row.try_get("state").map_err(map_sqlx_error)?;
     let engine_kind: String = row.try_get("engine_kind").map_err(map_sqlx_error)?;
+    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
     let root_node_id: Option<String> = row.try_get("root_node_id").map_err(map_sqlx_error)?;
     let deleted_at: Option<String> = row.try_get("deleted_at").map_err(map_sqlx_error)?;
 
@@ -255,7 +268,7 @@ fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
         engine_kind.parse::<ExportEngineKind>()?,
         state.parse()?,
         ExportHead::new(
-            ExportLayoutKind::MemoryEmpty,
+            layout_kind.parse::<ExportLayoutKind>()?,
             root_node_id.map(NodeId::new).transpose()?,
             i64_to_u64(
                 "size_bytes",

@@ -7,8 +7,12 @@ use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-const MIGRATION: &str =
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql");
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
+    include_str!(
+        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
+    ),
+];
 
 #[tokio::test]
 async fn registry_rejects_second_unique_owner_until_close() {
@@ -244,10 +248,12 @@ async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
         .await
         .expect("connect catalog");
 
-    sqlx::raw_sql(MIGRATION)
-        .execute(catalog.pool())
-        .await
-        .expect("apply migration");
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration)
+            .execute(catalog.pool())
+            .await
+            .expect("apply migration");
+    }
 
     catalog
 }

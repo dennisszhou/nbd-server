@@ -5,8 +5,12 @@ use nbd_control_plane::{
 };
 use nbd_test_support::TestRuntime;
 
-const MIGRATION: &str =
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql");
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
+    include_str!(
+        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
+    ),
+];
 
 #[tokio::test]
 async fn create_export_initializes_memory_head() {
@@ -52,7 +56,7 @@ async fn duplicate_create_fails_clearly() {
 }
 
 #[tokio::test]
-async fn latest_generation_still_feeds_export_head_before_cutover() {
+async fn export_head_owns_serving_size() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     let created = catalog
@@ -74,13 +78,25 @@ async fn latest_generation_still_feeds_export_head_before_cutover() {
     .await
     .expect("insert newer generation");
 
+    sqlx::query(
+        r#"
+        UPDATE export_heads
+        SET size_bytes = 3072
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(created.id().as_str())
+    .execute(catalog.pool())
+    .await
+    .expect("update export head");
+
     let inspected = catalog
         .inspect_export(InspectExport::new(export_name("disk-a")))
         .await
         .expect("inspect export");
 
-    assert_eq!(inspected.size_bytes(), 2048);
-    assert_eq!(inspected.head().size_bytes(), 2048);
+    assert_eq!(inspected.size_bytes(), 3072);
+    assert_eq!(inspected.head().size_bytes(), 3072);
     assert_eq!(
         inspected.head().layout_kind(),
         ExportLayoutKind::MemoryEmpty
@@ -156,7 +172,7 @@ async fn list_exports_orders_active_exports_by_name() {
 }
 
 #[tokio::test]
-async fn migration_rejects_zero_sized_exports() {
+async fn migration_rejects_zero_sized_heads() {
     let (_runtime, catalog) = migrated_catalog().await;
 
     sqlx::query(
@@ -173,18 +189,18 @@ async fn migration_rejects_zero_sized_exports() {
 
     let error = sqlx::query(
         r#"
-        INSERT INTO export_generations (
-          id, export_id, generation, size_bytes, root_node_id,
-          checkpoint_wal_seq, created_at
+        INSERT INTO export_heads (
+          export_id, layout_kind, root_node_id, size_bytes,
+          checkpoint_wal_seq, updated_at
         )
         VALUES (
-          'generation-zero', 'export-zero', 0, 0, NULL, 0, 'now'
+          'export-zero', 'memory_empty', NULL, 0, 0, 'now'
         )
         "#,
     )
     .execute(catalog.pool())
     .await
-    .expect_err("zero-sized export should violate migration constraints");
+    .expect_err("zero-sized head should violate migration constraints");
 
     assert!(error.to_string().contains("CHECK constraint failed"));
 }
@@ -196,10 +212,12 @@ async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
         .await
         .expect("connect catalog");
 
-    sqlx::raw_sql(MIGRATION)
-        .execute(catalog.pool())
-        .await
-        .expect("apply migration");
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration)
+            .execute(catalog.pool())
+            .await
+            .expect("apply migration");
+    }
 
     (runtime, catalog)
 }

@@ -3,8 +3,12 @@ use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::process::{Command, Output};
 
-const MIGRATION: &str =
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql");
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
+    include_str!(
+        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
+    ),
+];
 
 #[tokio::test]
 async fn cli_creates_inspects_lists_and_deletes_exports() {
@@ -79,10 +83,12 @@ async fn migrate_catalog(runtime: &TestRuntime) {
         .await
         .expect("connect catalog");
 
-    sqlx::raw_sql(MIGRATION)
-        .execute(catalog.pool())
-        .await
-        .expect("apply migration");
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration)
+            .execute(catalog.pool())
+            .await
+            .expect("apply migration");
+    }
 }
 
 fn nbdcli(runtime: &TestRuntime, args: &[&str]) -> Output {

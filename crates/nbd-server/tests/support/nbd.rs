@@ -24,8 +24,12 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const MIGRATION: &str =
-    include_str!("../../../../prisma/migrations/20260501000000_init/migration.sql");
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../../prisma/migrations/20260501000000_init/migration.sql"),
+    include_str!(
+        "../../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
+    ),
+];
 
 pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -325,7 +329,9 @@ async fn migrated_catalog(runtime: &TestRuntime) -> TestResult<SQLiteExportCatal
     let url = CatalogUrl::parse(runtime.catalog_url())?;
     let catalog = SQLiteExportCatalog::connect(&url).await?;
 
-    sqlx::raw_sql(MIGRATION).execute(catalog.pool()).await?;
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration).execute(catalog.pool()).await?;
+    }
 
     Ok(catalog)
 }
