@@ -1,13 +1,34 @@
 use crate::{Result, ServerError};
-use nbd_control_plane::BlobKey;
+use nbd_control_plane::{
+    BlobKey, ChunkIndex, ExportLayoutKind, ExportMeta, NodeId, SimpleChunkRef,
+    SimpleTreeMetadataStore, SimpleTreeSnapshot,
+};
+use std::collections::BTreeMap;
+use std::fmt;
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct LocalBlobStore {
     root: PathBuf,
+}
+
+pub struct SimpleMutableTree {
+    catalog: Arc<dyn SimpleTreeMetadataStore>,
+    commit_lock: Mutex<()>,
+    state: RwLock<SimpleTreeState>,
+}
+
+#[derive(Debug, Clone)]
+struct SimpleTreeState {
+    export_id: nbd_control_plane::ExportId,
+    size_bytes: u64,
+    root_node_id: Option<NodeId>,
+    chunks: BTreeMap<ChunkIndex, SimpleChunkRef>,
 }
 
 impl LocalBlobStore {
@@ -101,6 +122,111 @@ impl LocalBlobStore {
         fs::create_dir_all(&self.root)
             .await
             .map_err(|source| ServerError::io("create blob directory", source))
+    }
+}
+
+impl SimpleMutableTree {
+    pub async fn load(
+        catalog: Arc<dyn SimpleTreeMetadataStore>,
+        meta: &ExportMeta,
+    ) -> Result<Self> {
+        if meta.head().layout_kind() != ExportLayoutKind::SimpleMutableTree {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "export `{}` does not have a simple mutable tree head",
+                    meta.name()
+                ),
+            });
+        }
+
+        let snapshot = catalog
+            .load_simple_tree(meta.id())
+            .await
+            .map_err(ServerError::catalog)?;
+        if snapshot.export_id() != meta.id() {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "simple tree export id {} does not match export {}",
+                    snapshot.export_id(),
+                    meta.id()
+                ),
+            });
+        }
+        if snapshot.size_bytes() != meta.size_bytes() {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "simple tree size {} does not match export size {}",
+                    snapshot.size_bytes(),
+                    meta.size_bytes()
+                ),
+            });
+        }
+
+        Ok(Self {
+            catalog,
+            commit_lock: Mutex::new(()),
+            state: RwLock::new(SimpleTreeState::from_snapshot(&snapshot)),
+        })
+    }
+
+    pub async fn snapshot(&self) -> Result<SimpleTreeSnapshot> {
+        self.state
+            .read()
+            .await
+            .to_snapshot()
+            .map_err(ServerError::catalog)
+    }
+
+    pub async fn lookup_chunk(&self, chunk_index: ChunkIndex) -> Result<Option<BlobKey>> {
+        Ok(self
+            .state
+            .read()
+            .await
+            .chunks
+            .get(&chunk_index)
+            .map(|chunk| chunk.blob_key().clone()))
+    }
+
+    pub async fn commit_new_chunks(&self, chunks: Vec<SimpleChunkRef>) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+
+        let _commit = self.commit_lock.lock().await;
+        let export_id = self.state.read().await.export_id.clone();
+        let snapshot = self
+            .catalog
+            .commit_simple_chunks(&export_id, chunks)
+            .await
+            .map_err(ServerError::catalog)?;
+        *self.state.write().await = SimpleTreeState::from_snapshot(&snapshot);
+        Ok(())
+    }
+}
+
+impl fmt::Debug for SimpleMutableTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SimpleMutableTree").finish_non_exhaustive()
+    }
+}
+
+impl SimpleTreeState {
+    fn from_snapshot(snapshot: &SimpleTreeSnapshot) -> Self {
+        Self {
+            export_id: snapshot.export_id().clone(),
+            size_bytes: snapshot.size_bytes(),
+            root_node_id: snapshot.root_node_id().cloned(),
+            chunks: snapshot.chunks().clone(),
+        }
+    }
+
+    fn to_snapshot(&self) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
+        SimpleTreeSnapshot::new(
+            self.export_id.clone(),
+            self.size_bytes,
+            self.root_node_id.clone(),
+            self.chunks.clone(),
+        )
     }
 }
 
