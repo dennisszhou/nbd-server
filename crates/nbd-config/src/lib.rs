@@ -67,6 +67,7 @@ pub struct ServerConnectionConfig {
 pub enum ExportRuntimeKind {
     #[default]
     Serial,
+    Concurrent,
 }
 
 impl Default for ServerConfig {

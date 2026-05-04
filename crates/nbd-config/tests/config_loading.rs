@@ -6,10 +6,12 @@ use nbd_config::{
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[test]
 fn explicit_config_loads_from_requested_path() {
@@ -134,6 +136,51 @@ fn explicit_server_config_loads_runtime_choice() {
 }
 
 #[test]
+fn explicit_server_config_loads_concurrent_runtime_choice() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"concurrent\"\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
+    assert_eq!(
+        config.server.export_queue_depth.get(),
+        DEFAULT_EXPORT_QUEUE_DEPTH
+    );
+    assert_eq!(
+        config.server.connection.reply_queue_capacity.get(),
+        DEFAULT_REPLY_QUEUE_CAPACITY,
+    );
+}
+
+#[test]
+fn explicit_server_config_rejects_unknown_runtime_choice() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"parallel\"\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let error = NbdConfig::load(ConfigSource::ExplicitPath(config_path))
+        .expect_err("unknown runtime choice should fail");
+
+    assert!(error.to_string().contains("failed to parse config"));
+}
+
+#[test]
 fn explicit_server_config_loads_queue_sizing() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
@@ -215,7 +262,11 @@ impl TempRoot {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = env::temp_dir().join(format!("nbd-config-test-{}-{unique}", std::process::id()));
+        let counter = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "nbd-config-test-{}-{unique}-{counter}",
+            std::process::id()
+        ));
 
         fs::create_dir_all(&path).unwrap();
         Self { path }

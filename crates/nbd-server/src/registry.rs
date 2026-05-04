@@ -1,6 +1,6 @@
 use crate::{
-    ExportEngineHandle, ExportRuntimeHandle, MemoryExportEngine, Result, SerialExportRuntime,
-    ServerError,
+    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, MemoryExportEngine, Result,
+    SerialExportRuntime, ServerError,
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{ExportCatalog, ExportEngineKind, ExportName};
@@ -141,6 +141,11 @@ impl LocalExportRegistry {
         };
         let runtime: ExportRuntimeHandle = match self.config.export_runtime {
             ExportRuntimeKind::Serial => Arc::new(SerialExportRuntime::with_capacity(
+                meta,
+                engine,
+                self.config.export_queue_depth.get(),
+            )),
+            ExportRuntimeKind::Concurrent => Arc::new(ConcurrentExportRuntime::with_capacity(
                 meta,
                 engine,
                 self.config.export_queue_depth.get(),

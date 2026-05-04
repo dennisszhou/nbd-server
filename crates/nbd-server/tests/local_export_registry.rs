@@ -1,4 +1,4 @@
-use nbd_config::ServerConfig;
+use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
 };
@@ -116,6 +116,91 @@ async fn registry_applies_configured_export_queue_depth() {
         .close(&export_name("disk-a"), &owner)
         .await
         .expect("close export");
+}
+
+#[tokio::test]
+async fn registry_can_open_concurrent_runtime_from_config() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(create_export("disk-a", 4096, 4096))
+        .await
+        .expect("create export");
+    let config = ServerConfig {
+        export_runtime: ExportRuntimeKind::Concurrent,
+        ..ServerConfig::default()
+    };
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let owner = ExportOwner::unique_connection();
+
+    let export_runtime = registry
+        .open(export_name("disk-a"), owner)
+        .await
+        .expect("open concurrent runtime");
+    let queue_slot = export_runtime
+        .reserve()
+        .await
+        .expect("reserve from concurrent runtime");
+    let (job, receiver) =
+        nbd_server::ExportJob::oneshot(nbd_server::ExportRequest::Flush, queue_slot);
+    export_runtime.submit(job).await.expect("submit flush");
+    let completed = receiver.await.expect("runtime completion");
+    let (result, _queue_slot) = completed.into_parts();
+    assert_eq!(result.expect("flush reply"), nbd_server::ExportReply::Done);
+
+    registry
+        .close(&export_name("disk-a"), &owner)
+        .await
+        .expect("close concurrent runtime");
+    assert!(matches!(
+        export_runtime.reserve().await,
+        Err(ServerError::RuntimeClosed { resource }) if resource == "concurrent export runtime",
+    ));
+}
+
+#[tokio::test]
+async fn registry_shares_active_runtime_for_same_owner() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(create_export("disk-a", 4096, 4096))
+        .await
+        .expect("create export");
+    let config = ServerConfig {
+        export_runtime: ExportRuntimeKind::Concurrent,
+        ..ServerConfig::default()
+    };
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let owner = ExportOwner::unique_connection();
+
+    let first_runtime = registry
+        .open(export_name("disk-a"), owner)
+        .await
+        .expect("open first connection");
+    let second_runtime = registry
+        .open(export_name("disk-a"), owner)
+        .await
+        .expect("open same owner connection");
+    assert!(Arc::ptr_eq(&first_runtime, &second_runtime));
+
+    registry
+        .close(&export_name("disk-a"), &owner)
+        .await
+        .expect("close first connection");
+    let queue_slot = second_runtime
+        .reserve()
+        .await
+        .expect("runtime remains open after one same-owner close");
+    drop(queue_slot);
+
+    registry
+        .close(&export_name("disk-a"), &owner)
+        .await
+        .expect("close second connection");
+    assert!(matches!(
+        second_runtime.reserve().await,
+        Err(ServerError::RuntimeClosed { resource }) if resource == "concurrent export runtime",
+    ));
 }
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
