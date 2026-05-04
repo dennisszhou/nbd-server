@@ -13,6 +13,7 @@ pub mod memory;
 pub mod registry;
 pub mod runtime;
 pub mod server;
+pub mod simple_durable;
 
 pub use admission::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
@@ -30,3 +31,4 @@ pub use runtime::{
     SerialExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY,
 };
 pub use server::NbdServer;
+pub use simple_durable::LocalBlobStore;
