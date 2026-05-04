@@ -171,7 +171,7 @@ Engines that can access mutable export storage should execute through an
 admitted request capability rather than a bare request value:
 
 ```rust
-trait ExportAdmissionProfile {
+trait ExportAdmissionPolicy {
     fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp>;
 }
 
@@ -181,9 +181,9 @@ struct AdmittedExportRequest {
 }
 ```
 
-`ExportAdmissionProfile` maps an export request to the storage-touch operation
+`ExportAdmissionPolicy` maps an export request to the storage-touch operation
 that admission must protect. Memory, file-backed, S3-backed, WAL-aware, and
-resize-aware engines can use different profiles without moving backend
+resize-aware engines can use different policies without moving backend
 geometry into connection code.
 
 The admitted request is not the scheduler. It is the type-level proof that an
@@ -203,7 +203,7 @@ capability so storage code does not need a serial-only bypass.
 - Flush is an export-wide barrier in the first implementation.
 - Admission tickets are volatile and are not WAL sequence numbers.
 - Admission does not perform WAL append, read-view apply, or storage I/O.
-- Admission operation shape is derived by the active admission profile, not by
+- Admission operation shape is derived by the active admission policy, not by
   socket protocol code.
 - Mutable engine storage is reachable only through an admitted request
   capability once unsafe or lock-free storage exists.

@@ -530,8 +530,8 @@ where
 mod tests {
     use super::*;
     use crate::{
-        AdmittedExportRequest, ExportAdmissionProfileHandle, ExportEngine, ExportRuntime,
-        MemoryAdmissionProfile, SerialExportRuntime,
+        AdmittedExportRequest, ExportAdmissionPolicyHandle, ExportEngine, ExportRuntime,
+        MemoryAdmissionPolicy, SerialExportRuntime,
     };
     use nbd_control_plane::{
         ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
@@ -846,8 +846,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ExportEngine for NoopEngine {
-        fn admission_profile(&self) -> ExportAdmissionProfileHandle {
-            Arc::new(MemoryAdmissionProfile::new(4096))
+        fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
+            Arc::new(MemoryAdmissionPolicy::new(4096))
         }
 
         async fn execute_admitted(&self, _request: AdmittedExportRequest) -> ExportResult {

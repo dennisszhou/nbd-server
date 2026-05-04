@@ -1,5 +1,5 @@
 use crate::{
-    AdmissionWaiter, AdmittedExportRequest, ExportAdmissionCtl, ExportAdmissionProfileHandle,
+    AdmissionWaiter, AdmittedExportRequest, ExportAdmissionCtl, ExportAdmissionPolicyHandle,
     ExportCompletion, ExportEngineHandle, ExportJob, ExportRequest, ExportResult, Result,
     ServerError,
 };
@@ -45,7 +45,7 @@ pub struct ConcurrentExportRuntime {
     meta: ExportMeta,
     engine: ExportEngineHandle,
     admission: ExportAdmissionCtl,
-    admission_profile: ExportAdmissionProfileHandle,
+    admission_policy: ExportAdmissionPolicyHandle,
     queue_depth: Arc<Semaphore>,
     lifecycle: Arc<ConcurrentRuntimeLifecycle>,
 }
@@ -104,7 +104,7 @@ impl SerialExportRuntime {
 
     pub fn with_capacity(meta: ExportMeta, engine: ExportEngineHandle, capacity: usize) -> Self {
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
-        let admission_profile = engine.admission_profile();
+        let admission_policy = engine.admission_policy();
         let queue_depth = Arc::new(Semaphore::new(capacity));
         let lifecycle = Arc::new(SerialRuntimeLifecycle {
             state: Mutex::new(SerialRuntimeState {
@@ -120,7 +120,7 @@ impl SerialExportRuntime {
             while let Some(job) = receiver.recv().await {
                 execute_admitted_job(
                     engine.clone(),
-                    admission_profile.clone(),
+                    admission_policy.clone(),
                     admission.clone(),
                     job,
                 )
@@ -145,12 +145,12 @@ impl ConcurrentExportRuntime {
 
     pub fn with_capacity(meta: ExportMeta, engine: ExportEngineHandle, capacity: usize) -> Self {
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
-        let admission_profile = engine.admission_profile();
+        let admission_policy = engine.admission_policy();
         Self {
             meta,
             engine,
             admission,
-            admission_profile,
+            admission_policy,
             queue_depth: Arc::new(Semaphore::new(capacity)),
             lifecycle: Arc::new(ConcurrentRuntimeLifecycle {
                 state: Mutex::new(ConcurrentRuntimeState {
@@ -165,23 +165,23 @@ impl ConcurrentExportRuntime {
 
 async fn execute_admitted_job(
     engine: ExportEngineHandle,
-    admission_profile: ExportAdmissionProfileHandle,
+    admission_policy: ExportAdmissionPolicyHandle,
     admission: ExportAdmissionCtl,
     job: ExportJob,
 ) {
-    match prepare_admitted_job(admission_profile, admission, job) {
+    match prepare_admitted_job(admission_policy, admission, job) {
         PreparedExportJob::Registered(job) => execute_registered_job(engine, job).await,
         PreparedExportJob::Rejected(job) => complete_rejected_job(job).await,
     }
 }
 
 fn prepare_admitted_job(
-    admission_profile: ExportAdmissionProfileHandle,
+    admission_policy: ExportAdmissionPolicyHandle,
     admission: ExportAdmissionCtl,
     job: ExportJob,
 ) -> PreparedExportJob {
     let (request, completion, queue_slot) = job.into_parts();
-    let waiter = match admission_profile
+    let waiter = match admission_policy
         .operation_for(&request)
         .and_then(|op| admission.register(op))
     {
@@ -441,7 +441,7 @@ impl ExportRuntime for ConcurrentExportRuntime {
     async fn submit(&self, job: ExportJob) -> Result<()> {
         let active_job = self.lifecycle.begin_submit()?;
         let prepared =
-            prepare_admitted_job(self.admission_profile.clone(), self.admission.clone(), job);
+            prepare_admitted_job(self.admission_policy.clone(), self.admission.clone(), job);
         let engine = self.engine.clone();
         tokio::spawn(async move {
             match prepared {

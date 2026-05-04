@@ -2,8 +2,8 @@ use nbd_control_plane::{
     ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
 };
 use nbd_server::{
-    AdmittedExportRequest, ConcurrentExportRuntime, ExportAdmissionProfileHandle, ExportEngine,
-    ExportJob, ExportReply, ExportRequest, ExportResult, ExportRuntime, MemoryAdmissionProfile,
+    AdmittedExportRequest, ConcurrentExportRuntime, ExportAdmissionPolicyHandle, ExportEngine,
+    ExportJob, ExportReply, ExportRequest, ExportResult, ExportRuntime, MemoryAdmissionPolicy,
     MemoryExportEngine, SerialExportRuntime, ServerError,
 };
 use std::collections::VecDeque;
@@ -334,8 +334,8 @@ impl BlockingEngine {
 
 #[async_trait::async_trait]
 impl ExportEngine for BlockingEngine {
-    fn admission_profile(&self) -> ExportAdmissionProfileHandle {
-        Arc::new(MemoryAdmissionProfile::new(4096))
+    fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
+        Arc::new(MemoryAdmissionPolicy::new(4096))
     }
 
     async fn execute_admitted(&self, _request: AdmittedExportRequest) -> ExportResult {
@@ -383,8 +383,8 @@ impl GatedEngine {
 
 #[async_trait::async_trait]
 impl ExportEngine for GatedEngine {
-    fn admission_profile(&self) -> ExportAdmissionProfileHandle {
-        Arc::new(MemoryAdmissionProfile::new(self.extent_bytes))
+    fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
+        Arc::new(MemoryAdmissionPolicy::new(self.extent_bytes))
     }
 
     async fn execute_admitted(&self, _request: AdmittedExportRequest) -> ExportResult {

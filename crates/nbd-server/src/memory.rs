@@ -1,6 +1,6 @@
 use crate::{
-    AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionProfile,
-    ExportAdmissionProfileHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
+    AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
+    ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
 };
 use nbd_control_plane::{ExportMeta, ExportName};
@@ -29,17 +29,17 @@ struct MemoryStorage {
 unsafe impl Sync for MemoryStorage {}
 
 #[derive(Debug)]
-pub struct MemoryAdmissionProfile {
+pub struct MemoryAdmissionPolicy {
     size_bytes: u64,
 }
 
-impl MemoryAdmissionProfile {
+impl MemoryAdmissionPolicy {
     pub fn new(size_bytes: u64) -> Self {
         Self { size_bytes }
     }
 }
 
-impl ExportAdmissionProfile for MemoryAdmissionProfile {
+impl ExportAdmissionPolicy for MemoryAdmissionPolicy {
     fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp> {
         match request {
             ExportRequest::Read { offset, len } => {
@@ -176,8 +176,8 @@ impl fmt::Debug for MemoryStorage {
 
 #[async_trait::async_trait]
 impl ExportEngine for MemoryExportEngine {
-    fn admission_profile(&self) -> ExportAdmissionProfileHandle {
-        Arc::new(MemoryAdmissionProfile::new(self.size_bytes))
+    fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
+        Arc::new(MemoryAdmissionPolicy::new(self.size_bytes))
     }
 
     async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
@@ -211,7 +211,7 @@ mod tests {
         let meta = export_meta("disk-a", 4096);
         let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
-        let profile = engine.admission_profile();
+        let policy = engine.admission_policy();
 
         let left_request = ExportRequest::Write {
             offset: 0,
@@ -223,7 +223,7 @@ mod tests {
         };
         let left_permit = admission
             .register(
-                profile
+                policy
                     .operation_for(&left_request)
                     .expect("left admission op"),
             )
@@ -233,7 +233,7 @@ mod tests {
             .expect("left permit");
         let right_permit = admission
             .register(
-                profile
+                policy
                     .operation_for(&right_request)
                     .expect("right admission op"),
             )
@@ -267,7 +267,7 @@ mod tests {
         let read_request = ExportRequest::Read { offset: 0, len: 8 };
         let read_permit = admission
             .register(
-                profile
+                policy
                     .operation_for(&read_request)
                     .expect("read admission op"),
             )
@@ -287,11 +287,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_profile_blocks_overlapping_requests_in_admission() {
+    async fn memory_policy_blocks_overlapping_requests_in_admission() {
         let meta = export_meta("disk-a", 4096);
         let engine = MemoryExportEngine::new(&meta).expect("memory export");
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
-        let profile = engine.admission_profile();
+        let policy = engine.admission_policy();
 
         let write_request = ExportRequest::Write {
             offset: 0,
@@ -299,7 +299,7 @@ mod tests {
         };
         let write_permit = admission
             .register(
-                profile
+                policy
                     .operation_for(&write_request)
                     .expect("write admission op"),
             )
@@ -310,7 +310,7 @@ mod tests {
         let read_request = ExportRequest::Read { offset: 1, len: 2 };
         let read_waiter = admission
             .register(
-                profile
+                policy
                     .operation_for(&read_request)
                     .expect("read admission op"),
             )

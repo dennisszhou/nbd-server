@@ -25,11 +25,11 @@ pub enum ExportReply {
 pub type ExportResult = Result<ExportReply>;
 
 /// Backing-store-specific mapping from export requests to admission operations.
-pub trait ExportAdmissionProfile: Send + Sync {
+pub trait ExportAdmissionPolicy: Send + Sync {
     fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp>;
 }
 
-pub type ExportAdmissionProfileHandle = Arc<dyn ExportAdmissionProfile>;
+pub type ExportAdmissionPolicyHandle = Arc<dyn ExportAdmissionPolicy>;
 
 /// Export request bundled with the admission permit that authorizes it.
 #[derive(Debug)]
@@ -54,7 +54,7 @@ impl AdmittedExportRequest {
 /// Data behavior for one active export.
 #[async_trait::async_trait]
 pub trait ExportEngine: Send + Sync {
-    fn admission_profile(&self) -> ExportAdmissionProfileHandle;
+    fn admission_policy(&self) -> ExportAdmissionPolicyHandle;
 
     async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult;
 }

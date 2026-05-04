@@ -19,11 +19,11 @@ pub use admission::{
 };
 pub use error::{Result, ServerError};
 pub use export::{
-    AdmittedExportRequest, CompletedExport, ExportAdmissionProfile, ExportAdmissionProfileHandle,
+    AdmittedExportRequest, CompletedExport, ExportAdmissionPolicy, ExportAdmissionPolicyHandle,
     ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob, ExportReply, ExportRequest,
     ExportResult,
 };
-pub use memory::{MemoryAdmissionProfile, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
+pub use memory::{MemoryAdmissionPolicy, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
 pub use registry::{ExportOwner, LocalExportRegistry};
 pub use runtime::{
     ConcurrentExportRuntime, ExportQueueSlot, ExportRuntime, ExportRuntimeHandle,
