@@ -5,6 +5,7 @@ use crate::{
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{ExportCatalog, ExportEngineKind, ExportName};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +31,7 @@ pub struct ExportOwnerId(u64);
 pub struct LocalExportRegistry {
     catalog: Arc<dyn ExportCatalog>,
     config: ServerConfig,
+    blob_dir: PathBuf,
     active: Mutex<HashMap<ExportName, ActiveExportState>>,
 }
 
@@ -46,12 +48,21 @@ struct ActiveExport {
 }
 
 impl LocalExportRegistry {
-    pub fn new(catalog: Arc<dyn ExportCatalog>, config: ServerConfig) -> Self {
+    pub fn new(
+        catalog: Arc<dyn ExportCatalog>,
+        config: ServerConfig,
+        blob_dir: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             catalog,
             config,
+            blob_dir: blob_dir.into(),
             active: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn blob_dir(&self) -> &Path {
+        &self.blob_dir
     }
 
     pub async fn open(&self, name: ExportName, owner: ExportOwner) -> Result<ExportRuntimeHandle> {

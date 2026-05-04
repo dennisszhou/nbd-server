@@ -5,6 +5,7 @@ use nbd_control_plane::{
 use nbd_server::{ExportOwner, LocalExportRegistry, ServerError, MAX_MEMORY_EXPORT_BYTES};
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const MIGRATIONS: &[&str] = &[
@@ -22,7 +23,12 @@ async fn registry_rejects_second_unique_owner_until_close() {
         .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create export");
-    let registry = LocalExportRegistry::new(Arc::new(catalog), ServerConfig::default());
+    let registry = LocalExportRegistry::new(
+        Arc::new(catalog),
+        ServerConfig::default(),
+        blob_dir(&runtime),
+    );
+    runtime.assert_path_inside(registry.blob_dir());
     let owner_a = ExportOwner::unique_connection();
     let owner_b = ExportOwner::unique_connection();
 
@@ -65,7 +71,11 @@ async fn failed_open_removes_opening_reservation() {
         .create_export(create_export("huge", MAX_MEMORY_EXPORT_BYTES + 1, 4096))
         .await
         .expect("create export");
-    let registry = LocalExportRegistry::new(Arc::new(catalog), ServerConfig::default());
+    let registry = LocalExportRegistry::new(
+        Arc::new(catalog),
+        ServerConfig::default(),
+        blob_dir(&runtime),
+    );
 
     for _ in 0..2 {
         assert!(matches!(
@@ -95,7 +105,7 @@ async fn registry_applies_configured_export_queue_depth() {
         export_queue_depth: NonZeroUsize::new(1).expect("nonzero queue depth"),
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -134,7 +144,7 @@ async fn registry_can_open_concurrent_runtime_from_config() {
         export_runtime: ExportRuntimeKind::Concurrent,
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -174,7 +184,7 @@ async fn registry_can_open_serial_runtime_from_config() {
         export_runtime: ExportRuntimeKind::Serial,
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -209,7 +219,7 @@ async fn registry_shares_active_runtime_for_same_owner() {
         export_runtime: ExportRuntimeKind::Concurrent,
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config);
+    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
     let owner = ExportOwner::unique_connection();
 
     let first_runtime = registry
@@ -260,6 +270,10 @@ async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
 
 fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
+}
+
+fn blob_dir(runtime: &TestRuntime) -> PathBuf {
+    runtime.state_dir().join("blobs")
 }
 
 fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {

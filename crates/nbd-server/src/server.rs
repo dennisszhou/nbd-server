@@ -26,6 +26,7 @@ impl NbdServer {
         let registry = Arc::new(LocalExportRegistry::new(
             Arc::new(catalog),
             config.server.clone(),
+            config.runtime.blob_dir.clone(),
         ));
         let reply_capacity = config.server.connection.reply_queue_capacity.get();
         let listener = TcpListener::bind(listen)
