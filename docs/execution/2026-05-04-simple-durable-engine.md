@@ -3,11 +3,11 @@ Date: 2026-05-04
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 1 finished; Series 2 approved
+- current state: Series 2 finished; Series 3 pending review and approval
 Completion:
 - execution complete: no
-- completed series: Series 1
-- next series: Series 2, approved for implementation
+- completed series: Series 1 and Series 2
+- next series: Series 3, pending review and approval
 
 ## Goal
 
@@ -111,7 +111,7 @@ primitive; flush remains a global barrier; existing memory engine admission
 continues to allow non-overlapping writes; admission and runtime tests keep
 covering the existing read/write/flush contract after the rename.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
