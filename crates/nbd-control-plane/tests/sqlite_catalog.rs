@@ -142,6 +142,54 @@ async fn migration_does_not_create_export_generations() {
 }
 
 #[tokio::test]
+async fn simple_durable_engine_kind_migration_preserves_existing_exports() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    let catalog = SQLiteExportCatalog::connect(&url)
+        .await
+        .expect("connect catalog");
+
+    for migration in &MIGRATIONS[..2] {
+        sqlx::raw_sql(migration)
+            .execute(catalog.pool())
+            .await
+            .expect("apply base migration");
+    }
+
+    catalog
+        .create_export(create_export("disk-memory", 1024, 4096))
+        .await
+        .expect("create memory export before migration");
+
+    sqlx::raw_sql(MIGRATIONS[2])
+        .execute(catalog.pool())
+        .await
+        .expect("apply simple durable engine migration");
+
+    let memory = catalog
+        .inspect_export(InspectExport::new(export_name("disk-memory")))
+        .await
+        .expect("inspect migrated memory export");
+    assert_eq!(memory.engine_kind(), ExportEngineKind::Memory);
+    assert_eq!(memory.head().layout_kind(), ExportLayoutKind::MemoryEmpty);
+
+    let durable = catalog
+        .create_export(create_export_with_engine(
+            "disk-durable",
+            1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create simple durable after migration");
+    assert_eq!(durable.engine_kind(), ExportEngineKind::SimpleDurable);
+    assert_eq!(
+        durable.head().layout_kind(),
+        ExportLayoutKind::SimpleMutableTree,
+    );
+}
+
+#[tokio::test]
 async fn delete_hides_export_from_load_and_default_list() {
     let (_runtime, catalog) = migrated_catalog().await;
 
