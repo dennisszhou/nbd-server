@@ -740,5 +740,45 @@ Design exit criteria
   stdout flag behavior, request correlation fields, target taxonomy, and
   lossless writer policy are agreed.
 
-Recommended next step
-- Implement the approved logging instrumentation series.
+Implementation closeout
+- Series state: finished.
+- Completed commit stack:
+  - `bbb8f3b docs/plans: add logging instrumentation design`
+  - `9d8adcc config: add logging file path`
+  - `a750adf server: add logging bootstrap`
+  - `6b8b2bd server: add observability context`
+  - `3585e09 server: instrument runtime logging`
+- The config layer now owns `[logging].file_path`, keeps older config files
+  compatible, and emits `/tmp/nbd/current.log` in generated default config.
+- `nbd-server serve` initializes one process-wide JSON-lines tracing subscriber,
+  writes to the configured file by default, and mirrors the same records to
+  stdout when `--log-stdout` is passed.
+- The runtime now carries `ExportJobContext` through request submission,
+  admission, engine execution, completion, and reply writing so request-scoped
+  logs can be correlated by `server_instance_id`, `connection_id`,
+  `request_sequence`, and NBD cookie.
+- Operational lifecycle events are visible at default `INFO` level. Per-request
+  happy-path `ExportJob` detail remains off by default and is available through
+  targeted `RUST_LOG` settings.
+- The logging policy remains contained in `logging.rs`; subsystem call sites
+  emit structured tracing events and do not know about file paths, stdout
+  mirroring, JSON formatting, append policy, or writer implementation.
+
+Validation
+- `cargo fmt --check -p nbd-server`
+- `cargo clippy -p nbd-server --all-targets -- -D warnings`
+- `cargo test -p nbd-server`
+- `cargo test --workspace`
+- `make test-protocol`
+- `make docker-smoke`
+- A Docker smoke log sample was captured by bind-mounting `/tmp/nbd` to
+  `./.tmp/docker-smoke-log`; the default `docker-smoke` container is removed
+  at exit, so its in-container `/tmp/nbd/current.log` does not otherwise
+  survive the target.
+
+Deferred follow-up
+- Application-managed log rotation remains deferred.
+- Separate request log files remain deferred until request volume justifies
+  splitting targets into multiple sinks.
+- Runtime log-level reload, metrics, OpenTelemetry export, and audit logging
+  remain out of scope for this series.
