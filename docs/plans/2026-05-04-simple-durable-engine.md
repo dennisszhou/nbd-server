@@ -119,13 +119,13 @@ as immutable COW blobs.
 
 - owns active/waiting reads, writes, and flushes;
 - validates ranges against the export size;
-- grants permits for visible byte ranges and write chunk spans;
+- grants permits for policy-provided byte ranges;
 - does not inspect tree or blob metadata.
 
 `SimpleDurableAdmissionPolicy`
 
 - maps `ExportRequest` to admission operations;
-- computes 32 MiB chunk spans for writes;
+- computes chunk-aligned 32 MiB byte ranges for writes;
 - needs only export size and chunk size.
 
 `SimpleDurableEngine`
@@ -298,30 +298,22 @@ pub struct SimpleDurableEngine {
 }
 ```
 
-Admission should gain a chunk-aware write shape:
+Admission should keep the existing byte-range operation shape:
 
 ```rust
-pub struct ChunkSpan {
-    first: u64,
-    count: u64,
-}
-
-pub struct AdmissionWrite {
-    visible_range: ByteRange,
-    write_chunks: Option<ChunkSpan>,
-}
-
 pub enum AdmissionOp {
     Read(ByteRange),
-    Write(AdmissionWrite),
+    Write(ByteRange),
     Flush,
 }
 ```
 
 `ExportAdmissionPolicy` should replace the current `ExportAdmissionProfile`
-naming during the admission series. `MemoryAdmissionPolicy` can set
-`write_chunks = None`. The simple durable policy sets the touched 32 MiB chunk
-span.
+naming during the admission series. `MemoryAdmissionPolicy` maps writes to the
+client-visible byte range. The first `SimpleDurableAdmissionPolicy` maps writes
+to a chunk-aligned byte range covering every touched 32 MiB blob. This is
+conservative: reads inside the same chunk wait behind an active write even when
+their client-visible byte ranges do not overlap.
 
 # Data Paths
 
@@ -339,7 +331,9 @@ ExportRuntime
 ```
 
 Reads may run while a write is active when the read byte range does not
-overlap the write's `visible_range`.
+overlap the write's policy-provided admitted byte range. For the first simple
+durable implementation, that write range is chunk-aligned and may be larger
+than the client-visible write bytes.
 
 ## Write Path
 
@@ -362,7 +356,7 @@ Request flow:
 
 ```text
 ExportRuntime
-  -> policy maps write to Write(visible_range, write_chunks)
+  -> policy maps write to Write(chunk-aligned byte range)
   -> ExportAdmissionCtl grants write permit
   -> SimpleDurableEngine keeps permit alive
   -> for each touched chunk:
@@ -413,7 +407,8 @@ work and any needed metadata commits have completed.
 - Missing tree children mean sparse zeroes.
 - Existing chunk overwrites preserve the same `storage_key`.
 - One active write may touch a given 32 MiB chunk at a time.
-- Reads conflict with writes only by visible byte range, not whole chunk span.
+- Simple durable writes block reads for the whole chunk-aligned admitted range
+  in the first implementation.
 - Flush conflicts globally.
 - `memory` remains the default create engine.
 - `simple_durable` remains opt-in.

@@ -3,11 +3,11 @@ Date: 2026-05-04
 Status: in_progress
 Approval:
 - overall doc approved: yes
-- current state: Series 1 finished; Series 2 pending approval
+- current state: Series 1 finished; Series 2 approved
 Completion:
 - execution complete: no
 - completed series: Series 1
-- next series: Series 2, pending review and approval
+- next series: Series 2, approved for implementation
 
 ## Goal
 
@@ -104,14 +104,14 @@ naming for the engine-to-admission mapping boundary, and keeping admission
 independent from tree nodes and blob keys.
 
 Done means: the current `ExportAdmissionProfile` naming is replaced by
-`ExportAdmissionPolicy`; `AdmissionOp::Write` can carry a visible byte range
-and an optional 32 MiB chunk span; reads conflict with writes by visible range;
-writes conflict with writes by visible range or chunk span; flush remains a
-global barrier; existing memory engine admission continues to allow
-non-overlapping writes; admission tests cover chunk write serialization and
-non-overlapping read progress.
+`ExportAdmissionPolicy`; `AdmissionOp::Write` keeps carrying one `ByteRange`;
+future simple durable policy-owned write expansion is documented as
+chunk-aligned `ByteRange` admission rather than a separate `ChunkRange`
+primitive; flush remains a global barrier; existing memory engine admission
+continues to allow non-overlapping writes; admission and runtime tests keep
+covering the existing read/write/flush contract after the rename.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
