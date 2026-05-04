@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 EXPORT_NAME="${KERNEL_SMOKE_EXPORT:-smoke}"
 SIZE_BYTES="${KERNEL_SMOKE_SIZE_BYTES:-67108864}"
+ENGINE="${KERNEL_SMOKE_ENGINE:-simple_durable}"
+REATTACH="${KERNEL_SMOKE_REATTACH:-}"
 PORT="${KERNEL_SMOKE_PORT:-10809}"
 DEVICE="${KERNEL_SMOKE_DEVICE:-/dev/nbd0}"
 LISTEN="127.0.0.1:${PORT}"
@@ -68,6 +70,51 @@ wait_for_server() {
     return 1
 }
 
+should_reattach() {
+    if [ -n "${REATTACH}" ]; then
+        [ "${REATTACH}" = "1" ]
+        return
+    fi
+
+    [ "${ENGINE}" = "simple_durable" ]
+}
+
+start_server() {
+    "${NBD_SERVER}" serve --config "${CONFIG}" --listen "${LISTEN}" &
+    SERVER_PID="$!"
+    wait_for_server
+}
+
+stop_server() {
+    if [ -n "${SERVER_PID}" ]; then
+        kill "${SERVER_PID}" >/dev/null 2>&1
+        wait "${SERVER_PID}" >/dev/null 2>&1 || true
+        SERVER_PID=""
+    fi
+}
+
+connect_device() {
+    "${NBD_CLIENT}" 127.0.0.1 "${PORT}" "${DEVICE}" \
+        -name "${EXPORT_NAME}" \
+        -block-size 4096
+    DEVICE_CONNECTED=1
+}
+
+disconnect_device() {
+    "${NBD_CLIENT}" -d "${DEVICE}"
+    DEVICE_CONNECTED=0
+}
+
+mount_device() {
+    mount -t ext4 "${DEVICE}" "${MOUNT_DIR}"
+    MOUNT_CREATED=1
+}
+
+unmount_device() {
+    umount "${MOUNT_DIR}"
+    MOUNT_CREATED=0
+}
+
 mkdir -p "${MOUNT_DIR}"
 
 require_kernel_nbd
@@ -97,20 +144,14 @@ require_executable "${NBD_SERVER}"
 
 "${NBDCLI}" --config "${CONFIG}" create "${EXPORT_NAME}" \
     --size "${SIZE_BYTES}" \
-    --block-size 4096
+    --block-size 4096 \
+    --engine "${ENGINE}"
 
-"${NBD_SERVER}" serve --config "${CONFIG}" --listen "${LISTEN}" &
-SERVER_PID="$!"
-wait_for_server
-
-"${NBD_CLIENT}" 127.0.0.1 "${PORT}" "${DEVICE}" \
-    -name "${EXPORT_NAME}" \
-    -block-size 4096
-DEVICE_CONNECTED=1
+start_server
+connect_device
 
 mkfs.ext4 -F -E nodiscard "${DEVICE}"
-mount -t ext4 "${DEVICE}" "${MOUNT_DIR}"
-MOUNT_CREATED=1
+mount_device
 
 : >"${PROBE_EXPECTED}"
 for i in $(seq 1 4096); do
@@ -121,12 +162,20 @@ sync
 echo 3 >/proc/sys/vm/drop_caches
 cmp "${PROBE_EXPECTED}" "${MOUNT_DIR}/probe.txt"
 
-umount "${MOUNT_DIR}"
-MOUNT_CREATED=0
-"${NBD_CLIENT}" -d "${DEVICE}"
-DEVICE_CONNECTED=0
-kill "${SERVER_PID}"
-wait "${SERVER_PID}" || true
-SERVER_PID=""
+if should_reattach; then
+    unmount_device
+    disconnect_device
+    stop_server
+
+    start_server
+    connect_device
+    mount_device
+    echo 3 >/proc/sys/vm/drop_caches
+    cmp "${PROBE_EXPECTED}" "${MOUNT_DIR}/probe.txt"
+fi
+
+unmount_device
+disconnect_device
+stop_server
 
 echo "kernel NBD smoke passed"
