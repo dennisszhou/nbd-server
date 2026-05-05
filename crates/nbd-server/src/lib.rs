@@ -38,6 +38,6 @@ pub use simple_durable::{
     LocalBlobStore, SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree,
 };
 pub use wal::{
-    ExportWal, ExportWalHandle, OpenWal, WalBounds, WalDomain, WalProvider, WalPruneResult,
-    WalRecord, WalReplay, WalRequest,
+    ExportWal, ExportWalHandle, LocalExportWal, LocalWalProvider, OpenWal, WalBounds, WalDomain,
+    WalProvider, WalPruneResult, WalRecord, WalReplay, WalRequest,
 };
