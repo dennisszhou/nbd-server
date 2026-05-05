@@ -13,7 +13,7 @@ implementation details.
 
 # Goal
 
-Define a shared workqueue model that can support:
+Define a common workqueue model that can support multiple logical queues:
 
 - NBD request offload from the socket read path;
 - serialized replies per connection;
@@ -41,7 +41,8 @@ storage work queue:
   concurrency limits and shared backend client resources
 
 compaction queue:
-  runs background checkpointing work at lower priority
+  runs background checkpointing work at lower priority; owned by
+  CompactionManager and separate from export request queue slots
 
 lease queue:
   scans local active exports every 30 seconds, renews etcd leases, and runs
@@ -133,6 +134,34 @@ configuration objects so connection pools, credential caches, retries, and
 timeouts are shared. The storage queue owns backend concurrency policy; export
 correctness is still defined above it.
 
+# Compaction Boundary
+
+Compaction has its own logical queue. It may run on the same Tokio executor as
+the rest of the process, but it must not share export request queue-depth slots
+or connection reply queues.
+
+The first compaction queue can be simple:
+
+```text
+bounded pending queue
+  -> one or a small fixed number of background workers
+  -> CompactionManager.compact_export(job)
+```
+
+The queue limits background catalog, WAL replay, and blob construction work.
+Correctness does not rely on single-worker serialization. Duplicate or racing
+compaction attempts remain safe because catalog publication is idempotent and
+compares against the current database head.
+
+The compaction queue API should hide whether workers are Tokio tasks on the
+main server runtime, a dedicated current-thread Tokio runtime on one OS thread,
+or a later dedicated multi-thread runtime. Callers submit jobs through the same
+queue boundary either way.
+
+If the compaction queue is full or shutting down, enqueue failure delays
+cleanup but does not invalidate close or write durability. WAL replay remains
+the recovery path.
+
 # Invariants
 
 - Queue capacity is bounded.
@@ -141,6 +170,7 @@ correctness is still defined above it.
 - Shutdown behavior is declared per queue.
 - Storage queues may reorder independent I/O but do not define read/write/flush
   correctness.
+- Compaction queues do not consume export request queue-depth slots.
 - Admission defines conflicting operation order.
 - Reply queues are per connection.
 - Export workers never write directly to sockets.
@@ -169,8 +199,8 @@ Data-path queues should be conservative:
 
 # Open Questions
 
-- Whether the first implementation needs one shared worker pool or per-queue
-  worker pools.
+- Whether later implementations need separate OS-thread pools for specific
+  queue classes. The logical queues should remain separate either way.
 - How much priority scheduling is needed between foreground reads/writes and
   background compaction.
 - Whether storage queue jobs should include retry policy or leave retries to

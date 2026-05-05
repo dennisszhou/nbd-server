@@ -27,8 +27,8 @@ catalog metadata.
 `ExportCatalog` owns export metadata, current export heads, tree node metadata,
 child pointers, root pointers, checkpoints, and blob references.
 
-`WALManager` does not use `StorageEngine`. The WAL has its own replaceable
-`WalStore` backend.
+`ExportWal` does not use `StorageEngine`. The WAL has its own replaceable
+backend behind `WalProvider`.
 
 # API Shape
 

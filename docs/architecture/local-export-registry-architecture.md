@@ -213,15 +213,21 @@ the registry has a real client identity to compare.
 connection close or NBD_CMD_DISC
   -> stop accepting new requests on the connection
   -> finish/cancel outstanding work according to shutdown policy
-  -> attempt close-time compaction on clean close
+  -> enqueue close-time compaction on clean close
   -> unregister export from LocalExportRegistry
   -> release or stop renewing the serving lease
 ```
 
-Close-time compaction is intended but not required for correctness. If it fails,
-the export can still close after acknowledged writes remain durable in WAL.
-The export remains registered as active or closing until close-time compaction
-finishes or times out, so `nbdcli delete` does not race with close cleanup.
+Close-time compaction is intended but not required for correctness. The close
+path submits a background compaction job after acknowledged writes remain
+durable in WAL, then lets the export close without waiting for that job. If the
+job fails, the next open replays retained WAL after the last catalog
+checkpoint.
+
+Background compaction must reread catalog state when it runs. If delete races
+after close and marks the export deleted, compaction publication should observe
+that durable state and no-op or fail without advancing the head. Delete does
+not need to wait for best-effort compaction.
 
 # Delete Interaction
 

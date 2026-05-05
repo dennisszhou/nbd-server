@@ -229,18 +229,25 @@ Compaction publishes a new root/checkpoint through `ExportCatalog` in a single
 catalog transaction. The checkpoint is global, not per range:
 
 ```rust
-struct PublishCheckpoint {
+struct PublishCompaction {
     export_id: ExportId,
+    expected_base: ExportHead,
+    tree_batch: TreeBatch,
     new_root_node_id: Option<NodeId>,
     compacted_through: WalSeq,
 }
 ```
 
 `ExportCatalog` loads the current head inside the publication transaction. On
-success, `new_root_node_id` must represent every WAL record with sequence
-`<= compacted_through`, and the catalog advances `export_heads`.
-This relies on a single checkpoint publisher per export until writer fencing or
-multi-publisher compaction is designed.
+success, it inserts the immutable tree metadata batch and advances
+`export_heads`. `new_root_node_id` must represent every WAL record with
+sequence `<= compacted_through`.
+
+If the current head already has `checkpoint_wal_seq >= compacted_through`,
+publication is a successful no-op. If the current head no longer matches
+`expected_base`, publication is stale and the compactor must replan from the
+current database head before trying again. This makes duplicate and racing
+compaction attempts safe without a separate generation table.
 
 # Invariants
 

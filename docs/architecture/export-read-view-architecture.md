@@ -298,9 +298,9 @@ choose global checkpoint S
   -> read WAL records (old_checkpoint + 1)..S
   -> upload new leaf blobs
   -> create new tree nodes
-  -> ExportCatalog.publish_checkpoint(new_root, S)
-  -> notify active Export
-  -> ExportReadView.install_checkpoint(new_root, S)
+  -> ExportCatalog.publish_compaction(expected_base, new_root, S)
+  -> optionally notify active Export
+  -> ExportReadView.install_checkpoint(new_root, S), if active
   -> retire now-committed WAL overlay entries when safe
 ```
 

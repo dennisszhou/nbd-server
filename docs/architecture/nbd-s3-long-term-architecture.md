@@ -170,13 +170,13 @@ implementation. A permit allows an operation to observe or mutate its protected
 range. The first policy can be conservative; later policies can add fair
 range-aware scheduling.
 
-## WALManager
+## WalProvider / ExportWal
 
 Owns per-export durable write history. It assigns WAL sequence numbers,
 persists write records before acknowledgement, supports replay, and exposes
 checkpoint state for compaction and GC. The first backend can be a local
 per-export WAL. The long-term backend can be a WAL service behind the same
-`WALManager` contract.
+`WalProvider` / `ExportWal` contract.
 
 ## ExportReadView
 
@@ -248,7 +248,7 @@ decode NBD write
   -> enqueue request job
   -> Export.write(range, data)
   -> acquire write admission permit
-  -> WALManager.append_write(range, data)
+  -> ExportWal.append(range, data)
   -> apply durable WAL record to ExportReadView
   -> reply success
 ```
@@ -291,7 +291,7 @@ Flush does not need to compact WAL records into committed leaf blobs.
   `ExportReadView`.
 - A flush response is sent only after all writes ordered before the flush by
   admission are WAL-durable and read-view-visible.
-- WAL sequence numbers are assigned by `WALManager`, not admission.
+- WAL sequence numbers are assigned by `ExportWal`, not admission.
 - Admission tickets are volatile and never used for recovery.
 - `StorageEngine` does not own export semantics.
 - `ExportCatalog` is the durable export metadata source.
@@ -321,7 +321,7 @@ Include:
 - NBD protocol subset;
 - `Export` API;
 - conservative `ExportAdmissionCtl`;
-- `WALManager` with durable local WAL;
+- `WalProvider` / `ExportWal` with durable local WAL;
 - `ExportReadView` read serving;
 - local `StorageEngine`;
 - minimal `ExportCatalog`;

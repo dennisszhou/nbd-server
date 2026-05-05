@@ -180,10 +180,18 @@ struct TreeBatch {
     edges: Vec<TreeEdgeRecord>,
 }
 
-struct PublishCheckpoint {
+struct PublishCompaction {
     export_id: ExportId,
+    expected_base: ExportHead,
+    tree_batch: TreeBatch,
     new_root_node_id: Option<NodeId>,
     compacted_through: WalSeq,
+}
+
+enum PublishCompactionOutcome {
+    Published(ExportMeta),
+    AlreadyCovered(ExportMeta),
+    StalePlan(ExportMeta),
 }
 ```
 
@@ -208,11 +216,8 @@ trait ExportCatalog {
     async fn list_exports(&self, filter: ExportListFilter)
         -> Result<Vec<ExportMeta>>;
 
-    async fn insert_tree_batch(&self, batch: TreeBatch)
-        -> Result<()>;
-
-    async fn publish_checkpoint(&self, update: PublishCheckpoint)
-        -> Result<ExportMeta>;
+    async fn publish_compaction(&self, update: PublishCompaction)
+        -> Result<PublishCompactionOutcome>;
 }
 ```
 
@@ -285,10 +290,12 @@ mutable blobs after file-first failures.
 
 # Root And Checkpoint Publication
 
-`publish_checkpoint` is a future WAL/COW operation. It is called after
-compaction has written any new blobs and inserted the corresponding immutable
-tree metadata. Publication must preserve the size from the head it compacted
-unless compaction explicitly observes and incorporates a newer resize head.
+`publish_compaction` is a future WAL/COW operation. It is called after
+compaction has written any new blobs. It inserts immutable tree metadata and
+advances the current head in one transaction so the catalog never exposes a
+partially published tree. Publication must preserve the size from the head it
+compacted unless compaction explicitly observes and incorporates a newer resize
+head.
 
 Publication advances the current head in a single catalog transaction:
 
@@ -297,17 +304,27 @@ begin transaction
   load latest export row
   load current export_heads row
   verify state = active
-  verify compacted_through > checkpoint_wal_seq
+  if current.checkpoint_wal_seq >= compacted_through:
+    return AlreadyCovered
+  if current root/checkpoint/size/layout != expected_base:
+    return StalePlan
+  insert tree metadata batch
   update export_heads:
     root_node_id = new_root_node_id
     checkpoint_wal_seq = compacted_through
-    size_bytes = compacted_head.size_bytes
+    size_bytes = current.size_bytes
 commit
 ```
 
-Callers do not pass a historical generation token. The catalog owns loading the
-current head. The architecture relies on a single checkpoint publisher per
-export until writer fencing or multi-publisher compaction is designed.
+`AlreadyCovered` is a successful no-op for duplicate or slower compaction jobs.
+`StalePlan` tells the caller to discard unpublished output and replan from the
+current database head if the original target is still useful. This keeps racing
+compaction attempts idempotent without adding a separate generation table.
+
+Callers should not insert immutable compaction tree metadata separately from
+head publication. A failed or racing publication may leave already-written
+blob files as future-GC garbage, but it must not expose partial tree metadata
+through the catalog head.
 
 Future resize should update the current head with the new `size_bytes` and may
 need its own fencing against checkpoint publication.
@@ -318,8 +335,8 @@ needs a dedicated resize design before online resize is implemented.
 # Close-Time Compaction
 
 Close-time compaction is an intended feature. When an export mount closes
-cleanly, the server should try to compact that export before completing close
-or as part of the close workflow.
+cleanly, the server should enqueue background compaction for that export as
+part of the close workflow.
 
 Close-time compaction goal:
 
@@ -327,9 +344,9 @@ Close-time compaction goal:
 - move recent writes into the committed copy-on-write tree;
 - advance `checkpoint_wal_seq` when compaction succeeds.
 
-If close-time compaction fails, the export can still close as long as
-acknowledged writes remain durable in the WAL. Startup recovery will replay
-records after the last catalog checkpoint.
+Close does not wait for compaction to finish. If close-time compaction fails,
+the export can stay closed as long as acknowledged writes remain durable in the
+WAL. Startup recovery will replay records after the last catalog checkpoint.
 
 This makes close-time compaction an operational quality feature, not part of
 the write durability contract.
@@ -348,9 +365,11 @@ the write durability contract.
 - Clone copies the latest committed root only.
 - Clone does not include source uncheckpointed WAL records.
 - `root_node_id = null` means an all-zero current tree.
-- `publish_checkpoint` advances the current head.
+- Root/checkpoint publication advances the current head.
+- `publish_compaction` inserts immutable tree metadata and advances the current
+  head transactionally.
 - `checkpoint_wal_seq` advances monotonically.
-- Clean export close attempts close-time compaction.
+- Clean export close enqueues background close-time compaction.
 - Delete race prevention belongs to `ExportLifecycleManager`.
 - Delete is logical; physical cleanup belongs to GC.
 - The catalog stores blob references, not blob bytes.
