@@ -31,9 +31,17 @@ pub struct WalDurableAdmissionPolicy {
 /// Catalog head snapshot used as the committed read baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RootSnapshot {
-    root_node_id: Option<NodeId>,
-    checkpoint_wal_seq: WalSeq,
-    size_bytes: u64,
+    backing: RootBacking,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RootBacking {
+    Zero {
+        root_node_id: Option<NodeId>,
+        checkpoint_wal_seq: WalSeq,
+        size_bytes: u64,
+    },
+    CowTree(Arc<CowTreeSnapshot>),
 }
 
 /// Materialized read view for one open WAL durable export.
@@ -64,7 +72,6 @@ struct ZeroBackingReader;
 
 #[derive(Debug)]
 struct CowTreeBackingReader {
-    snapshot: CowTreeSnapshot,
     blob_store: LocalBlobStore,
 }
 
@@ -121,15 +128,10 @@ impl WalDurableEngine {
             .map_err(ServerError::catalog)?;
         validate_snapshot_can_open(descriptor, &snapshot)?;
         let size_bytes = snapshot.size_bytes();
-        let root = RootSnapshot::from_cow_snapshot(&snapshot);
+        let root = RootSnapshot::from_cow_snapshot(snapshot);
         log_root_loaded(descriptor.id(), descriptor.name(), &root);
-        let read_view = ExportReadView::new(
-            root.clone(),
-            Arc::new(CowTreeBackingReader {
-                snapshot,
-                blob_store,
-            }),
-        );
+        let read_view =
+            ExportReadView::new(root.clone(), Arc::new(CowTreeBackingReader { blob_store }));
         let replay = replay_wal_after(&wal, &read_view, &root).await?;
         log_replay_completed(descriptor.id(), descriptor.name(), &root, replay);
 
@@ -308,38 +310,60 @@ fn root_node_id_for_log(root: &RootSnapshot) -> &str {
 impl RootSnapshot {
     fn from_meta(meta: &ExportMeta) -> Self {
         Self {
-            root_node_id: meta.head().root_node_id().cloned(),
-            checkpoint_wal_seq: meta.head().checkpoint_wal_seq(),
-            size_bytes: meta.size_bytes(),
+            backing: RootBacking::Zero {
+                root_node_id: meta.head().root_node_id().cloned(),
+                checkpoint_wal_seq: meta.head().checkpoint_wal_seq(),
+                size_bytes: meta.size_bytes(),
+            },
         }
     }
 
-    fn from_cow_snapshot(snapshot: &CowTreeSnapshot) -> Self {
+    fn from_cow_snapshot(snapshot: CowTreeSnapshot) -> Self {
         Self {
-            root_node_id: snapshot.root_node_id().cloned(),
-            checkpoint_wal_seq: snapshot.checkpoint_wal_seq(),
-            size_bytes: snapshot.size_bytes(),
+            backing: RootBacking::CowTree(Arc::new(snapshot)),
         }
     }
 
     pub fn root_node_id(&self) -> Option<&NodeId> {
-        self.root_node_id.as_ref()
+        match &self.backing {
+            RootBacking::Zero { root_node_id, .. } => root_node_id.as_ref(),
+            RootBacking::CowTree(snapshot) => snapshot.root_node_id(),
+        }
     }
 
     pub fn checkpoint_wal_seq(&self) -> WalSeq {
-        self.checkpoint_wal_seq
+        match &self.backing {
+            RootBacking::Zero {
+                checkpoint_wal_seq, ..
+            } => *checkpoint_wal_seq,
+            RootBacking::CowTree(snapshot) => snapshot.checkpoint_wal_seq(),
+        }
     }
 
     pub fn size_bytes(&self) -> u64 {
-        self.size_bytes
+        match &self.backing {
+            RootBacking::Zero { size_bytes, .. } => *size_bytes,
+            RootBacking::CowTree(snapshot) => snapshot.size_bytes(),
+        }
+    }
+
+    fn is_zero_backed(&self) -> bool {
+        matches!(&self.backing, RootBacking::Zero { .. })
+    }
+
+    fn cow_tree(&self) -> Option<&CowTreeSnapshot> {
+        match &self.backing {
+            RootBacking::Zero { .. } => None,
+            RootBacking::CowTree(snapshot) => Some(snapshot.as_ref()),
+        }
     }
 
     fn to_export_head(&self) -> Result<ExportHead> {
         ExportHead::new(
             ExportLayoutKind::CowImmutableTree,
-            self.root_node_id.clone(),
-            self.size_bytes,
-            self.checkpoint_wal_seq,
+            self.root_node_id().cloned(),
+            self.size_bytes(),
+            self.checkpoint_wal_seq(),
         )
         .map_err(ServerError::catalog)
     }
@@ -439,6 +463,11 @@ impl fmt::Debug for ExportReadView {
 impl BackingReader for ZeroBackingReader {
     async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
         validate_range("read", range, root.size_bytes())?;
+        if !root.is_zero_backed() {
+            return Err(ServerError::Catalog {
+                message: "zero backing reader requires a zero-backed root".to_owned(),
+            });
+        }
         Ok(vec![0; range.len() as usize])
     }
 }
@@ -447,16 +476,9 @@ impl BackingReader for ZeroBackingReader {
 impl BackingReader for CowTreeBackingReader {
     async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
         validate_range("read", range, root.size_bytes())?;
-        if self.snapshot.root_node_id() != root.root_node_id() {
-            return Err(ServerError::Catalog {
-                message: "COW backing snapshot root does not match read view root".to_owned(),
-            });
-        }
-        if self.snapshot.checkpoint_wal_seq() != root.checkpoint_wal_seq() {
-            return Err(ServerError::Catalog {
-                message: "COW backing checkpoint does not match read view root".to_owned(),
-            });
-        }
+        let snapshot = root.cow_tree().ok_or_else(|| ServerError::Catalog {
+            message: "COW backing reader requires a COW root snapshot".to_owned(),
+        })?;
 
         let mut data = vec![0; range.len() as usize];
         let mut copied = 0usize;
@@ -467,7 +489,7 @@ impl BackingReader for CowTreeBackingReader {
             let chunk_available = TREE_CHUNK_BYTES - chunk_offset;
             let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
 
-            if let Some(chunk) = self.snapshot.chunk(chunk_index) {
+            if let Some(chunk) = snapshot.chunk(chunk_index) {
                 let chunk_data = self
                     .blob_store
                     .read_blob(chunk.blob_key(), chunk_offset, copy_len as u64)
@@ -556,4 +578,89 @@ fn overlay_record(data: &mut [u8], read_range: ByteRange, record: &WalRecord) ->
 
     data[dst_start..dst_start + len].copy_from_slice(&record.data()[src_start..src_start + len]);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbd_control_plane::{ChunkIndex, CowChunkRef, ExportId};
+    use nbd_test_support::TestRuntime;
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn cow_backing_reader_reads_from_root_snapshot() {
+        let runtime = TestRuntime::new().expect("test runtime");
+        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let mut chunk_data = vec![0; 4096];
+        chunk_data[8..12].copy_from_slice(b"root");
+        let key = blob_store
+            .create_blob(&chunk_data)
+            .await
+            .expect("create blob");
+        let chunk = CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk");
+        let snapshot = CowTreeSnapshot::new(
+            ExportId::new("export-root-backed").expect("export id"),
+            4096,
+            Some(NodeId::new("root-node").expect("node id")),
+            WalSeq::new(7),
+            BTreeMap::from([(ChunkIndex::new(0), chunk)]),
+        )
+        .expect("cow snapshot");
+        let root = RootSnapshot::from_cow_snapshot(snapshot);
+        let reader = CowTreeBackingReader { blob_store };
+
+        let data = reader
+            .read_committed(&root, ByteRange::new(8, 4))
+            .await
+            .expect("read committed root");
+
+        assert_eq!(data, b"root");
+    }
+
+    #[tokio::test]
+    async fn backing_readers_reject_wrong_root_kind() {
+        let runtime = TestRuntime::new().expect("test runtime");
+        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let zero_root = RootSnapshot {
+            backing: RootBacking::Zero {
+                root_node_id: None,
+                checkpoint_wal_seq: WalSeq::zero(),
+                size_bytes: 4096,
+            },
+        };
+        let cow_reader = CowTreeBackingReader {
+            blob_store: blob_store.clone(),
+        };
+
+        assert!(matches!(
+            cow_reader
+                .read_committed(&zero_root, ByteRange::new(0, 4))
+                .await,
+            Err(ServerError::Catalog { .. }),
+        ));
+
+        let empty_chunk = vec![0; 4096];
+        let key = blob_store
+            .create_blob(&empty_chunk)
+            .await
+            .expect("create blob");
+        let chunk = CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk");
+        let cow_root = RootSnapshot::from_cow_snapshot(
+            CowTreeSnapshot::new(
+                ExportId::new("export-cow-backed").expect("export id"),
+                4096,
+                Some(NodeId::new("root-node").expect("node id")),
+                WalSeq::new(1),
+                BTreeMap::from([(ChunkIndex::new(0), chunk)]),
+            )
+            .expect("cow snapshot"),
+        );
+
+        assert!(matches!(
+            ZeroBackingReader
+                .read_committed(&cow_root, ByteRange::new(0, 4))
+                .await,
+            Err(ServerError::Catalog { .. }),
+        ));
+    }
 }
