@@ -99,11 +99,27 @@ fn empty_wal_bounds_start_at_zero() {
 }
 
 #[test]
-fn wal_prune_result_rejects_overstated_cleanup() {
+fn wal_prune_result_records_requested_and_actual_cleanup() {
+    assert_eq!(
+        WalPruneResult::new(WalSeq::new(1), WalSeq::new(2), 3),
+        WalPruneResult {
+            requested_through: WalSeq::new(1),
+            pruned_through: WalSeq::new(2),
+            removed_segments: 3,
+        },
+    );
+}
+
+#[test]
+fn local_wal_rejects_header_sized_segment_target() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let provider =
+        LocalWalProvider::with_segment_target_bytes(runtime.wal_dir(), SEGMENT_HEADER_LEN as u64);
+
     assert!(matches!(
-        WalPruneResult::new(WalSeq::new(1), WalSeq::new(2), 0),
+        provider,
         Err(ServerError::Wal {
-            context: "create WAL prune result",
+            context: "create local WAL provider",
             ..
         }),
     ));
@@ -273,8 +289,117 @@ async fn local_wal_rejects_interior_checksum_corruption() {
     ));
 }
 
+#[tokio::test]
+async fn local_wal_prunes_full_segment_prefix() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let wal = open_local_wal_with_segment_target(&runtime, "export-prune-prefix", 48).await;
+    append(&wal, 0, b"one").await;
+    append(&wal, 4096, b"two").await;
+    let third = append(&wal, 8192, b"three").await;
+
+    let result = wal.prune_through(WalSeq::new(2)).await.expect("prune");
+
+    assert_eq!(result.requested_through, WalSeq::new(2));
+    assert_eq!(result.pruned_through, WalSeq::new(2));
+    assert_eq!(result.removed_segments, 2);
+    assert_eq!(
+        wal.bounds().await.expect("bounds"),
+        WalBounds {
+            pruned_through: WalSeq::new(2),
+            last_durable: WalSeq::new(3),
+        },
+    );
+    assert!(matches!(
+        wal.replay_after(WalSeq::new(1)).await,
+        Err(ServerError::Wal {
+            context: "replay WAL",
+            ..
+        }),
+    ));
+    assert_eq!(
+        collect(wal.replay_after(WalSeq::new(2)).await.expect("replay")).await,
+        vec![third],
+    );
+
+    let no_op = wal.prune_through(WalSeq::new(1)).await.expect("prune");
+    assert_eq!(no_op.requested_through, WalSeq::new(1));
+    assert_eq!(no_op.pruned_through, WalSeq::new(2));
+    assert_eq!(no_op.removed_segments, 0);
+}
+
+#[tokio::test]
+async fn local_wal_prunes_active_segment_with_header_only_successor() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let wal = open_local_wal(&runtime, "export-prune-active").await;
+    append(&wal, 0, b"one").await;
+    append(&wal, 4096, b"two").await;
+
+    let result = wal.prune_through(WalSeq::new(2)).await.expect("prune");
+
+    assert_eq!(result.pruned_through, WalSeq::new(2));
+    assert_eq!(result.removed_segments, 1);
+    assert_eq!(
+        wal.bounds().await.expect("bounds"),
+        WalBounds {
+            pruned_through: WalSeq::new(2),
+            last_durable: WalSeq::new(2),
+        },
+    );
+    assert!(matches!(
+        wal.replay_after(WalSeq::zero()).await,
+        Err(ServerError::Wal {
+            context: "replay WAL",
+            ..
+        }),
+    ));
+    assert_eq!(append(&wal, 8192, b"three").await.seq(), WalSeq::new(3));
+
+    drop(wal);
+    let reopened = open_local_wal(&runtime, "export-prune-active").await;
+    assert_eq!(
+        reopened.bounds().await.expect("bounds"),
+        WalBounds {
+            pruned_through: WalSeq::new(2),
+            last_durable: WalSeq::new(3),
+        },
+    );
+}
+
+#[tokio::test]
+async fn local_wal_does_not_partially_prune_straddling_segment() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let wal = open_local_wal(&runtime, "export-prune-straddle").await;
+    let first = append(&wal, 0, b"one").await;
+    let second = append(&wal, 4096, b"two").await;
+
+    let result = wal.prune_through(WalSeq::new(1)).await.expect("prune");
+
+    assert_eq!(result.pruned_through, WalSeq::zero());
+    assert_eq!(result.removed_segments, 0);
+    assert_eq!(
+        collect(wal.replay_after(WalSeq::zero()).await.expect("replay")).await,
+        vec![first, second],
+    );
+}
+
 async fn open_local_wal(runtime: &TestRuntime, export_id: &str) -> nbd_server::ExportWalHandle {
     let provider = LocalWalProvider::new(runtime.wal_dir());
+    provider
+        .open_export(OpenWal::new(WalDomain::for_export_id(
+            ExportId::new(export_id).expect("export id"),
+        )))
+        .await
+        .expect("open local wal")
+}
+
+async fn open_local_wal_with_segment_target(
+    runtime: &TestRuntime,
+    export_id: &str,
+    segment_target_bytes: u64,
+) -> nbd_server::ExportWalHandle {
+    let provider =
+        LocalWalProvider::with_segment_target_bytes(runtime.wal_dir(), segment_target_bytes)
+            .expect("local wal provider");
     provider
         .open_export(OpenWal::new(WalDomain::for_export_id(
             ExportId::new(export_id).expect("export id"),

@@ -66,6 +66,7 @@ pub struct WalReplay {
 #[derive(Debug, Clone)]
 pub struct LocalWalProvider {
     root: PathBuf,
+    segment_target_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -225,26 +226,12 @@ impl WalBounds {
 }
 
 impl WalPruneResult {
-    pub fn new(
-        requested_through: WalSeq,
-        pruned_through: WalSeq,
-        removed_segments: u64,
-    ) -> Result<Self> {
-        if pruned_through > requested_through {
-            return Err(ServerError::wal(
-                "create WAL prune result",
-                format!(
-                    "pruned_through {} is greater than requested_through {}",
-                    pruned_through, requested_through
-                ),
-            ));
-        }
-
-        Ok(Self {
+    pub fn new(requested_through: WalSeq, pruned_through: WalSeq, removed_segments: u64) -> Self {
+        Self {
             requested_through,
             pruned_through,
             removed_segments,
-        })
+        }
     }
 }
 
@@ -295,7 +282,29 @@ pub trait ExportWal: Send + Sync {
 
 impl LocalWalProvider {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            segment_target_bytes: LOCAL_WAL_SEGMENT_TARGET_BYTES,
+        }
+    }
+
+    pub fn with_segment_target_bytes(
+        root: impl Into<PathBuf>,
+        segment_target_bytes: u64,
+    ) -> Result<Self> {
+        if segment_target_bytes <= SEGMENT_HEADER_LEN as u64 {
+            return Err(ServerError::wal(
+                "create local WAL provider",
+                format!(
+                    "segment target {} must be greater than header length {}",
+                    segment_target_bytes, SEGMENT_HEADER_LEN
+                ),
+            ));
+        }
+        Ok(Self {
+            root: root.into(),
+            segment_target_bytes,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -362,7 +371,7 @@ impl WalProvider for LocalWalProvider {
 
         let dir = export_wal_dir(&self.root, request.domain().export_id())?;
         Ok(Arc::new(
-            LocalExportWal::open(dir, LOCAL_WAL_SEGMENT_TARGET_BYTES).await?,
+            LocalExportWal::open(dir, self.segment_target_bytes).await?,
         ))
     }
 }
@@ -420,27 +429,87 @@ impl ExportWal for LocalExportWal {
     }
 
     async fn prune_through(&self, seq: WalSeq) -> Result<WalPruneResult> {
-        let bounds = self.state.lock().await.bounds;
-        if seq > bounds.last_durable {
+        let mut state = self.state.lock().await;
+        if seq > state.bounds.last_durable {
             return Err(ServerError::wal(
                 "prune WAL",
                 format!(
                     "requested prune sequence {} is greater than last durable {}",
-                    seq, bounds.last_durable
+                    seq, state.bounds.last_durable
                 ),
             ));
         }
 
-        Err(ServerError::wal(
-            "prune WAL",
-            "local WAL pruning is not implemented yet",
+        let scans = scan_segments(&self.dir).await?;
+        let active_path = state.active.as_ref().map(|active| active.path.clone());
+        let mut removed_segments = 0;
+        let mut directory_changed = false;
+
+        for scan in &scans {
+            if Some(&scan.path) == active_path.as_ref() {
+                continue;
+            }
+            if scan.max_seq()? <= seq {
+                if let Err(source) = fs::remove_file(&scan.path).await {
+                    if directory_changed {
+                        sync_and_reload_wal_state(&mut state, &self.dir).await?;
+                    }
+                    return Err(ServerError::io("remove WAL segment", source));
+                }
+                removed_segments += 1;
+                directory_changed = true;
+            }
+        }
+
+        if let Some(active_scan) = scans
+            .iter()
+            .find(|scan| Some(&scan.path) == active_path.as_ref())
+        {
+            if !active_scan.records.is_empty() && active_scan.max_seq()? <= seq {
+                let next_seq = next_seq_after(state.bounds.last_durable)?;
+                let new_path = segment_path(&self.dir, next_seq);
+                write_new_segment(&new_path, next_seq).await?;
+                sync_directory(self.dir.clone()).await?;
+                state.active = Some(ActiveSegment {
+                    path: new_path,
+                    len_bytes: SEGMENT_HEADER_LEN as u64,
+                });
+                directory_changed = true;
+
+                if let Err(source) = fs::remove_file(&active_scan.path).await {
+                    sync_and_reload_wal_state(&mut state, &self.dir).await?;
+                    return Err(ServerError::io("remove active WAL segment", source));
+                }
+                removed_segments += 1;
+            }
+        }
+
+        if directory_changed {
+            sync_and_reload_wal_state(&mut state, &self.dir).await?;
+        }
+
+        Ok(WalPruneResult::new(
+            seq,
+            state.bounds.pruned_through,
+            removed_segments,
         ))
     }
 }
 
+async fn sync_and_reload_wal_state(state: &mut LocalWalState, dir: &Path) -> Result<()> {
+    sync_directory(dir.to_path_buf()).await?;
+    *state = scan_wal_dir(dir).await?;
+    Ok(())
+}
+
 async fn scan_wal_dir(dir: &Path) -> Result<LocalWalState> {
     let scans = scan_segments(dir).await?;
-    let mut last_durable = WalSeq::zero();
+    let pruned_through = scans
+        .first()
+        .map(|scan| previous_seq_before(scan.first_seq))
+        .transpose()?
+        .unwrap_or_else(WalSeq::zero);
+    let mut last_durable = pruned_through;
     let mut active = None;
 
     for scan in scans {
@@ -454,7 +523,7 @@ async fn scan_wal_dir(dir: &Path) -> Result<LocalWalState> {
     }
 
     Ok(LocalWalState {
-        bounds: WalBounds::new(WalSeq::zero(), last_durable)?,
+        bounds: WalBounds::new(pruned_through, last_durable)?,
         active,
     })
 }
@@ -481,7 +550,10 @@ async fn scan_segments(dir: &Path) -> Result<Vec<SegmentScan>> {
     entries.sort_by_key(|(first_seq, _)| *first_seq);
 
     let mut scans = Vec::new();
-    let mut expected_seq = WalSeq::new(1);
+    let mut expected_seq = entries
+        .first()
+        .map(|(first_seq, _)| *first_seq)
+        .unwrap_or_else(|| WalSeq::new(1));
     let entry_count = entries.len();
     for (index, (first_seq, path)) in entries.into_iter().enumerate() {
         if first_seq != expected_seq {
@@ -504,6 +576,16 @@ async fn scan_segments(dir: &Path) -> Result<Vec<SegmentScan>> {
     }
 
     Ok(scans)
+}
+
+impl SegmentScan {
+    fn max_seq(&self) -> Result<WalSeq> {
+        self.records
+            .last()
+            .map(WalRecord::seq)
+            .map(Ok)
+            .unwrap_or_else(|| previous_seq_before(self.first_seq))
+    }
 }
 
 async fn scan_segment(
@@ -878,6 +960,13 @@ fn next_seq_after(seq: WalSeq) -> Result<WalSeq> {
         .checked_add(1)
         .map(WalSeq::new)
         .ok_or_else(|| ServerError::wal("assign WAL sequence", "WAL sequence overflow"))
+}
+
+fn previous_seq_before(seq: WalSeq) -> Result<WalSeq> {
+    seq.get()
+        .checked_sub(1)
+        .map(WalSeq::new)
+        .ok_or_else(|| ServerError::wal("read WAL segment", "segment starts at sequence zero"))
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
