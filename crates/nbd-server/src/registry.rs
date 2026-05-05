@@ -388,8 +388,8 @@ impl ExportFactory {
                 Ok(bounds) => bounds.last_durable,
                 Err(error) => {
                     tracing::warn!(
-                        target: target::STORAGE,
-                        event = event::COMPACTION_ENQUEUE_FAILED,
+                        target: target::WAL,
+                        event = event::WAL_COMPACTION_ENQUEUE_FAILED,
                         service = observability::SERVICE_NAME,
                         server_instance_id = observability::server_instance_id(),
                         pid = observability::pid(),
@@ -402,8 +402,8 @@ impl ExportFactory {
             },
             Err(error) => {
                 tracing::warn!(
-                    target: target::STORAGE,
-                    event = event::COMPACTION_ENQUEUE_FAILED,
+                    target: target::WAL,
+                    event = event::WAL_COMPACTION_ENQUEUE_FAILED,
                     service = observability::SERVICE_NAME,
                     server_instance_id = observability::server_instance_id(),
                     pid = observability::pid(),
@@ -420,26 +420,26 @@ impl ExportFactory {
             .enqueue(CompactionJob::new(meta.id().clone(), target));
         match outcome {
             CompactionEnqueueOutcome::Queued => tracing::info!(
-                target: target::STORAGE,
-                event = event::COMPACTION_ENQUEUED,
+                target: target::WAL,
+                event = event::WAL_COMPACTION_ENQUEUED,
                 service = observability::SERVICE_NAME,
                 server_instance_id = observability::server_instance_id(),
                 pid = observability::pid(),
                 export_id = %meta.id(),
                 export_name = %meta.name(),
-                target_checkpoint = target.get(),
+                target_wal_seq = target.get(),
                 outcome = "queued",
             ),
             CompactionEnqueueOutcome::DroppedFull | CompactionEnqueueOutcome::ShuttingDown => {
                 tracing::warn!(
-                    target: target::STORAGE,
-                    event = event::COMPACTION_ENQUEUE_FAILED,
+                    target: target::WAL,
+                    event = event::WAL_COMPACTION_ENQUEUE_FAILED,
                     service = observability::SERVICE_NAME,
                     server_instance_id = observability::server_instance_id(),
                     pid = observability::pid(),
                     export_id = %meta.id(),
                     export_name = %meta.name(),
-                    target_checkpoint = target.get(),
+                    target_wal_seq = target.get(),
                     outcome = ?outcome,
                 );
             }

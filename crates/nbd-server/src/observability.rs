@@ -83,11 +83,6 @@ pub mod event {
     pub const CATALOG_TREE_COMMIT_COMPLETED: &str = "catalog.tree.commit.completed";
     pub const CATALOG_ERROR: &str = "catalog.error";
 
-    pub const COMPACTION_COMPLETED: &str = "compaction.completed";
-    pub const COMPACTION_ENQUEUED: &str = "compaction.enqueued";
-    pub const COMPACTION_ENQUEUE_FAILED: &str = "compaction.enqueue_failed";
-    pub const COMPACTION_FAILED: &str = "compaction.failed";
-
     pub const WAL_ROOT_LOADED: &str = "wal.root.loaded";
     pub const WAL_REPLAY_COMPLETED: &str = "wal.replay.completed";
     pub const WAL_COMPACTION_COMPLETED: &str = "wal.compaction.completed";

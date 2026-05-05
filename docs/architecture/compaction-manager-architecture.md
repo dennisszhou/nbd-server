@@ -79,7 +79,7 @@ struct CompactionResult {
     export_id: ExportId,
     base_root: CommittedRoot,
     published_root: Option<CommittedRoot>,
-    target_checkpoint: WalSeq,
+    target_wal_seq: WalSeq,
     compacted_records: u64,
     written_leaf_blobs: u64,
     outcome: CompactionOutcome,
@@ -95,9 +95,9 @@ enum CompactionOutcome {
 struct CompactionPlan {
     export_id: ExportId,
     base_root: CommittedRoot,
-    base_checkpoint: WalSeq,
+    base_wal_seq: WalSeq,
     base_size_bytes: u64,
-    target_checkpoint: WalSeq,
+    target_wal_seq: WalSeq,
 }
 ```
 
@@ -190,13 +190,13 @@ publish checkpoints without physically pruning WAL.
 ```text
 receive CompactExport(export_id, requested target)
   -> load latest export metadata from ExportCatalog
-  -> capture base_root, base_checkpoint, size, and layout from the DB head
+  -> capture base_root, base_wal_seq, size, and layout from the DB head
   -> open the export WAL through WalProvider
-  -> clamp target checkpoint S to the durable WAL high watermark
-  -> if S <= base_checkpoint: return AlreadyCovered or NoRecords
-  -> verify S is durable and contiguous after base_checkpoint
+  -> clamp target WAL sequence S to the durable WAL high watermark
+  -> if S <= base_wal_seq: return AlreadyCovered or NoRecords
+  -> verify S is durable and contiguous after base_wal_seq
   -> build CompactionPlan(base head, S)
-  -> read WAL records (base_checkpoint + 1)..S
+  -> read WAL records (base_wal_seq + 1)..S
   -> group records by 32 MiB leaf range
   -> for each affected leaf:
        read committed leaf through base_root only, or zero buffer
@@ -382,8 +382,8 @@ leave the export recoverable from the previous catalog checkpoint plus WAL.
 - Published checkpoints are global WAL prefixes.
 - A published root at checkpoint `S` represents every WAL record with
   `seq <= S`.
-- The target checkpoint is durable and contiguous.
-- Compaction input is exactly `(base_checkpoint + 1)..target_checkpoint`.
+- The target WAL sequence is durable and contiguous.
+- Compaction input is exactly `(base_wal_seq + 1)..target_wal_seq`.
 - Committed base reads during compaction use `base_root`, not
   `ExportReadView`.
 - Compaction applies WAL records in sequence order.

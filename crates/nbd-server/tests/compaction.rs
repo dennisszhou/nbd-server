@@ -41,7 +41,7 @@ async fn compaction_publishes_checkpoint_from_wal_records() {
         .expect("compact export");
 
     assert_eq!(result.outcome(), CompactionOutcome::Published);
-    assert_eq!(result.target_checkpoint(), WalSeq::new(2));
+    assert_eq!(result.target_wal_seq(), WalSeq::new(2));
     assert_eq!(result.compacted_records(), 2);
     assert_eq!(result.written_leaf_blobs(), 1);
     let snapshot = fixture
@@ -136,7 +136,7 @@ async fn compaction_clamps_target_to_durable_wal_bounds() {
         .expect("compact clamped job");
 
     assert_eq!(result.outcome(), CompactionOutcome::Published);
-    assert_eq!(result.target_checkpoint(), WalSeq::new(1));
+    assert_eq!(result.target_wal_seq(), WalSeq::new(1));
     let snapshot = fixture
         .catalog
         .load_cow_tree(created.id())

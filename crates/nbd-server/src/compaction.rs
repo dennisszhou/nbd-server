@@ -37,7 +37,7 @@ struct CompactionShutdownState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionJob {
     export_id: ExportId,
-    through: WalSeq,
+    through_wal_seq: WalSeq,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +55,8 @@ pub struct CompactionShutdown {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
     export_id: ExportId,
-    target_checkpoint: WalSeq,
+    base_wal_seq: WalSeq,
+    target_wal_seq: WalSeq,
     compacted_records: u64,
     written_leaf_blobs: u64,
     outcome: CompactionOutcome,
@@ -187,16 +188,19 @@ impl CompactionManager {
 }
 
 impl CompactionJob {
-    pub fn new(export_id: ExportId, through: WalSeq) -> Self {
-        Self { export_id, through }
+    pub fn new(export_id: ExportId, through_wal_seq: WalSeq) -> Self {
+        Self {
+            export_id,
+            through_wal_seq,
+        }
     }
 
     pub fn export_id(&self) -> &ExportId {
         &self.export_id
     }
 
-    pub fn through(&self) -> WalSeq {
-        self.through
+    pub fn through_wal_seq(&self) -> WalSeq {
+        self.through_wal_seq
     }
 }
 
@@ -205,8 +209,12 @@ impl CompactionResult {
         &self.export_id
     }
 
-    pub fn target_checkpoint(&self) -> WalSeq {
-        self.target_checkpoint
+    pub fn base_wal_seq(&self) -> WalSeq {
+        self.base_wal_seq
+    }
+
+    pub fn target_wal_seq(&self) -> WalSeq {
+        self.target_wal_seq
     }
 
     pub fn compacted_records(&self) -> u64 {
@@ -237,20 +245,21 @@ impl CompactionWorker {
             .map_err(ServerError::catalog)?;
         let wal = self.open_wal(job.export_id()).await?;
         let bounds = wal.bounds().await?;
-        let target_checkpoint = job.through().min(bounds.last_durable);
-        let base_checkpoint = snapshot.checkpoint_wal_seq();
+        let target_wal_seq = job.through_wal_seq().min(bounds.last_durable);
+        let base_wal_seq = snapshot.checkpoint_wal_seq();
 
-        if target_checkpoint <= base_checkpoint {
+        if target_wal_seq <= base_wal_seq {
             return Ok(CompactionResult {
                 export_id: job.export_id().clone(),
-                target_checkpoint,
+                base_wal_seq,
+                target_wal_seq,
                 compacted_records: 0,
                 written_leaf_blobs: 0,
                 outcome: CompactionOutcome::AlreadyCovered,
             });
         }
 
-        let mut replay = wal.replay_range(base_checkpoint, target_checkpoint).await?;
+        let mut replay = wal.replay_range(base_wal_seq, target_wal_seq).await?;
         let mut chunk_images = BTreeMap::new();
         let mut compacted_records = 0u64;
         while let Some(record) = replay.next_record().await? {
@@ -261,7 +270,8 @@ impl CompactionWorker {
         if compacted_records == 0 {
             return Ok(CompactionResult {
                 export_id: job.export_id().clone(),
-                target_checkpoint,
+                base_wal_seq,
+                target_wal_seq,
                 compacted_records,
                 written_leaf_blobs: 0,
                 outcome: CompactionOutcome::NoRecords,
@@ -285,7 +295,7 @@ impl CompactionWorker {
                 PublishCompaction::new(
                     job.export_id().clone(),
                     expected_base,
-                    target_checkpoint,
+                    target_wal_seq,
                     chunks.into_values().collect(),
                 )
                 .map_err(ServerError::catalog)?,
@@ -300,7 +310,8 @@ impl CompactionWorker {
 
         Ok(CompactionResult {
             export_id: job.export_id().clone(),
-            target_checkpoint,
+            base_wal_seq,
+            target_wal_seq,
             compacted_records,
             written_leaf_blobs,
             outcome,
@@ -432,17 +443,18 @@ fn spawn_worker(
 
 async fn process_job(worker: &Arc<CompactionWorker>, job: CompactionJob) {
     let export_id = job.export_id().clone();
-    let through = job.through();
+    let through_wal_seq = job.through_wal_seq();
     match worker.compact_export(job).await {
         Ok(result) => {
             tracing::info!(
-                target: target::STORAGE,
-                event = event::COMPACTION_COMPLETED,
+                target: target::WAL,
+                event = event::WAL_COMPACTION_COMPLETED,
                 service = observability::SERVICE_NAME,
                 server_instance_id = observability::server_instance_id(),
                 pid = observability::pid(),
                 export_id = %result.export_id(),
-                target_checkpoint = result.target_checkpoint().get(),
+                base_wal_seq = result.base_wal_seq().get(),
+                target_wal_seq = result.target_wal_seq().get(),
                 compacted_records = result.compacted_records(),
                 written_leaf_blobs = result.written_leaf_blobs(),
                 outcome = ?result.outcome(),
@@ -450,13 +462,13 @@ async fn process_job(worker: &Arc<CompactionWorker>, job: CompactionJob) {
         }
         Err(error) => {
             tracing::warn!(
-                target: target::STORAGE,
-                event = event::COMPACTION_FAILED,
+                target: target::WAL,
+                event = event::WAL_COMPACTION_FAILED,
                 service = observability::SERVICE_NAME,
                 server_instance_id = observability::server_instance_id(),
                 pid = observability::pid(),
                 export_id = %export_id,
-                target_checkpoint = through.get(),
+                target_wal_seq = through_wal_seq.get(),
                 error = %error,
             );
         }
