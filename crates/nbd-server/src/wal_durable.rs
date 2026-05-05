@@ -81,6 +81,15 @@ struct OverlayReadSlice {
     record_offset: u64,
 }
 
+#[derive(Debug, Clone)]
+struct RetiredOverlayExtent {
+    start: u64,
+    end: u64,
+    seq: WalSeq,
+    record: Arc<WalRecord>,
+    record_offset: u64,
+}
+
 const DEFAULT_READ_CACHE_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +449,34 @@ impl OverlayExtentMap {
             .collect()
     }
 
+    fn visible_through(&self, seq: WalSeq) -> Vec<RetiredOverlayExtent> {
+        let mut retired = self
+            .extents
+            .iter()
+            .filter_map(|extent| {
+                (extent.value().seq <= seq).then(|| RetiredOverlayExtent {
+                    start: extent.start(),
+                    end: extent.end(),
+                    seq: extent.value().seq,
+                    record: extent.value().record.clone(),
+                    record_offset: extent.value().record_offset,
+                })
+            })
+            .collect::<Vec<_>>();
+        retired.sort_by_key(|extent| (extent.seq, extent.start));
+        retired
+    }
+
+    fn remove_retired(&mut self, retired: &[RetiredOverlayExtent]) -> Result<()> {
+        for extent in retired {
+            self.extents
+                .remove_range_with_split(extent.start, extent.end, |overlay, delta| {
+                    overlay.split_at(delta)
+                })?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn debug_extents(&self) -> Vec<(u64, u64, WalSeq, u64)> {
         self.extents
@@ -596,6 +633,57 @@ impl ExportReadView {
         state.overlay.insert_record(record)?;
         state.cache.trim_range(record_range)?;
         state.last_applied_seq = expected_seq;
+        Ok(())
+    }
+
+    pub async fn advance_root(&self, new_root: RootSnapshot) -> Result<()> {
+        let mut state = self.state.write().await;
+        if new_root.size_bytes() != state.root.size_bytes() {
+            return Err(ServerError::wal(
+                "advance read-view root",
+                format!(
+                    "new root size {} does not match current size {}",
+                    new_root.size_bytes(),
+                    state.root.size_bytes()
+                ),
+            ));
+        }
+
+        let current_checkpoint = state.root.checkpoint_wal_seq();
+        let new_checkpoint = new_root.checkpoint_wal_seq();
+        if new_checkpoint < current_checkpoint {
+            return Err(ServerError::wal(
+                "advance read-view root",
+                format!(
+                    "new checkpoint {} is before current checkpoint {}",
+                    new_checkpoint, current_checkpoint
+                ),
+            ));
+        }
+        if new_checkpoint == current_checkpoint {
+            return Ok(());
+        }
+        if new_checkpoint > state.last_applied_seq {
+            return Err(ServerError::wal(
+                "advance read-view root",
+                format!(
+                    "new checkpoint {} is beyond last applied WAL sequence {}",
+                    new_checkpoint, state.last_applied_seq
+                ),
+            ));
+        }
+
+        let retired = state.overlay.visible_through(new_checkpoint);
+        for extent in &retired {
+            state.cache.insert_wal_record_slice(
+                byte_range_from_bounds(extent.start, extent.end)?,
+                extent.record.clone(),
+                extent.record_offset,
+                CacheInsertPlacement::Cold,
+            )?;
+        }
+        state.overlay.remove_retired(&retired)?;
+        state.root = new_root;
         Ok(())
     }
 }
@@ -1011,6 +1099,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_view_advance_root_retires_only_visible_overlay_extents() {
+        let reader = Arc::new(CountingTreeReader::new(Bytes::from_static(
+            b"bbbb456789abcdef",
+        )));
+        let read_view =
+            ExportReadView::new_with_cache_budget(zero_root(4096), reader.clone(), 1024);
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply shadowed record");
+        read_view
+            .apply_wal_record(wal_record(2, 0, b"bbbb"))
+            .await
+            .expect("apply visible record");
+
+        read_view
+            .advance_root(zero_root_at(4096, WalSeq::new(2)))
+            .await
+            .expect("advance root");
+
+        let state = read_view.state.read().await;
+        assert!(state.overlay.debug_extents().is_empty());
+        assert_eq!(state.cache.debug_wal_seqs(), vec![2]);
+        drop(state);
+
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 4))
+                .await
+                .expect("read retired cache"),
+            b"bbbb",
+        );
+        assert_eq!(reader.reads(), 0);
+    }
+
+    #[tokio::test]
+    async fn read_view_advance_root_rejects_unapplied_checkpoint() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply record");
+
+        let error = read_view
+            .advance_root(zero_root_at(4096, WalSeq::new(2)))
+            .await
+            .expect_err("reject unapplied checkpoint");
+
+        assert!(matches!(error, ServerError::Wal { .. }));
+        assert_eq!(
+            read_view.state.read().await.overlay.debug_extents(),
+            vec![(0, 4, WalSeq::new(1), 0)],
+        );
+    }
+
+    #[tokio::test]
     async fn cow_tree_reader_reads_from_root_snapshot() {
         let runtime = TestRuntime::new().expect("test runtime");
         let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
@@ -1129,10 +1273,14 @@ mod tests {
     }
 
     fn zero_root(size_bytes: u64) -> RootSnapshot {
+        zero_root_at(size_bytes, WalSeq::zero())
+    }
+
+    fn zero_root_at(size_bytes: u64, checkpoint_wal_seq: WalSeq) -> RootSnapshot {
         RootSnapshot {
             backing: RootBacking::Zero {
                 root_node_id: None,
-                checkpoint_wal_seq: WalSeq::zero(),
+                checkpoint_wal_seq,
                 size_bytes,
             },
         }

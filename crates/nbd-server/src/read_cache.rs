@@ -1,8 +1,7 @@
-#![allow(dead_code)]
-
-use crate::{extent_map::ExtentMap, ByteRange, Result, ServerError};
+use crate::{extent_map::ExtentMap, ByteRange, Result, ServerError, WalRecord};
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 pub(crate) const CACHE_BLOCK_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -52,6 +51,7 @@ struct CacheObject {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CachePayload {
     Bytes(Bytes),
+    WalRecord { record: Arc<WalRecord> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +149,47 @@ impl ReadCache {
         Ok(())
     }
 
+    pub(crate) fn insert_wal_record_slice(
+        &mut self,
+        range: ByteRange,
+        record: Arc<WalRecord>,
+        record_offset: u64,
+        placement: CacheInsertPlacement,
+    ) -> Result<()> {
+        let Some(record_end) = record_offset.checked_add(range.len()) else {
+            return Err(ServerError::wal(
+                "insert read cache WAL record",
+                "record offset overflowed",
+            ));
+        };
+        if record_end > record.data().len() as u64 {
+            return Err(ServerError::wal(
+                "insert read cache WAL record",
+                "retired WAL slice exceeds record payload",
+            ));
+        }
+        if range.is_empty() {
+            return Ok(());
+        }
+
+        let range_start = range.start();
+        let range_end = range_end(range);
+        let mut start = range_start;
+        while start < range_end {
+            let window_end = cache_block_end(start)?;
+            let end = range_end.min(window_end);
+            let slice_offset = record_offset
+                .checked_add(start - range_start)
+                .ok_or_else(|| {
+                    ServerError::wal("insert read cache WAL record", "record offset overflowed")
+                })?;
+            self.insert_window_wal_record(start, end, record.clone(), slice_offset, placement)?;
+            start = end;
+        }
+        self.evict_to_budget()?;
+        Ok(())
+    }
+
     pub(crate) fn trim_range(&mut self, range: ByteRange) -> Result<()> {
         if range.is_empty() {
             return Ok(());
@@ -170,6 +211,7 @@ impl ReadCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn charged_bytes(&self) -> usize {
         self.charged_bytes
     }
@@ -227,6 +269,74 @@ impl ReadCache {
             CacheExtent {
                 object_id,
                 object_offset: 0,
+            },
+        )?;
+        self.rebuild_backrefs_and_gc_with_inherited_lru(object_id, lru_position, placement);
+        Ok(())
+    }
+
+    fn insert_window_wal_record(
+        &mut self,
+        start: u64,
+        end: u64,
+        record: Arc<WalRecord>,
+        record_offset: u64,
+        placement: CacheInsertPlacement,
+    ) -> Result<()> {
+        debug_assert!(same_cache_block(start, end));
+        let sources = self.existing_sources_for_window(start)?;
+        let connected = connected_sources(start, end, sources);
+        let component_start = connected
+            .iter()
+            .map(|source| source.start)
+            .chain(std::iter::once(start))
+            .min()
+            .expect("component has new source");
+        let component_end = connected
+            .iter()
+            .map(|source| source.end)
+            .chain(std::iter::once(end))
+            .max()
+            .expect("component has new source");
+        let input_ids = connected
+            .iter()
+            .map(|source| source.object_id)
+            .collect::<Vec<_>>();
+        let lru_position = self.lru.coldest_position(&input_ids);
+
+        let keep_wal_record = connected.is_empty()
+            && record_offset == 0
+            && end - start == record.data().len() as u64
+            && record.data().len() as u64 <= CACHE_BLOCK_BYTES;
+        let (payload, extent_object_offset) = if keep_wal_record {
+            (CachePayload::WalRecord { record }, 0)
+        } else {
+            (
+                CachePayload::Bytes(materialize_merged_wal_bytes(
+                    component_start,
+                    component_end,
+                    start,
+                    end,
+                    record_offset,
+                    &record,
+                    &connected,
+                )?),
+                0,
+            )
+        };
+
+        self.extents
+            .remove_range_with_split(component_start, component_end, |extent, delta| {
+                extent.split_at(delta)
+            })?;
+
+        let object_id = self.insert_object(component_start, component_end, payload, placement);
+        self.extents.insert_exact(
+            component_start,
+            component_end,
+            CacheExtent {
+                object_id,
+                object_offset: extent_object_offset,
             },
         )?;
         self.rebuild_backrefs_and_gc_with_inherited_lru(object_id, lru_position, placement);
@@ -384,6 +494,17 @@ impl ReadCache {
     fn debug_lru(&self) -> Vec<CacheObjectId> {
         self.lru.order.iter().copied().collect()
     }
+
+    #[cfg(test)]
+    pub(crate) fn debug_wal_seqs(&self) -> Vec<u64> {
+        self.objects
+            .values()
+            .filter_map(|object| match &object.payload {
+                CachePayload::Bytes(_) => None,
+                CachePayload::WalRecord { record } => Some(record.seq().get()),
+            })
+            .collect()
+    }
 }
 
 impl CacheReadSlice {
@@ -429,6 +550,7 @@ impl CachePayload {
     fn charged_bytes(&self) -> usize {
         match self {
             Self::Bytes(bytes) => bytes.len(),
+            Self::WalRecord { record } => record.data().len(),
         }
     }
 
@@ -440,6 +562,9 @@ impl CachePayload {
         match self {
             Self::Bytes(bytes) => {
                 dst[..len].copy_from_slice(&bytes[offset..offset + len]);
+            }
+            Self::WalRecord { record } => {
+                dst[..len].copy_from_slice(&record.data()[offset..offset + len]);
             }
         }
         Ok(())
@@ -560,6 +685,45 @@ fn materialize_merged_bytes(
     Ok(Bytes::from(merged))
 }
 
+fn materialize_merged_wal_bytes(
+    component_start: u64,
+    component_end: u64,
+    new_start: u64,
+    new_end: u64,
+    record_offset: u64,
+    record: &WalRecord,
+    existing: &[ExistingSource],
+) -> Result<Bytes> {
+    let len = usize::try_from(component_end - component_start)
+        .map_err(|_| ServerError::wal("read cache", "merged cache object too large"))?;
+    let mut merged = vec![0; len];
+    let mut coverage = Vec::with_capacity(existing.len() + 1);
+
+    for source in existing {
+        copy_source(
+            component_start,
+            source.start,
+            source.end,
+            source.object_offset,
+            &source.payload,
+            &mut merged,
+        )?;
+        coverage.push((source.start, source.end));
+    }
+
+    copy_wal_source(
+        component_start,
+        new_start,
+        new_end,
+        record_offset,
+        record,
+        &mut merged,
+    )?;
+    coverage.push((new_start, new_end));
+    validate_coverage(component_start, component_end, coverage)?;
+    Ok(Bytes::from(merged))
+}
+
 fn copy_source(
     component_start: u64,
     source_start: u64,
@@ -592,6 +756,24 @@ fn copy_bytes_source(
     let len = usize::try_from(source_end - source_start)
         .map_err(|_| ServerError::wal("read cache", "merge length does not fit usize"))?;
     merged[dst_start..dst_start + len].copy_from_slice(&bytes[src_start..src_start + len]);
+    Ok(())
+}
+
+fn copy_wal_source(
+    component_start: u64,
+    source_start: u64,
+    source_end: u64,
+    record_offset: u64,
+    record: &WalRecord,
+    merged: &mut [u8],
+) -> Result<()> {
+    let dst_start = usize::try_from(source_start - component_start)
+        .map_err(|_| ServerError::wal("read cache", "merge destination does not fit usize"))?;
+    let src_start = usize::try_from(record_offset)
+        .map_err(|_| ServerError::wal("read cache", "merge source does not fit usize"))?;
+    let len = usize::try_from(source_end - source_start)
+        .map_err(|_| ServerError::wal("read cache", "merge length does not fit usize"))?;
+    merged[dst_start..dst_start + len].copy_from_slice(&record.data()[src_start..src_start + len]);
     Ok(())
 }
 
@@ -640,6 +822,7 @@ fn range_end(range: ByteRange) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nbd_control_plane::WalSeq;
 
     #[test]
     fn adjacent_same_window_fills_merge_and_inherit_lru_position() {
@@ -775,6 +958,24 @@ mod tests {
         assert_eq!(cache.charged_bytes(), 0);
         assert!(cache.debug_extents().is_empty());
         assert!(cache.debug_lru().is_empty());
+    }
+
+    #[test]
+    fn wal_record_payload_charges_full_record_when_kept() {
+        let mut cache = ReadCache::new(1024);
+        let record = Arc::new(
+            WalRecord::new(WalSeq::new(7), ByteRange::new(0, 4), b"wal!".to_vec())
+                .expect("WAL record"),
+        );
+
+        cache
+            .insert_wal_record_slice(ByteRange::new(0, 4), record, 0, CacheInsertPlacement::Cold)
+            .expect("insert WAL cache object");
+
+        assert_eq!(cache.charged_bytes(), 4);
+        assert_eq!(cache.debug_wal_seqs(), vec![7]);
+        assert_eq!(read_all(&cache, ByteRange::new(0, 4)), b"wal!");
+        assert_eq!(cache.debug_lru().len(), 1);
     }
 
     fn read_all(cache: &ReadCache, range: ByteRange) -> Vec<u8> {
