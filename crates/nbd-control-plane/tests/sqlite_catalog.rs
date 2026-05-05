@@ -1,7 +1,8 @@
 use nbd_control_plane::{
-    BlobKey, CatalogError, CatalogUrl, ChunkIndex, CreateExport, DeleteExport, ExportCatalog,
-    ExportEngineKind, ExportLayoutKind, ExportName, ExportState, InspectExport, ListExports,
-    SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore, WalSeq, SIMPLE_CHUNK_BYTES,
+    BlobKey, CatalogError, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CreateExport,
+    DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName, ExportState,
+    InspectExport, ListExports, PublishCompaction, PublishCompactionOutcome, SQLiteExportCatalog,
+    SimpleChunkRef, SimpleTreeMetadataStore, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 use nbd_test_support::TestRuntime;
 
@@ -14,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
         "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
     ),
     include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
+    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
 ];
 
 #[tokio::test]
@@ -94,6 +96,15 @@ async fn create_export_initializes_wal_durable_head() {
     );
     assert!(created.head().root_node_id().is_none());
     assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
+
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load cow tree");
+    assert_eq!(snapshot.export_id(), created.id());
+    assert!(snapshot.root_node_id().is_none());
+    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::zero());
+    assert!(snapshot.chunks().is_empty());
 }
 
 #[tokio::test]
@@ -275,6 +286,18 @@ async fn durable_engine_kind_migrations_preserve_existing_exports() {
         ))
         .await
         .expect("create wal durable after migration");
+    assert_eq!(wal.engine_kind(), ExportEngineKind::WalDurable);
+    assert_eq!(wal.head().layout_kind(), ExportLayoutKind::CowImmutableTree);
+
+    sqlx::raw_sql(MIGRATIONS[4])
+        .execute(catalog.pool())
+        .await
+        .expect("apply cow tree metadata migration");
+
+    let wal = catalog
+        .inspect_export(InspectExport::new(export_name("disk-wal")))
+        .await
+        .expect("inspect migrated wal export");
     assert_eq!(wal.engine_kind(), ExportEngineKind::WalDurable);
     assert_eq!(wal.head().layout_kind(), ExportLayoutKind::CowImmutableTree);
 }
@@ -493,6 +516,208 @@ async fn simple_tree_rejects_existing_leaf_metadata() {
         .contains("chunk 1 is already materialized"));
 }
 
+#[tokio::test]
+async fn cow_tree_publish_creates_checkpoint_root() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+    let chunk = cow_chunk(2, "blob-two");
+
+    let outcome = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                created.id().clone(),
+                created.head().clone(),
+                WalSeq::new(4),
+                vec![chunk.clone()],
+            )
+            .expect("publish request"),
+        )
+        .await
+        .expect("publish compaction");
+    let published = match outcome {
+        PublishCompactionOutcome::Published(meta) => meta,
+        outcome => panic!("expected Published, got {outcome:?}"),
+    };
+    assert_eq!(published.head().checkpoint_wal_seq(), WalSeq::new(4));
+    assert!(published.head().root_node_id().is_some());
+
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load cow tree");
+    assert_eq!(snapshot.root_node_id(), published.head().root_node_id());
+    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(4));
+    assert_eq!(snapshot.chunk(ChunkIndex::new(2)), Some(&chunk));
+    assert!(snapshot.chunk(ChunkIndex::new(1)).is_none());
+}
+
+#[tokio::test]
+async fn cow_tree_publish_is_idempotent_for_covered_checkpoint() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+    let base = created.head().clone();
+    catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                created.id().clone(),
+                base.clone(),
+                WalSeq::new(4),
+                vec![cow_chunk(0, "blob-zero")],
+            )
+            .expect("first publish"),
+        )
+        .await
+        .expect("publish first checkpoint");
+
+    let outcome = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                created.id().clone(),
+                base,
+                WalSeq::new(2),
+                vec![cow_chunk(0, "blob-duplicate")],
+            )
+            .expect("duplicate publish"),
+        )
+        .await
+        .expect("publish covered checkpoint");
+
+    let covered = match outcome {
+        PublishCompactionOutcome::AlreadyCovered(meta) => meta,
+        outcome => panic!("expected AlreadyCovered, got {outcome:?}"),
+    };
+    assert_eq!(covered.head().checkpoint_wal_seq(), WalSeq::new(4));
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load cow tree");
+    assert_eq!(
+        snapshot
+            .chunk(ChunkIndex::new(0))
+            .unwrap()
+            .blob_key()
+            .as_str(),
+        "blob-zero"
+    );
+}
+
+#[tokio::test]
+async fn cow_tree_publish_rejects_stale_base() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+    let base = created.head().clone();
+    catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                created.id().clone(),
+                base.clone(),
+                WalSeq::new(4),
+                vec![cow_chunk(0, "blob-zero")],
+            )
+            .expect("first publish"),
+        )
+        .await
+        .expect("publish first checkpoint");
+
+    let outcome = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                created.id().clone(),
+                base,
+                WalSeq::new(6),
+                vec![cow_chunk(1, "blob-one")],
+            )
+            .expect("stale publish"),
+        )
+        .await
+        .expect("publish stale checkpoint");
+
+    let stale = match outcome {
+        PublishCompactionOutcome::StalePlan(meta) => meta,
+        outcome => panic!("expected StalePlan, got {outcome:?}"),
+    };
+    assert_eq!(stale.head().checkpoint_wal_seq(), WalSeq::new(4));
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load cow tree");
+    assert!(snapshot.chunk(ChunkIndex::new(1)).is_none());
+}
+
+#[tokio::test]
+async fn cow_tree_publish_rejects_deleted_and_wrong_layout_exports() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let memory = catalog
+        .create_export(create_export("disk-memory", TREE_CHUNK_BYTES, 4096))
+        .await
+        .expect("create memory export");
+    let wal = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            TREE_CHUNK_BYTES,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create wal export");
+    catalog
+        .delete_export(DeleteExport::new(export_name("disk-wal")))
+        .await
+        .expect("delete wal export");
+
+    let wrong_layout = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                memory.id().clone(),
+                wal.head().clone(),
+                WalSeq::new(1),
+                vec![cow_chunk(0, "blob-memory")],
+            )
+            .expect("wrong layout publish"),
+        )
+        .await
+        .unwrap_err();
+    assert!(wrong_layout.to_string().contains("engine_kind"));
+
+    let deleted = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                wal.id().clone(),
+                wal.head().clone(),
+                WalSeq::new(1),
+                vec![cow_chunk(0, "blob-deleted")],
+            )
+            .expect("deleted publish"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(deleted, CatalogError::ExportDeleted { .. }));
+}
+
 async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
@@ -526,4 +751,13 @@ fn create_export_with_engine(
 ) -> CreateExport {
     CreateExport::new(export_name(name), size_bytes, block_size, engine_kind)
         .expect("valid create export request")
+}
+
+fn cow_chunk(index: u64, blob_key: &str) -> CowChunkRef {
+    CowChunkRef::new(
+        ChunkIndex::new(index),
+        BlobKey::new(blob_key).expect("valid blob key"),
+        TREE_CHUNK_BYTES,
+    )
+    .expect("valid cow chunk")
 }
