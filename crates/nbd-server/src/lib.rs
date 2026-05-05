@@ -3,6 +3,7 @@
 #![deny(unsafe_code)]
 
 pub mod admission;
+pub mod compaction;
 mod connection;
 
 pub mod error;
@@ -20,6 +21,9 @@ pub mod wal_durable;
 
 pub use admission::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
+};
+pub use compaction::{
+    CompactionEnqueueOutcome, CompactionJob, CompactionManager, CompactionOutcome, CompactionResult,
 };
 pub use error::{Result, ServerError};
 pub use export::{

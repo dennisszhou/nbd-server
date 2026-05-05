@@ -81,6 +81,9 @@ pub mod event {
     pub const CATALOG_TREE_COMMIT_STARTED: &str = "catalog.tree.commit.started";
     pub const CATALOG_TREE_COMMIT_COMPLETED: &str = "catalog.tree.commit.completed";
     pub const CATALOG_ERROR: &str = "catalog.error";
+
+    pub const COMPACTION_COMPLETED: &str = "compaction.completed";
+    pub const COMPACTION_FAILED: &str = "compaction.failed";
 }
 
 // `tracing` event levels are callsite-static, so request failure severity has
