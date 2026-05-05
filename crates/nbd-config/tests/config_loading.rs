@@ -1,7 +1,8 @@
 use nbd_config::{
     catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
-    default_log_file_path, default_state_dir_for_home, ConfigSource, ExportRuntimeKind, NbdConfig,
-    DEFAULT_EXPORT_QUEUE_DEPTH, DEFAULT_LOG_FILE_PATH, DEFAULT_REPLY_QUEUE_CAPACITY,
+    default_log_file_path, default_state_dir_for_home, default_wal_dir_for_home, ConfigSource,
+    ExportRuntimeKind, NbdConfig, DEFAULT_EXPORT_QUEUE_DEPTH, DEFAULT_LOG_FILE_PATH,
+    DEFAULT_REPLY_QUEUE_CAPACITY,
 };
 use std::env;
 use std::fs;
@@ -26,6 +27,7 @@ fn explicit_config_loads_from_requested_path() {
 
     assert_eq!(config.runtime.state_dir, state_dir);
     assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
+    assert_eq!(config.runtime.wal_dir, state_dir.join("wal"));
     assert_eq!(
         config.catalog.url,
         catalog_file_url_for_path(catalog_path).unwrap()
@@ -61,6 +63,7 @@ fn explicit_config_does_not_bootstrap_user_default() {
 
     assert_eq!(config.runtime.state_dir, state_dir);
     assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
+    assert_eq!(config.runtime.wal_dir, state_dir.join("wal"));
     assert!(!default_state_dir_for_home(&fake_home).exists());
     drop(old_home);
 }
@@ -83,8 +86,10 @@ fn default_user_path_bootstraps_absolute_config() {
         config.runtime.blob_dir,
         default_blob_dir_for_home(&fake_home)
     );
+    assert_eq!(config.runtime.wal_dir, default_wal_dir_for_home(&fake_home));
     assert!(config.runtime.state_dir.is_absolute());
     assert!(config.runtime.blob_dir.is_absolute());
+    assert!(config.runtime.wal_dir.is_absolute());
     assert_eq!(
         config.catalog.url,
         catalog_file_url_for_path(fake_home.join(".nbd").join("catalog.db")).unwrap()
@@ -130,12 +135,14 @@ fn explicit_config_loads_logging_file_path() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let catalog_path = temp.path().join("catalog.db");
+    let wal_dir = state_dir.join("wal");
     let log_path = temp.path().join("logs").join("current.log");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[logging]\nfile_path = {:?}\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[logging]\nfile_path = {:?}\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
         state_dir,
+        wal_dir,
         log_path,
     );
     fs::write(&config_path, contents).unwrap();
@@ -150,13 +157,15 @@ fn explicit_config_loads_blob_directory() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let blob_dir = temp.path().join("isolated-blobs");
+    let wal_dir = state_dir.join("wal");
     let catalog_path = temp.path().join("catalog.db");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nblob_dir = {:?}\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nblob_dir = {:?}\nwal_dir = {:?}\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
         state_dir,
         blob_dir,
+        wal_dir,
     );
     fs::write(&config_path, contents).unwrap();
 
@@ -164,6 +173,29 @@ fn explicit_config_loads_blob_directory() {
 
     assert_eq!(config.runtime.state_dir, state_dir);
     assert_eq!(config.runtime.blob_dir, blob_dir);
+    assert_eq!(config.runtime.wal_dir, wal_dir);
+}
+
+#[test]
+fn explicit_config_loads_wal_directory() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let wal_dir = temp.path().join("isolated-wal");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n",
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir,
+        wal_dir,
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(config.runtime.state_dir, state_dir);
+    assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
+    assert_eq!(config.runtime.wal_dir, wal_dir);
 }
 
 #[test]
@@ -183,11 +215,13 @@ fn explicit_server_config_loads_runtime_choice() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let catalog_path = temp.path().join("catalog.db");
+    let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
-        state_dir
+        state_dir,
+        wal_dir,
     );
     fs::write(&config_path, contents).unwrap();
 
@@ -209,11 +243,13 @@ fn explicit_server_config_loads_concurrent_runtime_choice() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let catalog_path = temp.path().join("catalog.db");
+    let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"concurrent\"\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_runtime = \"concurrent\"\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
-        state_dir
+        state_dir,
+        wal_dir,
     );
     fs::write(&config_path, contents).unwrap();
 
@@ -235,11 +271,13 @@ fn explicit_server_config_rejects_unknown_runtime_choice() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let catalog_path = temp.path().join("catalog.db");
+    let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"parallel\"\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_runtime = \"parallel\"\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
-        state_dir
+        state_dir,
+        wal_dir,
     );
     fs::write(&config_path, contents).unwrap();
 
@@ -254,11 +292,13 @@ fn explicit_server_config_loads_queue_sizing() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let catalog_path = temp.path().join("catalog.db");
+    let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\nexport_queue_depth = 7\n\n[server.connection]\nreply_queue_capacity = 3\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\nexport_queue_depth = 7\n\n[server.connection]\nreply_queue_capacity = 3\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
-        state_dir
+        state_dir,
+        wal_dir,
     );
     fs::write(&config_path, contents).unwrap();
 
@@ -274,11 +314,13 @@ fn zero_queue_sizing_is_rejected() {
     let temp = TempRoot::new();
     let state_dir = temp.path().join("state");
     let catalog_path = temp.path().join("catalog.db");
+    let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n\n[server]\nexport_queue_depth = 0\n\n[server.connection]\nreply_queue_capacity = 1\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_queue_depth = 0\n\n[server.connection]\nreply_queue_capacity = 1\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
-        state_dir
+        state_dir,
+        wal_dir,
     );
     fs::write(&config_path, contents).unwrap();
 
@@ -289,10 +331,12 @@ fn zero_queue_sizing_is_rejected() {
 }
 
 fn write_config(config_path: &Path, state_dir: &Path, catalog_path: &Path) {
+    let wal_dir = state_dir.join("wal");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
-        state_dir
+        state_dir,
+        wal_dir,
     );
 
     fs::write(config_path, contents).unwrap();

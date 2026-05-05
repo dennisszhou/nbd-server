@@ -9,8 +9,9 @@ PORT="${KERNEL_SMOKE_PORT:-10809}"
 DEVICE="${KERNEL_SMOKE_DEVICE:-/dev/nbd0}"
 LISTEN="127.0.0.1:${PORT}"
 ROOT="$(mktemp -d /tmp/nbd-smoke.XXXXXX)"
-CONFIG="${ROOT}/config.toml"
-CATALOG="${ROOT}/catalog.db"
+SMOKE_HOME="${ROOT}/home"
+CONFIG="${SMOKE_HOME}/.nbd/config.toml"
+CATALOG="${SMOKE_HOME}/.nbd/catalog.db"
 PROBE_EXPECTED="${ROOT}/probe.expected"
 MOUNT_DIR="/mnt/nbd-smoke"
 SERVER_PID=""
@@ -80,7 +81,7 @@ should_reattach() {
 }
 
 start_server() {
-    "${NBD_SERVER}" serve --config "${CONFIG}" --listen "${LISTEN}" &
+    HOME="${SMOKE_HOME}" "${NBD_SERVER}" serve --listen "${LISTEN}" &
     SERVER_PID="$!"
     wait_for_server
 }
@@ -128,24 +129,17 @@ if "${NBD_CLIENT}" -c "${DEVICE}" >/dev/null 2>&1; then
     exit 1
 fi
 
-cat >"${CONFIG}" <<EOF
-[catalog]
-url = "file:${CATALOG}"
-
-[runtime]
-state_dir = "${ROOT}/state"
-EOF
-
-mkdir -p "${ROOT}/state"
+mkdir -p "$(dirname "${CATALOG}")"
 DATABASE_URL="file:${CATALOG}" make -C prisma db-migrate
 make build-tools
 require_executable "${NBDCLI}"
 require_executable "${NBD_SERVER}"
 
-"${NBDCLI}" --config "${CONFIG}" create "${EXPORT_NAME}" \
+HOME="${SMOKE_HOME}" "${NBDCLI}" create "${EXPORT_NAME}" \
     --size "${SIZE_BYTES}" \
     --block-size 4096 \
     --engine "${ENGINE}"
+test -f "${CONFIG}"
 
 start_server
 connect_device

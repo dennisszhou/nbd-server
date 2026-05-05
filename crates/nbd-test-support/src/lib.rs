@@ -19,6 +19,7 @@ pub struct TestRuntime {
     root: TempDir,
     config_path: PathBuf,
     state_dir: PathBuf,
+    wal_dir: PathBuf,
     catalog_path: PathBuf,
     catalog_url: String,
 }
@@ -29,6 +30,7 @@ impl TestRuntime {
         let root = TempDir::new("nbd-runtime")?;
         let state_dir = root.path().join("state");
         let blob_dir = state_dir.join("blobs");
+        let wal_dir = state_dir.join("wal");
         let config_path = root.path().join("config.toml");
         let catalog_path = root.path().join("catalog.db");
         let catalog_url = catalog_file_url_for_path(&catalog_path)?;
@@ -47,6 +49,7 @@ impl TestRuntime {
                 runtime: RuntimeConfig {
                     state_dir: state_dir.clone(),
                     blob_dir: blob_dir.clone(),
+                    wal_dir: wal_dir.clone(),
                 },
                 server: ServerConfig::default(),
                 logging: LoggingConfig::default(),
@@ -57,6 +60,7 @@ impl TestRuntime {
             root,
             config_path,
             state_dir,
+            wal_dir,
             catalog_path,
             catalog_url,
         })
@@ -72,6 +76,10 @@ impl TestRuntime {
 
     pub fn state_dir(&self) -> &Path {
         &self.state_dir
+    }
+
+    pub fn wal_dir(&self) -> &Path {
+        &self.wal_dir
     }
 
     pub fn catalog_path(&self) -> &Path {
@@ -93,6 +101,7 @@ impl TestRuntime {
                 runtime: RuntimeConfig {
                     state_dir: self.state_dir.clone(),
                     blob_dir: self.state_dir.join("blobs"),
+                    wal_dir: self.wal_dir.clone(),
                 },
                 server,
                 logging: LoggingConfig::default(),

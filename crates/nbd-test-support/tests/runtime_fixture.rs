@@ -11,6 +11,7 @@ fn fixture_writes_loadable_explicit_config() {
     .unwrap();
 
     assert_eq!(config.runtime.state_dir, runtime.state_dir());
+    assert_eq!(config.runtime.wal_dir, runtime.wal_dir());
     assert_eq!(config.catalog.url, runtime.catalog_url());
     assert!(runtime.catalog_url().starts_with("file:"));
 }
@@ -21,6 +22,7 @@ fn fixture_paths_stay_under_runtime_root() {
 
     runtime.assert_path_inside(runtime.config_path());
     runtime.assert_path_inside(runtime.state_dir());
+    runtime.assert_path_inside(runtime.wal_dir());
     runtime.assert_path_inside(runtime.catalog_path());
 }
 

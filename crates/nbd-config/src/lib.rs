@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 const CONFIG_DIR: &str = ".nbd";
 const CACHE_DIR: &str = ".cache";
 const BLOB_DIR: &str = "blobs";
+const WAL_DIR: &str = "wal";
 const CONFIG_FILE: &str = "config.toml";
 const CATALOG_FILE: &str = "catalog.db";
 pub const DEFAULT_EXPORT_QUEUE_DEPTH: usize = 128;
@@ -44,6 +45,7 @@ pub struct CatalogConfig {
 pub struct RuntimeConfig {
     pub state_dir: PathBuf,
     pub blob_dir: PathBuf,
+    pub wal_dir: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +53,7 @@ pub struct RuntimeConfig {
 struct RuntimeConfigSource {
     state_dir: PathBuf,
     blob_dir: Option<PathBuf>,
+    wal_dir: PathBuf,
 }
 
 impl<'de> Deserialize<'de> for RuntimeConfig {
@@ -66,6 +69,7 @@ impl<'de> Deserialize<'de> for RuntimeConfig {
         Ok(Self {
             state_dir: source.state_dir,
             blob_dir,
+            wal_dir: source.wal_dir,
         })
     }
 }
@@ -202,6 +206,7 @@ impl NbdConfig {
         let home = home.as_ref();
         let state_dir = default_state_dir_for_home(home);
         let blob_dir = default_blob_dir_for_home(home);
+        let wal_dir = default_wal_dir_for_home(home);
         let catalog_path = state_dir.join(CATALOG_FILE);
 
         Ok(Self {
@@ -211,6 +216,7 @@ impl NbdConfig {
             runtime: RuntimeConfig {
                 state_dir,
                 blob_dir,
+                wal_dir,
             },
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
@@ -231,6 +237,11 @@ pub fn default_state_dir_for_home(home: impl AsRef<Path>) -> PathBuf {
 /// Return the default local blob directory for a generated user config.
 pub fn default_blob_dir_for_home(home: impl AsRef<Path>) -> PathBuf {
     home.as_ref().join(CACHE_DIR).join("nbd").join(BLOB_DIR)
+}
+
+/// Return the default local WAL directory for a generated user config.
+pub fn default_wal_dir_for_home(home: impl AsRef<Path>) -> PathBuf {
+    home.as_ref().join(CACHE_DIR).join("nbd").join(WAL_DIR)
 }
 
 /// Convert a local SQLite database path into the canonical catalog URL shape.
