@@ -1,10 +1,11 @@
 use crate::{
     observability::{self, event, target},
-    tree_reader::TreeReader,
+    tree_reader::{Block, BlockPart, TreeReader},
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
     ExportWalHandle, LocalBlobStore, Result, ServerError, WalRecord, WalRequest,
 };
+use bytes::Bytes;
 use nbd_control_plane::{
     CowTreeMetadataStore, CowTreeSnapshot, ExportDescriptor, ExportHead, ExportLayoutKind,
     ExportMeta, ExportName, NodeId, WalSeq, TREE_CHUNK_BYTES,
@@ -396,7 +397,18 @@ impl ExportReadView {
             (state.root.clone(), records)
         };
 
-        let mut data = self.tree_reader.read_committed(&root, range).await?;
+        let block = self.tree_reader.read_committed(&root, range).await?;
+        if block.range() != range {
+            return Err(ServerError::wal(
+                "read committed backing",
+                format!(
+                    "tree reader returned range {:?} for requested range {:?}",
+                    block.range(),
+                    range
+                ),
+            ));
+        }
+        let mut data = block.materialize()?;
         if data.len() as u64 != range.len() {
             return Err(ServerError::wal(
                 "read committed backing",
@@ -456,46 +468,57 @@ impl fmt::Debug for ExportReadView {
 
 #[async_trait::async_trait]
 impl TreeReader<RootSnapshot> for ZeroTreeReader {
-    async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
+    async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Block> {
         validate_range("read", range, root.size_bytes())?;
         if !root.is_zero_backed() {
             return Err(ServerError::Catalog {
                 message: "zero backing reader requires a zero-backed root".to_owned(),
             });
         }
-        Ok(vec![0; range.len() as usize])
+        let parts = if range.is_empty() {
+            Vec::new()
+        } else {
+            vec![BlockPart::Zero { range }]
+        };
+        Block::new(range, parts)
     }
 }
 
 #[async_trait::async_trait]
 impl TreeReader<RootSnapshot> for CowTreeReader {
-    async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
+    async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Block> {
         validate_range("read", range, root.size_bytes())?;
         let snapshot = root.cow_tree().ok_or_else(|| ServerError::Catalog {
             message: "COW backing reader requires a COW root snapshot".to_owned(),
         })?;
 
-        let mut data = vec![0; range.len() as usize];
+        let mut parts = Vec::new();
         let mut copied = 0usize;
-        while copied < data.len() {
+        while copied < range.len() as usize {
             let current_offset = range.start() + copied as u64;
             let chunk_index = nbd_control_plane::ChunkIndex::new(current_offset / TREE_CHUNK_BYTES);
             let chunk_offset = current_offset % TREE_CHUNK_BYTES;
             let chunk_available = TREE_CHUNK_BYTES - chunk_offset;
-            let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
+            let copy_len = chunk_available.min(range.len() - copied as u64) as u32;
+            let part_range = ByteRange::new(current_offset, copy_len);
 
             if let Some(chunk) = snapshot.chunk(chunk_index) {
                 let chunk_data = self
                     .blob_store
-                    .read_blob(chunk.blob_key(), chunk_offset, copy_len as u64)
+                    .read_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
                     .await?;
-                data[copied..copied + copy_len].copy_from_slice(&chunk_data);
+                parts.push(BlockPart::Data {
+                    range: part_range,
+                    bytes: Bytes::from(chunk_data),
+                });
+            } else {
+                parts.push(BlockPart::Zero { range: part_range });
             }
 
-            copied += copy_len;
+            copied += copy_len as usize;
         }
 
-        Ok(data)
+        Block::new(range, parts)
     }
 }
 
@@ -604,12 +627,53 @@ mod tests {
         let root = RootSnapshot::from_cow_snapshot(snapshot);
         let reader = CowTreeReader { blob_store };
 
-        let data = reader
+        let block = reader
             .read_committed(&root, ByteRange::new(8, 4))
             .await
             .expect("read committed root");
 
-        assert_eq!(data, b"root");
+        assert_eq!(
+            block.parts(),
+            &[BlockPart::Data {
+                range: ByteRange::new(8, 4),
+                bytes: Bytes::from_static(b"root"),
+            }],
+        );
+        assert_eq!(block.materialize().expect("materialize"), b"root");
+    }
+
+    #[tokio::test]
+    async fn cow_tree_reader_splits_large_sparse_reads_on_chunk_boundaries() {
+        let runtime = TestRuntime::new().expect("test runtime");
+        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let snapshot = CowTreeSnapshot::new(
+            ExportId::new("export-root-sparse").expect("export id"),
+            TREE_CHUNK_BYTES * 2,
+            None,
+            WalSeq::new(7),
+            BTreeMap::new(),
+        )
+        .expect("cow snapshot");
+        let root = RootSnapshot::from_cow_snapshot(snapshot);
+        let reader = CowTreeReader { blob_store };
+        let range = ByteRange::new(0, (TREE_CHUNK_BYTES + 16 * 1024 * 1024) as u32);
+
+        let block = reader
+            .read_committed(&root, range)
+            .await
+            .expect("read committed root");
+
+        assert_eq!(
+            block.parts(),
+            &[
+                BlockPart::Zero {
+                    range: ByteRange::new(0, TREE_CHUNK_BYTES as u32),
+                },
+                BlockPart::Zero {
+                    range: ByteRange::new(TREE_CHUNK_BYTES, 16 * 1024 * 1024),
+                },
+            ],
+        );
     }
 
     #[tokio::test]

@@ -1,10 +1,11 @@
 use crate::{
     observability::{self, event, target},
-    tree_reader::TreeReader,
+    tree_reader::{Block, BlockPart, TreeReader},
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
 };
+use bytes::Bytes;
 use nbd_control_plane::{
     BlobKey, ChunkIndex, ExportDescriptor, ExportHead, ExportLayoutKind, ExportName, NodeId,
     SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot, WalSeq, SIMPLE_CHUNK_BYTES,
@@ -115,7 +116,10 @@ impl SimpleDurableEngine {
         let range = ByteRange::new(offset, len);
         self.validate_range("read", range.start(), range.len())?;
         let snapshot = self.tree.snapshot().await?;
-        self.tree_reader.read_committed(&snapshot, range).await
+        self.tree_reader
+            .read_committed(&snapshot, range)
+            .await?
+            .materialize()
     }
 
     async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
@@ -169,30 +173,36 @@ impl SimpleDurableEngine {
 
 #[async_trait::async_trait]
 impl TreeReader<SimpleTreeSnapshot> for SimpleTreeReader {
-    async fn read_committed(&self, root: &SimpleTreeSnapshot, range: ByteRange) -> Result<Vec<u8>> {
+    async fn read_committed(&self, root: &SimpleTreeSnapshot, range: ByteRange) -> Result<Block> {
         validate_range("read", range.start(), range.len(), root.size_bytes())?;
-        let mut data = vec![0; range.len() as usize];
+        let mut parts = Vec::new();
         let mut copied = 0;
 
-        while copied < data.len() {
+        while copied < range.len() as usize {
             let current_offset = range.start() + copied as u64;
             let chunk_index = ChunkIndex::new(current_offset / SIMPLE_CHUNK_BYTES);
             let chunk_offset = current_offset % SIMPLE_CHUNK_BYTES;
             let chunk_available = SIMPLE_CHUNK_BYTES - chunk_offset;
-            let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
+            let copy_len = chunk_available.min(range.len() - copied as u64) as u32;
+            let part_range = ByteRange::new(current_offset, copy_len);
 
             if let Some(chunk) = root.chunk(chunk_index) {
                 let chunk_data = self
                     .blob_store
-                    .read_blob(chunk.blob_key(), chunk_offset, copy_len as u64)
+                    .read_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
                     .await?;
-                data[copied..copied + copy_len].copy_from_slice(&chunk_data);
+                parts.push(BlockPart::Data {
+                    range: part_range,
+                    bytes: Bytes::from(chunk_data),
+                });
+            } else {
+                parts.push(BlockPart::Zero { range: part_range });
             }
 
-            copied += copy_len;
+            copied += copy_len as usize;
         }
 
-        Ok(data)
+        Block::new(range, parts)
     }
 }
 
@@ -690,11 +700,50 @@ mod tests {
         .expect("tree snapshot");
         let reader = SimpleTreeReader { blob_store };
 
-        let data = reader
+        let block = reader
             .read_committed(&snapshot, ByteRange::new(8, 4))
             .await
             .expect("read committed tree");
 
-        assert_eq!(data, b"tree");
+        assert_eq!(
+            block.parts(),
+            &[BlockPart::Data {
+                range: ByteRange::new(8, 4),
+                bytes: Bytes::from_static(b"tree"),
+            }],
+        );
+        assert_eq!(block.materialize().expect("materialize"), b"tree");
+    }
+
+    #[tokio::test]
+    async fn simple_tree_reader_splits_large_sparse_reads_on_chunk_boundaries() {
+        let runtime = TestRuntime::new().expect("test runtime");
+        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let snapshot = SimpleTreeSnapshot::new(
+            ExportId::new("simple-tree-reader-sparse").expect("export id"),
+            SIMPLE_CHUNK_BYTES * 2,
+            None,
+            BTreeMap::new(),
+        )
+        .expect("tree snapshot");
+        let reader = SimpleTreeReader { blob_store };
+        let range = ByteRange::new(0, (SIMPLE_CHUNK_BYTES + 16 * 1024 * 1024) as u32);
+
+        let block = reader
+            .read_committed(&snapshot, range)
+            .await
+            .expect("read committed tree");
+
+        assert_eq!(
+            block.parts(),
+            &[
+                BlockPart::Zero {
+                    range: ByteRange::new(0, SIMPLE_CHUNK_BYTES as u32),
+                },
+                BlockPart::Zero {
+                    range: ByteRange::new(SIMPLE_CHUNK_BYTES, 16 * 1024 * 1024),
+                },
+            ],
+        );
     }
 }
