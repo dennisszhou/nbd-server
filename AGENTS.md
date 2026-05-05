@@ -236,3 +236,7 @@ nbd-client -d /dev/nbd0 || true
 - Run relevant formatter/tests/lints or report why not.
 - Summarize remaining risks plainly.
 - Keep final responses concise but include the commands actually run.
+
+# Project Agents
+
+See `.rust-skills/AGENTS.md` for Rust development guidelines.
