@@ -11,9 +11,10 @@ pub use catalog_url::{CatalogProvider, CatalogUrl};
 pub use error::{CatalogError, Result};
 pub use model::{
     BlobKey, ChunkIndex, CowChunkRef, CowTreeSnapshot, CreateExport, DeleteExport,
-    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta, ExportName, ExportState,
-    InspectExport, ListExports, NodeId, PublishCompaction, PublishCompactionOutcome,
-    SimpleChunkRef, SimpleTreeSnapshot, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta,
+    ExportName, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+    PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot, Timestamp, WalSeq,
+    SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 pub use sqlite::SQLiteExportCatalog;
 
@@ -28,6 +29,15 @@ pub trait ExportCatalog: Send + Sync {
     ///
     /// Implementations must reject deleted exports.
     async fn load_export(&self, name: ExportName) -> Result<ExportMeta>;
+
+    /// Load exports-only metadata for serving/open paths.
+    ///
+    /// Implementations must reject deleted exports. Storage engines must load
+    /// the latest serving head or tree snapshot separately.
+    async fn load_export_descriptor(&self, name: ExportName) -> Result<ExportDescriptor>;
+
+    /// Load the latest serving head for an export.
+    async fn load_export_head(&self, export_id: &ExportId) -> Result<ExportHead>;
 
     /// Inspect an export for operator visibility.
     ///

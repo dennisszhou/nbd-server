@@ -99,6 +99,17 @@ The catalog stores blob references. Blob bytes live behind `StorageEngine`.
 Use explicit structs at API boundaries.
 
 ```rust
+struct ExportDescriptor {
+    id: ExportId,
+    name: ExportName,
+    block_size: u64,
+    engine_kind: ExportEngineKind,
+    state: ExportState,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+    deleted_at: Option<Timestamp>,
+}
+
 struct ExportMeta {
     id: ExportId,
     name: ExportName,
@@ -129,6 +140,14 @@ enum ExportState {
     Deleted,
 }
 ```
+
+`ExportDescriptor` is exports-only metadata for open paths. It must not carry
+`export_heads` root or checkpoint state. Durable engines load their current
+head/tree snapshot separately so compaction can advance `export_heads` without
+invalidating an open already holding a descriptor.
+
+`ExportMeta` remains the operator-facing joined view used by create, inspect,
+list, and publication outcomes.
 
 Lifecycle request structs:
 
@@ -212,6 +231,12 @@ trait ExportCatalog {
 
     async fn load_export(&self, name: ExportName)
         -> Result<ExportMeta>;
+
+    async fn load_export_descriptor(&self, name: ExportName)
+        -> Result<ExportDescriptor>;
+
+    async fn load_export_head(&self, export_id: &ExportId)
+        -> Result<ExportHead>;
 
     async fn list_exports(&self, filter: ExportListFilter)
         -> Result<Vec<ExportMeta>>;

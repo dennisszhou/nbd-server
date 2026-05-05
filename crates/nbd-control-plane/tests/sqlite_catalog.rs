@@ -97,6 +97,38 @@ async fn create_export_initializes_wal_durable_head() {
 }
 
 #[tokio::test]
+async fn descriptor_and_head_load_separate_export_identity_from_serving_head() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+
+    let descriptor = catalog
+        .load_export_descriptor(export_name("disk-wal"))
+        .await
+        .expect("load descriptor");
+    assert_eq!(descriptor.id(), created.id());
+    assert_eq!(descriptor.name().as_str(), "disk-wal");
+    assert_eq!(descriptor.engine_kind(), ExportEngineKind::WalDurable);
+    assert_eq!(descriptor.block_size(), 4096);
+
+    let initial_head = catalog
+        .load_export_head(created.id())
+        .await
+        .expect("load initial head");
+    assert_eq!(initial_head, created.head().clone());
+
+    assert_eq!(descriptor.state(), ExportState::Active);
+    assert!(descriptor.deleted_at().is_none());
+}
+
+#[tokio::test]
 async fn duplicate_create_fails_clearly() {
     let (_runtime, catalog) = migrated_catalog().await;
 
@@ -265,6 +297,14 @@ async fn delete_hides_export_from_load_and_default_list() {
         .await
         .unwrap_err();
     assert!(matches!(load_error, CatalogError::ExportDeleted { .. }));
+    let descriptor_error = catalog
+        .load_export_descriptor(export_name("disk-a"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        descriptor_error,
+        CatalogError::ExportDeleted { .. }
+    ));
 
     let inspected = catalog
         .inspect_export(InspectExport::new(export_name("disk-a")))

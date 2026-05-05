@@ -2,9 +2,10 @@
 
 use crate::{
     BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex, CreateExport, DeleteExport,
-    ExportCatalog, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta,
-    ExportName, ExportState, InspectExport, ListExports, NodeId, Result, SimpleChunkRef,
-    SimpleTreeMetadataStore, SimpleTreeSnapshot, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES,
+    ExportCatalog, ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
+    ExportMeta, ExportName, ExportState, InspectExport, ListExports, NodeId, Result,
+    SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot, Timestamp, WalSeq,
+    SIMPLE_CHUNK_BYTES,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
@@ -78,6 +79,31 @@ impl SQLiteExportCatalog {
         .map_err(map_sqlx_error)?;
 
         row.map(|row| row_to_export_meta(&row))
+            .unwrap_or_else(|| Err(CatalogError::ExportNotFound { name: name.clone() }))
+    }
+
+    async fn fetch_descriptor_by_name(&self, name: &ExportName) -> Result<ExportDescriptor> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+              id,
+              name,
+              block_size,
+              engine_kind,
+              state,
+              created_at,
+              updated_at,
+              deleted_at
+            FROM exports
+            WHERE name = ?
+            "#,
+        )
+        .bind(name.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.map(|row| row_to_export_descriptor(&row))
             .unwrap_or_else(|| Err(CatalogError::ExportNotFound { name: name.clone() }))
     }
 }
@@ -201,6 +227,19 @@ impl ExportCatalog for SQLiteExportCatalog {
         } else {
             Ok(meta)
         }
+    }
+
+    async fn load_export_descriptor(&self, name: ExportName) -> Result<ExportDescriptor> {
+        let descriptor = self.fetch_descriptor_by_name(&name).await?;
+        if descriptor.state() == ExportState::Deleted {
+            Err(CatalogError::ExportDeleted { name })
+        } else {
+            Ok(descriptor)
+        }
+    }
+
+    async fn load_export_head(&self, export_id: &ExportId) -> Result<ExportHead> {
+        load_export_head(&self.pool, export_id).await
     }
 
     async fn inspect_export(&self, request: InspectExport) -> Result<ExportMeta> {
@@ -450,21 +489,8 @@ async fn load_simple_tree_snapshot(
     pool: &SqlitePool,
     export_id: &ExportId,
 ) -> Result<SimpleTreeSnapshot> {
-    let row = sqlx::query(
-        r#"
-        SELECT layout_kind, root_node_id, size_bytes
-        FROM export_heads
-        WHERE export_id = ?
-        "#,
-    )
-    .bind(export_id.as_str())
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?
-    .ok_or_else(|| export_head_not_found(export_id))?;
-
-    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
-    let layout_kind = layout_kind.parse::<ExportLayoutKind>()?;
+    let head = load_export_head(pool, export_id).await?;
+    let layout_kind = head.layout_kind();
     if layout_kind != ExportLayoutKind::SimpleMutableTree {
         return Err(CatalogError::invalid_field(
             "layout_kind",
@@ -472,15 +498,8 @@ async fn load_simple_tree_snapshot(
         ));
     }
 
-    let size_bytes = i64_to_u64(
-        "size_bytes",
-        row.try_get("size_bytes").map_err(map_sqlx_error)?,
-    )?;
-    let root_node_id = row
-        .try_get::<Option<String>, _>("root_node_id")
-        .map_err(map_sqlx_error)?
-        .map(NodeId::new)
-        .transpose()?;
+    let size_bytes = head.size_bytes();
+    let root_node_id = head.root_node_id().cloned();
 
     let mut chunks = BTreeMap::new();
     if let Some(root_node_id) = root_node_id.as_ref() {
@@ -690,14 +709,29 @@ fn export_head_not_found(export_id: &ExportId) -> CatalogError {
     CatalogError::database(format!("export head `{export_id}` not found"))
 }
 
-fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
+async fn load_export_head(pool: &SqlitePool, export_id: &ExportId) -> Result<ExportHead> {
+    let row = sqlx::query(
+        r#"
+        SELECT layout_kind, root_node_id, size_bytes, checkpoint_wal_seq
+        FROM export_heads
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(export_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| export_head_not_found(export_id))?;
+
+    row_to_export_head(&row)
+}
+
+fn row_to_export_descriptor(row: &SqliteRow) -> Result<ExportDescriptor> {
     let state: String = row.try_get("state").map_err(map_sqlx_error)?;
     let engine_kind: String = row.try_get("engine_kind").map_err(map_sqlx_error)?;
-    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
-    let root_node_id: Option<String> = row.try_get("root_node_id").map_err(map_sqlx_error)?;
     let deleted_at: Option<String> = row.try_get("deleted_at").map_err(map_sqlx_error)?;
 
-    ExportMeta::new(
+    ExportDescriptor::new(
         ExportId::new(row.try_get::<String, _>("id").map_err(map_sqlx_error)?)?,
         ExportName::new(row.try_get::<String, _>("name").map_err(map_sqlx_error)?)?,
         i64_to_u64(
@@ -706,18 +740,6 @@ fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
         )?,
         engine_kind.parse::<ExportEngineKind>()?,
         state.parse()?,
-        ExportHead::new(
-            layout_kind.parse::<ExportLayoutKind>()?,
-            root_node_id.map(NodeId::new).transpose()?,
-            i64_to_u64(
-                "size_bytes",
-                row.try_get("size_bytes").map_err(map_sqlx_error)?,
-            )?,
-            WalSeq::new(i64_to_u64(
-                "checkpoint_wal_seq",
-                row.try_get("checkpoint_wal_seq").map_err(map_sqlx_error)?,
-            )?),
-        )?,
         Timestamp::new(
             row.try_get::<String, _>("created_at")
                 .map_err(map_sqlx_error)?,
@@ -728,6 +750,29 @@ fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
         )?,
         deleted_at.map(Timestamp::new).transpose()?,
     )
+}
+
+fn row_to_export_head(row: &SqliteRow) -> Result<ExportHead> {
+    let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
+    let root_node_id: Option<String> = row.try_get("root_node_id").map_err(map_sqlx_error)?;
+
+    ExportHead::new(
+        layout_kind.parse::<ExportLayoutKind>()?,
+        root_node_id.map(NodeId::new).transpose()?,
+        i64_to_u64(
+            "size_bytes",
+            row.try_get("size_bytes").map_err(map_sqlx_error)?,
+        )?,
+        WalSeq::new(i64_to_u64(
+            "checkpoint_wal_seq",
+            row.try_get("checkpoint_wal_seq").map_err(map_sqlx_error)?,
+        )?),
+    )
+}
+
+fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
+    let descriptor = row_to_export_descriptor(row)?;
+    descriptor.into_meta(row_to_export_head(row)?)
 }
 
 fn current_timestamp() -> Result<Timestamp> {

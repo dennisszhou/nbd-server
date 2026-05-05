@@ -109,6 +109,18 @@ pub enum PublishCompactionOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportDescriptor {
+    id: ExportId,
+    name: ExportName,
+    block_size: u64,
+    engine_kind: ExportEngineKind,
+    state: ExportState,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+    deleted_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateExport {
     name: ExportName,
     size_bytes: u64,
@@ -574,6 +586,79 @@ impl PublishCompactionOutcome {
         match self {
             Self::Published(meta) | Self::AlreadyCovered(meta) | Self::StalePlan(meta) => meta,
         }
+    }
+}
+
+impl ExportDescriptor {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: ExportId,
+        name: ExportName,
+        block_size: u64,
+        engine_kind: ExportEngineKind,
+        state: ExportState,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+        deleted_at: Option<Timestamp>,
+    ) -> Result<Self> {
+        validate_non_zero("block_size", block_size)?;
+
+        Ok(Self {
+            id,
+            name,
+            block_size,
+            engine_kind,
+            state,
+            created_at,
+            updated_at,
+            deleted_at,
+        })
+    }
+
+    pub fn id(&self) -> &ExportId {
+        &self.id
+    }
+
+    pub fn name(&self) -> &ExportName {
+        &self.name
+    }
+
+    pub fn block_size(&self) -> u64 {
+        self.block_size
+    }
+
+    pub fn engine_kind(&self) -> ExportEngineKind {
+        self.engine_kind
+    }
+
+    pub fn state(&self) -> ExportState {
+        self.state
+    }
+
+    pub fn created_at(&self) -> &Timestamp {
+        &self.created_at
+    }
+
+    pub fn updated_at(&self) -> &Timestamp {
+        &self.updated_at
+    }
+
+    pub fn deleted_at(&self) -> Option<&Timestamp> {
+        self.deleted_at.as_ref()
+    }
+
+    pub fn into_meta(self, head: ExportHead) -> Result<ExportMeta> {
+        ExportMeta::new(
+            self.id,
+            self.name,
+            self.block_size,
+            self.engine_kind,
+            self.state,
+            head,
+            self.created_at,
+            self.updated_at,
+            self.deleted_at,
+        )
     }
 }
 

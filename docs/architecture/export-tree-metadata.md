@@ -37,7 +37,7 @@ publishes a new root/checkpoint by advancing `export_heads`.
 - clone exports;
 - inspect/list exports;
 - logically delete exports;
-- load export metadata on NBD open;
+- load exports-only descriptors on NBD open;
 - store export size, block size, and lifecycle state;
 - store one current `export_heads` row per export;
 - store simple mutable tree rows for `SimpleDurableEngine`;
@@ -95,6 +95,10 @@ tree_leaf_refs
 `export_heads` is the serving source of truth for every layout. Future COW
 checkpoints advance the current head; they do not create a separate generation
 history.
+
+Open paths should not treat a previously joined `exports` + `export_heads`
+view as stable. They should load an exports-only descriptor first, then let the
+engine-specific tree reader load the latest `export_heads` state by export id.
 
 The implementation may choose normalized edge rows, embedded child pointers, or
 serialized node objects. The layout invariant is more important than the
