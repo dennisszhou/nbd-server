@@ -10,9 +10,10 @@ pub mod sqlite;
 pub use catalog_url::{CatalogProvider, CatalogUrl};
 pub use error::{CatalogError, Result};
 pub use model::{
-    BlobKey, ChunkIndex, CreateExport, DeleteExport, ExportEngineKind, ExportHead, ExportId,
-    ExportLayoutKind, ExportMeta, ExportName, ExportState, InspectExport, ListExports, NodeId,
-    SimpleChunkRef, SimpleTreeSnapshot, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES,
+    BlobKey, ChunkIndex, CowChunkRef, CowTreeSnapshot, CreateExport, DeleteExport,
+    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta, ExportName, ExportState,
+    InspectExport, ListExports, NodeId, PublishCompaction, PublishCompactionOutcome,
+    SimpleChunkRef, SimpleTreeSnapshot, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 pub use sqlite::SQLiteExportCatalog;
 
@@ -45,4 +46,14 @@ pub trait SimpleTreeMetadataStore: Send + Sync {
         export_id: &ExportId,
         chunks: Vec<SimpleChunkRef>,
     ) -> Result<SimpleTreeSnapshot>;
+}
+
+#[async_trait::async_trait]
+pub trait CowTreeMetadataStore: Send + Sync {
+    async fn load_cow_tree(&self, export_id: &ExportId) -> Result<CowTreeSnapshot>;
+
+    async fn publish_compaction(
+        &self,
+        request: PublishCompaction,
+    ) -> Result<PublishCompactionOutcome>;
 }
