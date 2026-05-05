@@ -16,6 +16,7 @@ pub mod runtime;
 pub mod server;
 pub mod simple_durable;
 pub mod wal;
+pub mod wal_durable;
 
 pub use admission::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
@@ -41,3 +42,4 @@ pub use wal::{
     ExportWal, ExportWalHandle, LocalExportWal, LocalWalProvider, OpenWal, WalBounds, WalDomain,
     WalProvider, WalPruneResult, WalRecord, WalReplay, WalRequest,
 };
+pub use wal_durable::{ExportReadView, RootSnapshot, WalDurableAdmissionPolicy, WalDurableEngine};
