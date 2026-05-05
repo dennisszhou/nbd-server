@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{Result, ServerError};
 use std::collections::BTreeMap;
 
@@ -34,18 +32,22 @@ impl<V> ExtentEntry<V> {
         Ok(Self { start, end, value })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn start(&self) -> u64 {
         self.start
     }
 
+    #[allow(dead_code)]
     pub(crate) fn end(&self) -> u64 {
         self.end
     }
 
+    #[allow(dead_code)]
     pub(crate) fn value(&self) -> &V {
         &self.value
     }
 
+    #[allow(dead_code)]
     pub(crate) fn into_parts(self) -> (u64, u64, V) {
         (self.start, self.end, self.value)
     }
@@ -78,14 +80,17 @@ impl<V> ExtentMap<V> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.extents.len()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.extents.is_empty()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = ExtentRef<'_, V>> {
         self.extents
             .iter()
@@ -147,6 +152,7 @@ impl<V> ExtentMap<V> {
         Ok(removed)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn remove_range_with_split<F>(
         &mut self,
         start: u64,

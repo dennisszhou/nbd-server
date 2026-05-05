@@ -1,4 +1,5 @@
 use crate::{
+    extent_map::ExtentMap,
     observability::{self, event, target},
     tree_reader::{Block, BlockPart, TreeReader},
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
@@ -10,7 +11,6 @@ use nbd_control_plane::{
     CowTreeMetadataStore, CowTreeSnapshot, ExportDescriptor, ExportHead, ExportLayoutKind,
     ExportMeta, ExportName, NodeId, WalSeq, TREE_CHUNK_BYTES,
 };
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -55,7 +55,28 @@ pub struct ExportReadView {
 #[derive(Debug, Clone)]
 struct ExportReadViewState {
     root: RootSnapshot,
-    wal_overlay: BTreeMap<WalSeq, WalRecord>,
+    last_applied_seq: WalSeq,
+    overlay: OverlayExtentMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OverlayExtentMap {
+    extents: ExtentMap<OverlayExtent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OverlayExtent {
+    seq: WalSeq,
+    record: Arc<WalRecord>,
+    record_offset: u64,
+}
+
+#[derive(Debug, Clone)]
+struct OverlayReadSlice {
+    start: u64,
+    end: u64,
+    record: Arc<WalRecord>,
+    record_offset: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,16 +386,94 @@ impl RootSnapshot {
     }
 }
 
+impl OverlayExtentMap {
+    fn new() -> Self {
+        Self {
+            extents: ExtentMap::new(),
+        }
+    }
+
+    fn insert_record(&mut self, record: Arc<WalRecord>) -> Result<()> {
+        let range = record.range();
+        let start = range.start();
+        let end = range_end(range);
+        self.extents.insert_overwrite_with_split(
+            start,
+            end,
+            OverlayExtent {
+                seq: record.seq(),
+                record,
+                record_offset: 0,
+            },
+            |extent, delta| extent.split_at(delta),
+        )?;
+        Ok(())
+    }
+
+    fn read_slices(&self, range: ByteRange) -> Result<Vec<OverlayReadSlice>> {
+        let read_start = range.start();
+        let read_end = range_end(range);
+        self.extents
+            .overlapping(read_start, read_end)?
+            .into_iter()
+            .map(|extent| {
+                let start = read_start.max(extent.start());
+                let end = read_end.min(extent.end());
+                let record_offset = extent
+                    .value()
+                    .record_offset
+                    .checked_add(start - extent.start())
+                    .ok_or_else(|| {
+                        ServerError::wal("read overlay extent", "record offset overflowed")
+                    })?;
+                Ok(OverlayReadSlice {
+                    start,
+                    end,
+                    record: extent.value().record.clone(),
+                    record_offset,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn debug_extents(&self) -> Vec<(u64, u64, WalSeq, u64)> {
+        self.extents
+            .iter()
+            .map(|extent| {
+                (
+                    extent.start(),
+                    extent.end(),
+                    extent.value().seq,
+                    extent.value().record_offset,
+                )
+            })
+            .collect()
+    }
+}
+
+impl OverlayExtent {
+    fn split_at(&self, delta: u64) -> Self {
+        Self {
+            seq: self.seq,
+            record: self.record.clone(),
+            record_offset: self.record_offset + delta,
+        }
+    }
+}
+
 impl ExportReadView {
     fn zero_filled(root: RootSnapshot) -> Self {
         Self::new(root, Arc::new(ZeroTreeReader))
     }
 
     fn new(root: RootSnapshot, tree_reader: Arc<dyn TreeReader<RootSnapshot>>) -> Self {
+        let last_applied_seq = root.checkpoint_wal_seq();
         Self {
             state: RwLock::new(ExportReadViewState {
                 root,
-                wal_overlay: BTreeMap::new(),
+                last_applied_seq,
+                overlay: OverlayExtentMap::new(),
             }),
             tree_reader,
         }
@@ -385,16 +484,11 @@ impl ExportReadView {
     }
 
     pub async fn read(&self, range: ByteRange) -> Result<Vec<u8>> {
-        let (root, records) = {
+        let (root, overlay_slices) = {
             let state = self.state.read().await;
             validate_range("read", range, state.root.size_bytes())?;
-            let records = state
-                .wal_overlay
-                .values()
-                .filter(|record| ranges_overlap(range, record.range()))
-                .cloned()
-                .collect::<Vec<_>>();
-            (state.root.clone(), records)
+            let overlay_slices = state.overlay.read_slices(range)?;
+            (state.root.clone(), overlay_slices)
         };
 
         let block = self.tree_reader.read_committed(&root, range).await?;
@@ -420,8 +514,8 @@ impl ExportReadView {
             ));
         }
 
-        for record in records {
-            overlay_record(&mut data, range, &record)?;
+        for overlay in overlay_slices {
+            overlay_record(&mut data, range, &overlay)?;
         }
         Ok(data)
     }
@@ -439,13 +533,21 @@ impl ExportReadView {
                 ),
             ));
         }
-        if state.wal_overlay.contains_key(&record.seq()) {
+        let expected_seq = state
+            .last_applied_seq
+            .get()
+            .checked_add(1)
+            .map(WalSeq::new)
+            .ok_or_else(|| ServerError::wal("apply WAL record", "WAL sequence overflowed"))?;
+        if record.seq() != expected_seq {
             return Err(ServerError::wal(
                 "apply WAL record",
-                format!("duplicate WAL sequence {}", record.seq()),
+                format!("expected WAL sequence {expected_seq}, got {}", record.seq()),
             ));
         }
-        state.wal_overlay.insert(record.seq(), record);
+        let record = Arc::new(record);
+        state.overlay.insert_record(record)?;
+        state.last_applied_seq = expected_seq;
         Ok(())
     }
 }
@@ -566,18 +668,17 @@ fn validate_request_range(
     Ok(())
 }
 
-fn ranges_overlap(left: ByteRange, right: ByteRange) -> bool {
-    left.start() < range_end(right) && right.start() < range_end(left)
-}
-
 fn range_end(range: ByteRange) -> u64 {
     range.start().saturating_add(range.len())
 }
 
-fn overlay_record(data: &mut [u8], read_range: ByteRange, record: &WalRecord) -> Result<()> {
-    let record_range = record.range();
-    let start = read_range.start().max(record_range.start());
-    let end = range_end(read_range).min(range_end(record_range));
+fn overlay_record(
+    data: &mut [u8],
+    read_range: ByteRange,
+    overlay: &OverlayReadSlice,
+) -> Result<()> {
+    let start = read_range.start().max(overlay.start);
+    let end = range_end(read_range).min(overlay.end);
     if start >= end {
         return Ok(());
     }
@@ -585,16 +686,18 @@ fn overlay_record(data: &mut [u8], read_range: ByteRange, record: &WalRecord) ->
     let dst_start = usize::try_from(start - read_range.start()).map_err(|_| {
         ServerError::wal("overlay WAL record", "read range offset does not fit usize")
     })?;
-    let src_start = usize::try_from(start - record_range.start()).map_err(|_| {
-        ServerError::wal(
-            "overlay WAL record",
-            "record range offset does not fit usize",
-        )
-    })?;
+    let src_start =
+        usize::try_from(overlay.record_offset + (start - overlay.start)).map_err(|_| {
+            ServerError::wal(
+                "overlay WAL record",
+                "record range offset does not fit usize",
+            )
+        })?;
     let len = usize::try_from(end - start)
         .map_err(|_| ServerError::wal("overlay WAL record", "overlap does not fit usize"))?;
 
-    data[dst_start..dst_start + len].copy_from_slice(&record.data()[src_start..src_start + len]);
+    data[dst_start..dst_start + len]
+        .copy_from_slice(&overlay.record.data()[src_start..src_start + len]);
     Ok(())
 }
 
@@ -604,6 +707,76 @@ mod tests {
     use nbd_control_plane::{ChunkIndex, CowChunkRef, ExportId};
     use nbd_test_support::TestRuntime;
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn read_view_overlay_keeps_only_latest_repeated_write() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply first record");
+        read_view
+            .apply_wal_record(wal_record(2, 0, b"bbbb"))
+            .await
+            .expect("apply second record");
+        read_view
+            .apply_wal_record(wal_record(3, 0, b"cccc"))
+            .await
+            .expect("apply third record");
+
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 4))
+                .await
+                .expect("read latest"),
+            b"cccc",
+        );
+        assert_eq!(
+            read_view.state.read().await.overlay.debug_extents(),
+            vec![(0, 4, WalSeq::new(3), 0)],
+        );
+    }
+
+    #[tokio::test]
+    async fn read_view_overlay_preserves_middle_split_offsets() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"abcdefgh"))
+            .await
+            .expect("apply base record");
+        read_view
+            .apply_wal_record(wal_record(2, 4, b"ZZ"))
+            .await
+            .expect("apply middle record");
+
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 8))
+                .await
+                .expect("read split"),
+            b"abcdZZgh",
+        );
+        assert_eq!(
+            read_view.state.read().await.overlay.debug_extents(),
+            vec![
+                (0, 4, WalSeq::new(1), 0),
+                (4, 6, WalSeq::new(2), 0),
+                (6, 8, WalSeq::new(1), 6),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn read_view_overlay_requires_contiguous_wal_sequences() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+
+        let error = read_view
+            .apply_wal_record(wal_record(2, 0, b"skip"))
+            .await
+            .expect_err("reject skipped WAL sequence");
+
+        assert!(matches!(error, ServerError::Wal { .. }));
+    }
 
     #[tokio::test]
     async fn cow_tree_reader_reads_from_root_snapshot() {
@@ -721,5 +894,24 @@ mod tests {
                 .await,
             Err(ServerError::Catalog { .. }),
         ));
+    }
+
+    fn zero_root(size_bytes: u64) -> RootSnapshot {
+        RootSnapshot {
+            backing: RootBacking::Zero {
+                root_node_id: None,
+                checkpoint_wal_seq: WalSeq::zero(),
+                size_bytes,
+            },
+        }
+    }
+
+    fn wal_record(seq: u64, offset: u64, data: &[u8]) -> WalRecord {
+        WalRecord::new(
+            WalSeq::new(seq),
+            ByteRange::new(offset, data.len() as u32),
+            data.to_vec(),
+        )
+        .expect("WAL record")
     }
 }
