@@ -1,14 +1,27 @@
 use nbd_control_plane::{
+    CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CreateExport, ExportCatalog,
     ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta, ExportName, ExportState,
-    NodeId, Timestamp, WalSeq,
+    NodeId, PublishCompaction, SQLiteExportCatalog, Timestamp, WalSeq, TREE_CHUNK_BYTES,
 };
 use nbd_server::{
     ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime, ExportWalHandle,
-    LocalWalProvider, OpenWal, Result, ServerError, WalDomain, WalDurableEngine, WalProvider,
-    WalRequest,
+    LocalBlobStore, LocalWalProvider, OpenWal, Result, ServerError, WalDomain, WalDurableEngine,
+    WalProvider, WalRequest,
 };
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
+
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
+    include_str!(
+        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
+    ),
+    include_str!(
+        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
+    ),
+    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
+    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
+];
 
 #[tokio::test]
 async fn wal_durable_engine_reads_zeroes_then_written_overlay() {
@@ -138,6 +151,87 @@ async fn wal_durable_engine_reopen_recovers_runtime_write() {
 }
 
 #[tokio::test]
+async fn wal_durable_engine_reads_committed_cow_root_then_overlay() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    let created = catalog
+        .create_export(
+            CreateExport::new(
+                ExportName::new("disk-cow").expect("export name"),
+                TREE_CHUNK_BYTES,
+                4096,
+                ExportEngineKind::WalDurable,
+            )
+            .expect("create export"),
+        )
+        .await
+        .expect("create wal export");
+    let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+    let mut chunk = vec![0; TREE_CHUNK_BYTES as usize];
+    chunk[4..8].copy_from_slice(b"base");
+    let key = blob_store.create_blob(&chunk).await.expect("create blob");
+    let wal = open_wal(&runtime, created.id().as_str()).await;
+    wal.append(
+        WalRequest::new(nbd_server::ByteRange::new(4, 2), b"ba".to_vec())
+            .expect("first WAL request"),
+    )
+    .await
+    .expect("append first");
+    wal.append(
+        WalRequest::new(nbd_server::ByteRange::new(6, 2), b"se".to_vec())
+            .expect("second WAL request"),
+    )
+    .await
+    .expect("append second");
+    catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                created.id().clone(),
+                created.head().clone(),
+                WalSeq::new(2),
+                vec![
+                    CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk")
+                ],
+            )
+            .expect("publish compaction"),
+        )
+        .await
+        .expect("publish cow checkpoint");
+    wal.append(
+        WalRequest::new(nbd_server::ByteRange::new(5, 2), b"ZZ".to_vec())
+            .expect("overlay WAL request"),
+    )
+    .await
+    .expect("append overlay");
+    let meta = catalog
+        .load_export(ExportName::new("disk-cow").expect("export name"))
+        .await
+        .expect("load export");
+    let engine = Arc::new(
+        WalDurableEngine::open_with_cow_tree(
+            &meta,
+            wal,
+            blob_store,
+            Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
+        )
+        .await
+        .expect("wal durable engine"),
+    );
+    let export_runtime = ConcurrentExportRuntime::with_capacity(meta, engine, 4);
+
+    assert_eq!(
+        execute_request(&export_runtime, ExportRequest::Read { offset: 4, len: 4 })
+            .await
+            .expect("read committed plus overlay"),
+        ExportReply::Read {
+            data: b"bZZe".to_vec(),
+        },
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
 async fn wal_durable_engine_rejects_out_of_bounds_ranges() {
     let (_runtime, _wal, _meta, export_runtime) =
         wal_durable_runtime("disk-bounds", "export-bounds", 8).await;
@@ -172,7 +266,7 @@ async fn wal_durable_engine_rejects_out_of_bounds_ranges() {
 }
 
 #[tokio::test]
-async fn wal_durable_open_rejects_committed_root_until_cow_reader_exists() {
+async fn wal_durable_zero_backing_open_rejects_committed_root() {
     let runtime = TestRuntime::new().expect("test runtime");
     let head = ExportHead::new(
         ExportLayoutKind::CowImmutableTree,
@@ -243,6 +337,22 @@ async fn open_wal(runtime: &TestRuntime, export_id: &str) -> ExportWalHandle {
         )))
         .await
         .expect("open WAL")
+}
+
+async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
+    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    let catalog = SQLiteExportCatalog::connect(&url)
+        .await
+        .expect("connect catalog");
+
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration)
+            .execute(catalog.pool())
+            .await
+            .expect("apply migration");
+    }
+
+    catalog
 }
 
 fn export_meta(name: &str, export_id: &str, size_bytes: u64) -> ExportMeta {

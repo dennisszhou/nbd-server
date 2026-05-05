@@ -1,7 +1,7 @@
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
-    SimpleTreeMetadataStore,
+    CatalogUrl, CowTreeMetadataStore, CreateExport, ExportCatalog, ExportEngineKind, ExportName,
+    SQLiteExportCatalog, SimpleTreeMetadataStore,
 };
 use nbd_server::{
     ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider, ServerError,
@@ -388,10 +388,12 @@ fn local_registry(
 ) -> LocalExportRegistry {
     let catalog = Arc::new(catalog);
     let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
+    let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
     let factory = Arc::new(ExportFactory::new(
         config,
         blob_dir(runtime),
         simple_tree_store,
+        cow_tree_store,
         Arc::new(LocalWalProvider::new(runtime.wal_dir())),
     ));
     LocalExportRegistry::new(catalog, factory)

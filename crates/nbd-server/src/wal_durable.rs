@@ -1,9 +1,12 @@
 use crate::{
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
-    ExportWalHandle, Result, ServerError, WalRecord, WalRequest,
+    ExportWalHandle, LocalBlobStore, Result, ServerError, WalRecord, WalRequest,
 };
-use nbd_control_plane::{ExportLayoutKind, ExportMeta, ExportName, NodeId, WalSeq};
+use nbd_control_plane::{
+    CowTreeMetadataStore, CowTreeSnapshot, ExportLayoutKind, ExportMeta, ExportName, NodeId,
+    WalSeq, TREE_CHUNK_BYTES,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -52,6 +55,12 @@ trait BackingReader: Send + Sync {
 #[derive(Debug)]
 struct ZeroBackingReader;
 
+#[derive(Debug)]
+struct CowTreeBackingReader {
+    snapshot: CowTreeSnapshot,
+    blob_store: LocalBlobStore,
+}
+
 impl WalDurableEngine {
     pub async fn open(meta: &ExportMeta, wal: ExportWalHandle) -> Result<Self> {
         if meta.head().layout_kind() != ExportLayoutKind::CowImmutableTree {
@@ -73,6 +82,49 @@ impl WalDurableEngine {
 
         let root = RootSnapshot::from_meta(meta);
         let read_view = ExportReadView::zero_filled(root.clone());
+        let mut replay = wal.replay_after(root.checkpoint_wal_seq()).await?;
+        while let Some(record) = replay.next_record().await? {
+            read_view.apply_wal_record(record).await?;
+        }
+
+        Ok(Self {
+            name: meta.name().clone(),
+            size_bytes: meta.size_bytes(),
+            block_size: meta.block_size(),
+            wal,
+            read_view,
+            write_lock: Mutex::new(()),
+        })
+    }
+
+    pub async fn open_with_cow_tree(
+        meta: &ExportMeta,
+        wal: ExportWalHandle,
+        blob_store: LocalBlobStore,
+        catalog: Arc<dyn CowTreeMetadataStore>,
+    ) -> Result<Self> {
+        if meta.head().layout_kind() != ExportLayoutKind::CowImmutableTree {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "export `{}` does not have a cow immutable tree head",
+                    meta.name()
+                ),
+            });
+        }
+
+        let root = RootSnapshot::from_meta(meta);
+        let snapshot = catalog
+            .load_cow_tree(meta.id())
+            .await
+            .map_err(ServerError::catalog)?;
+        validate_snapshot_matches_meta(meta, &snapshot)?;
+        let read_view = ExportReadView::new(
+            root.clone(),
+            Arc::new(CowTreeBackingReader {
+                snapshot,
+                blob_store,
+            }),
+        );
         let mut replay = wal.replay_after(root.checkpoint_wal_seq()).await?;
         while let Some(record) = replay.next_record().await? {
             read_view.apply_wal_record(record).await?;
@@ -297,6 +349,78 @@ impl BackingReader for ZeroBackingReader {
         validate_range("read", range, root.size_bytes())?;
         Ok(vec![0; range.len() as usize])
     }
+}
+
+#[async_trait::async_trait]
+impl BackingReader for CowTreeBackingReader {
+    async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
+        validate_range("read", range, root.size_bytes())?;
+        if self.snapshot.root_node_id() != root.root_node_id() {
+            return Err(ServerError::Catalog {
+                message: "COW backing snapshot root does not match read view root".to_owned(),
+            });
+        }
+        if self.snapshot.checkpoint_wal_seq() != root.checkpoint_wal_seq() {
+            return Err(ServerError::Catalog {
+                message: "COW backing checkpoint does not match read view root".to_owned(),
+            });
+        }
+
+        let mut data = vec![0; range.len() as usize];
+        let mut copied = 0usize;
+        while copied < data.len() {
+            let current_offset = range.start() + copied as u64;
+            let chunk_index = nbd_control_plane::ChunkIndex::new(current_offset / TREE_CHUNK_BYTES);
+            let chunk_offset = current_offset % TREE_CHUNK_BYTES;
+            let chunk_available = TREE_CHUNK_BYTES - chunk_offset;
+            let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
+
+            if let Some(chunk) = self.snapshot.chunk(chunk_index) {
+                let chunk_data = self
+                    .blob_store
+                    .read_blob(chunk.blob_key(), chunk_offset, copy_len as u64)
+                    .await?;
+                data[copied..copied + copy_len].copy_from_slice(&chunk_data);
+            }
+
+            copied += copy_len;
+        }
+
+        Ok(data)
+    }
+}
+
+fn validate_snapshot_matches_meta(meta: &ExportMeta, snapshot: &CowTreeSnapshot) -> Result<()> {
+    if snapshot.export_id() != meta.id() {
+        return Err(ServerError::Catalog {
+            message: format!(
+                "COW snapshot export id `{}` does not match export `{}`",
+                snapshot.export_id(),
+                meta.id()
+            ),
+        });
+    }
+    if snapshot.size_bytes() != meta.size_bytes() {
+        return Err(ServerError::Catalog {
+            message: format!(
+                "COW snapshot size {} does not match export size {}",
+                snapshot.size_bytes(),
+                meta.size_bytes()
+            ),
+        });
+    }
+    if snapshot.root_node_id() != meta.head().root_node_id() {
+        return Err(ServerError::Catalog {
+            message: "COW snapshot root does not match export head".to_owned(),
+        });
+    }
+    if snapshot.checkpoint_wal_seq() != meta.head().checkpoint_wal_seq() {
+        return Err(ServerError::Catalog {
+            message: "COW snapshot checkpoint does not match export head".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_range(operation: &'static str, range: ByteRange, size_bytes: u64) -> Result<()> {

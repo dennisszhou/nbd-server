@@ -6,7 +6,8 @@ use crate::{
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    ExportCatalog, ExportEngineKind, ExportMeta, ExportName, SimpleTreeMetadataStore,
+    CowTreeMetadataStore, ExportCatalog, ExportEngineKind, ExportMeta, ExportName,
+    SimpleTreeMetadataStore,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,7 @@ pub struct ExportFactory {
     config: ServerConfig,
     blob_dir: PathBuf,
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+    cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
 }
 
@@ -249,12 +251,14 @@ impl ExportFactory {
         config: ServerConfig,
         blob_dir: impl Into<PathBuf>,
         simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+        cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
     ) -> Self {
         Self {
             config,
             blob_dir: blob_dir.into(),
             simple_tree_store,
+            cow_tree_store,
             wal_provider,
         }
     }
@@ -313,7 +317,15 @@ impl ExportFactory {
             ),
             ExportEngineKind::WalDurable => {
                 let wal = self.open_wal(meta).await?;
-                Arc::new(WalDurableEngine::open(meta, wal).await?)
+                Arc::new(
+                    WalDurableEngine::open_with_cow_tree(
+                        meta,
+                        wal,
+                        LocalBlobStore::new(self.blob_dir.clone()),
+                        self.cow_tree_store.clone(),
+                    )
+                    .await?,
+                )
             }
         };
         Ok(engine)
