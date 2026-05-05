@@ -1,4 +1,7 @@
-use nbd_control_plane::{CatalogUrl, SQLiteExportCatalog};
+use nbd_control_plane::{
+    BlobKey, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
+    InspectExport, PublishCompaction, SQLiteExportCatalog, WalSeq, TREE_CHUNK_BYTES,
+};
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::process::{Command, Output};
@@ -137,6 +140,67 @@ async fn cli_creates_wal_durable_exports() {
     assert!(inspected["head"]["root_node_id"].is_null());
 }
 
+#[tokio::test]
+async fn cli_clones_committed_wal_durable_exports() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+    let size = TREE_CHUNK_BYTES.to_string();
+
+    let create = nbdcli(
+        &runtime,
+        &[
+            "create",
+            "source",
+            "--size",
+            &size,
+            "--engine",
+            "wal_durable",
+        ],
+    );
+    assert_success(&create);
+    let source_root = publish_cow_root(&runtime, "source", 7).await;
+
+    let clone = nbdcli(&runtime, &["clone", "source", "destination"]);
+    assert_success(&clone);
+    assert!(stdout(&clone).contains("cloned export destination from source"));
+    assert!(stdout(&clone).contains("source_checkpoint_wal_seq=7"));
+    assert!(stdout(&clone).contains("destination_checkpoint_wal_seq=0"));
+    assert!(stdout(&clone).contains("source WAL was not cloned"));
+
+    let inspect = nbdcli(&runtime, &["inspect", "destination", "--json"]);
+    assert_success(&inspect);
+    let inspected = json_stdout(&inspect);
+    assert_eq!(inspected["name"], "destination");
+    assert_eq!(inspected["engine_kind"], "wal_durable");
+    assert_eq!(inspected["head"]["layout_kind"], "cow_immutable_tree");
+    assert_eq!(inspected["head"]["checkpoint_wal_seq"], 0);
+    assert_eq!(inspected["head"]["root_node_id"], source_root);
+    assert_eq!(inspected["head"]["size_bytes"], TREE_CHUNK_BYTES);
+}
+
+#[tokio::test]
+async fn cli_clone_rejects_empty_wal_sources() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+
+    let create = nbdcli(
+        &runtime,
+        &[
+            "create",
+            "empty",
+            "--size",
+            "1048576",
+            "--engine",
+            "wal_durable",
+        ],
+    );
+    assert_success(&create);
+
+    let clone = nbdcli(&runtime, &["clone", "empty", "destination"]);
+    assert!(!clone.status.success(), "clone unexpectedly succeeded");
+    assert!(stderr(&clone).contains("source committed snapshot is empty"));
+}
+
 async fn migrate_catalog(runtime: &TestRuntime) {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -149,6 +213,52 @@ async fn migrate_catalog(runtime: &TestRuntime) {
             .await
             .expect("apply migration");
     }
+}
+
+async fn publish_cow_root(runtime: &TestRuntime, name: &str, checkpoint: u64) -> Value {
+    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    let catalog = SQLiteExportCatalog::connect(&url)
+        .await
+        .expect("connect catalog");
+    let export = catalog
+        .inspect_export(InspectExport::new(export_name(name)))
+        .await
+        .expect("inspect source export");
+    let published = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                export.id().clone(),
+                export.head().clone(),
+                WalSeq::new(checkpoint),
+                vec![cow_chunk(0, "source-root")],
+            )
+            .expect("publish request"),
+        )
+        .await
+        .expect("publish source root")
+        .into_meta();
+
+    Value::String(
+        published
+            .head()
+            .root_node_id()
+            .expect("published root")
+            .as_str()
+            .to_owned(),
+    )
+}
+
+fn cow_chunk(index: u64, key: &str) -> CowChunkRef {
+    CowChunkRef::new(
+        ChunkIndex::new(index),
+        BlobKey::new(key).expect("valid blob key"),
+        TREE_CHUNK_BYTES,
+    )
+    .expect("valid cow chunk")
+}
+
+fn export_name(name: &str) -> ExportName {
+    ExportName::new(name).expect("valid export name")
 }
 
 fn nbdcli(runtime: &TestRuntime, args: &[&str]) -> Output {

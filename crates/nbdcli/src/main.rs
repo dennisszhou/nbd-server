@@ -3,8 +3,8 @@
 use clap::{Parser, Subcommand};
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
-    open_catalog, CatalogUrl, CreateExport, DeleteExport, ExportEngineKind, ExportMeta, ExportName,
-    InspectExport, ListExports,
+    open_catalog, CatalogUrl, CloneExport, CreateExport, DeleteExport, ExportEngineKind,
+    ExportMeta, ExportName, InspectExport, ListExports,
 };
 use std::error::Error;
 use std::path::PathBuf;
@@ -48,6 +48,10 @@ enum Command {
 
         #[arg(long)]
         json: bool,
+    },
+    Clone {
+        source: String,
+        destination: String,
     },
     Delete {
         name: String,
@@ -106,6 +110,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             } else {
                 print_export(&meta);
             }
+        }
+        Command::Clone {
+            source,
+            destination,
+        } => {
+            let request =
+                CloneExport::new(ExportName::new(source)?, ExportName::new(destination)?)?;
+            let cloned = catalog.clone_export(request).await?;
+            println!(
+                "cloned export {} from {} source_checkpoint_wal_seq={} destination_checkpoint_wal_seq={}",
+                cloned.destination().name(),
+                cloned.source().name(),
+                cloned.source().head().checkpoint_wal_seq(),
+                cloned.destination().head().checkpoint_wal_seq(),
+            );
+            println!("note: copied committed checkpoint only; source WAL was not cloned");
         }
         Command::Delete { name } => {
             let name = ExportName::new(name)?;
