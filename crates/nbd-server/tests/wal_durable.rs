@@ -151,7 +151,7 @@ async fn wal_durable_engine_reopen_recovers_runtime_write() {
 }
 
 #[tokio::test]
-async fn wal_durable_engine_reads_committed_cow_root_then_overlay() {
+async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
     let created = catalog
@@ -167,6 +167,10 @@ async fn wal_durable_engine_reads_committed_cow_root_then_overlay() {
         .await
         .expect("create wal export");
     let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+    let descriptor = catalog
+        .load_export_descriptor(created.name().clone())
+        .await
+        .expect("load descriptor");
     let mut chunk = vec![0; TREE_CHUNK_BYTES as usize];
     chunk[4..8].copy_from_slice(b"base");
     let key = blob_store.create_blob(&chunk).await.expect("create blob");
@@ -203,13 +207,9 @@ async fn wal_durable_engine_reads_committed_cow_root_then_overlay() {
     )
     .await
     .expect("append overlay");
-    let meta = catalog
-        .load_export(ExportName::new("disk-cow").expect("export name"))
-        .await
-        .expect("load export");
     let engine = Arc::new(
         WalDurableEngine::open_with_cow_tree(
-            &meta,
+            &descriptor,
             wal,
             blob_store,
             Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
@@ -217,6 +217,8 @@ async fn wal_durable_engine_reads_committed_cow_root_then_overlay() {
         .await
         .expect("wal durable engine"),
     );
+    let head = engine.export_head().await.expect("engine head");
+    let meta = descriptor.into_meta(head).expect("runtime meta");
     let export_runtime = ConcurrentExportRuntime::with_capacity(meta, engine, 4);
 
     assert_eq!(

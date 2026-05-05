@@ -387,7 +387,11 @@ async fn simple_tree_fixture_with_size(
 }
 
 async fn load_tree(catalog: &SQLiteExportCatalog, meta: &ExportMeta) -> SimpleMutableTree {
-    SimpleMutableTree::load(Arc::new(catalog.clone()), meta)
+    let descriptor = catalog
+        .load_export_descriptor(meta.name().clone())
+        .await
+        .expect("load descriptor");
+    SimpleMutableTree::load(Arc::new(catalog.clone()), &descriptor)
         .await
         .expect("load simple mutable tree")
 }
@@ -402,8 +406,12 @@ async fn simple_durable_runtime(
     ConcurrentExportRuntime,
 ) {
     let (runtime, catalog, meta) = simple_tree_fixture_with_size(name, size_bytes).await;
+    let descriptor = catalog
+        .load_export_descriptor(meta.name().clone())
+        .await
+        .expect("load descriptor");
     let engine = SimpleDurableEngine::load(
-        &meta,
+        &descriptor,
         LocalBlobStore::new(runtime.state_dir().join("blobs")),
         Arc::new(catalog.clone()),
     )

@@ -3,7 +3,7 @@ use crate::{
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
 };
-use nbd_control_plane::{ExportMeta, ExportName};
+use nbd_control_plane::{ExportDescriptor, ExportHead, ExportLayoutKind, ExportMeta, ExportName};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::ptr;
@@ -61,19 +61,32 @@ impl ExportAdmissionPolicy for MemoryAdmissionPolicy {
 
 impl MemoryExportEngine {
     pub fn new(meta: &ExportMeta) -> Result<Self> {
-        let size_bytes = meta.size_bytes();
+        Self::from_export_head(meta.name().clone(), meta.block_size(), meta.head())
+    }
+
+    pub fn from_descriptor(descriptor: &ExportDescriptor, head: &ExportHead) -> Result<Self> {
+        Self::from_export_head(descriptor.name().clone(), descriptor.block_size(), head)
+    }
+
+    fn from_export_head(name: ExportName, block_size: u64, head: &ExportHead) -> Result<Self> {
+        if head.layout_kind() != ExportLayoutKind::MemoryEmpty {
+            return Err(ServerError::Catalog {
+                message: format!("export `{name}` does not have a memory_empty head"),
+            });
+        }
+        let size_bytes = head.size_bytes();
         if size_bytes > MAX_MEMORY_EXPORT_BYTES {
             return Err(ServerError::ExportTooLarge {
-                name: meta.name().clone(),
+                name,
                 size_bytes,
                 max_size_bytes: MAX_MEMORY_EXPORT_BYTES,
             });
         }
 
         Ok(Self {
-            name: meta.name().clone(),
+            name,
             size_bytes,
-            block_size: meta.block_size(),
+            block_size,
             data: MemoryStorage::new(size_bytes as usize),
         })
     }

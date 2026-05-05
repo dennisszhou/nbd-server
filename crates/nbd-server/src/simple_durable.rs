@@ -5,8 +5,8 @@ use crate::{
     ServerError,
 };
 use nbd_control_plane::{
-    BlobKey, ChunkIndex, ExportLayoutKind, ExportMeta, ExportName, NodeId, SimpleChunkRef,
-    SimpleTreeMetadataStore, SimpleTreeSnapshot, SIMPLE_CHUNK_BYTES,
+    BlobKey, ChunkIndex, ExportDescriptor, ExportHead, ExportLayoutKind, ExportName, NodeId,
+    SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot, WalSeq, SIMPLE_CHUNK_BYTES,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -54,32 +54,23 @@ struct SimpleTreeState {
 
 impl SimpleDurableEngine {
     pub async fn load(
-        meta: &ExportMeta,
+        descriptor: &ExportDescriptor,
         blob_store: LocalBlobStore,
         catalog: Arc<dyn SimpleTreeMetadataStore>,
     ) -> Result<Self> {
-        let tree = SimpleMutableTree::load(catalog, meta).await?;
-        Self::from_loaded_tree(meta, blob_store, tree)
+        let tree = SimpleMutableTree::load(catalog, descriptor).await?;
+        Self::from_loaded_tree(descriptor, blob_store, tree).await
     }
 
-    fn from_loaded_tree(
-        meta: &ExportMeta,
+    async fn from_loaded_tree(
+        descriptor: &ExportDescriptor,
         blob_store: LocalBlobStore,
         tree: SimpleMutableTree,
     ) -> Result<Self> {
-        if meta.head().layout_kind() != ExportLayoutKind::SimpleMutableTree {
-            return Err(ServerError::Catalog {
-                message: format!(
-                    "export `{}` does not have a simple mutable tree head",
-                    meta.name()
-                ),
-            });
-        }
-
         Ok(Self {
-            name: meta.name().clone(),
-            size_bytes: meta.size_bytes(),
-            block_size: meta.block_size(),
+            name: descriptor.name().clone(),
+            size_bytes: tree.size_bytes().await,
+            block_size: descriptor.block_size(),
             blob_store,
             tree,
         })
@@ -95,6 +86,17 @@ impl SimpleDurableEngine {
 
     pub fn block_size(&self) -> u64 {
         self.block_size
+    }
+
+    pub async fn export_head(&self) -> Result<ExportHead> {
+        let snapshot = self.tree.snapshot().await?;
+        ExportHead::new(
+            ExportLayoutKind::SimpleMutableTree,
+            snapshot.root_node_id().cloned(),
+            snapshot.size_bytes(),
+            WalSeq::zero(),
+        )
+        .map_err(ServerError::catalog)
     }
 
     fn validate_range(&self, operation: &'static str, offset: u64, length: u64) -> Result<()> {
@@ -445,47 +447,29 @@ impl LocalBlobStore {
 impl SimpleMutableTree {
     pub async fn load(
         catalog: Arc<dyn SimpleTreeMetadataStore>,
-        meta: &ExportMeta,
+        descriptor: &ExportDescriptor,
     ) -> Result<Self> {
-        if meta.head().layout_kind() != ExportLayoutKind::SimpleMutableTree {
-            return Err(ServerError::Catalog {
-                message: format!(
-                    "export `{}` does not have a simple mutable tree head",
-                    meta.name()
-                ),
-            });
-        }
-
         tracing::debug!(
             target: target::CATALOG,
             event = event::CATALOG_TREE_LOADED,
             service = observability::SERVICE_NAME,
             server_instance_id = observability::server_instance_id(),
             pid = observability::pid(),
-            export_id = %meta.id(),
-            export_name = %meta.name(),
-            layout_kind = %meta.head().layout_kind(),
+            export_id = %descriptor.id(),
+            export_name = %descriptor.name(),
+            layout_kind = "simple_mutable_tree",
             phase = "start",
         );
         let snapshot = catalog
-            .load_simple_tree(meta.id())
+            .load_simple_tree(descriptor.id())
             .await
             .map_err(ServerError::catalog)?;
-        if snapshot.export_id() != meta.id() {
+        if snapshot.export_id() != descriptor.id() {
             return Err(ServerError::Catalog {
                 message: format!(
                     "simple tree export id {} does not match export {}",
                     snapshot.export_id(),
-                    meta.id()
-                ),
-            });
-        }
-        if snapshot.size_bytes() != meta.size_bytes() {
-            return Err(ServerError::Catalog {
-                message: format!(
-                    "simple tree size {} does not match export size {}",
-                    snapshot.size_bytes(),
-                    meta.size_bytes()
+                    descriptor.id()
                 ),
             });
         }
@@ -497,8 +481,8 @@ impl SimpleMutableTree {
             server_instance_id = observability::server_instance_id(),
             pid = observability::pid(),
             export_id = %snapshot.export_id(),
-            export_name = %meta.name(),
-            layout_kind = %meta.head().layout_kind(),
+            export_name = %descriptor.name(),
+            layout_kind = "simple_mutable_tree",
             root_node_id = ?snapshot.root_node_id(),
             chunk_count = snapshot.chunks().len(),
             phase = "complete",
@@ -509,6 +493,10 @@ impl SimpleMutableTree {
             commit_lock: Mutex::new(()),
             state: RwLock::new(SimpleTreeState::from_snapshot(&snapshot)),
         })
+    }
+
+    pub async fn size_bytes(&self) -> u64 {
+        self.state.read().await.size_bytes
     }
 
     pub async fn snapshot(&self) -> Result<SimpleTreeSnapshot> {

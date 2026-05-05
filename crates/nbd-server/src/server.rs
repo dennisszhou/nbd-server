@@ -50,6 +50,7 @@ impl NbdServer {
             config.runtime.blob_dir.clone(),
             catalog.clone(),
             catalog.clone(),
+            catalog.clone(),
             Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone())),
         ));
         let registry = Arc::new(LocalExportRegistry::new(catalog, factory));

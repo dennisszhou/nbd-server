@@ -387,11 +387,13 @@ fn local_registry(
     config: ServerConfig,
 ) -> LocalExportRegistry {
     let catalog = Arc::new(catalog);
+    let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
     let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
     let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
     let factory = Arc::new(ExportFactory::new(
         config,
         blob_dir(runtime),
+        export_catalog,
         simple_tree_store,
         cow_tree_store,
         Arc::new(LocalWalProvider::new(runtime.wal_dir())),

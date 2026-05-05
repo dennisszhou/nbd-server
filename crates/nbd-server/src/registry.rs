@@ -6,8 +6,8 @@ use crate::{
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    CowTreeMetadataStore, ExportCatalog, ExportEngineKind, ExportMeta, ExportName,
-    SimpleTreeMetadataStore,
+    CowTreeMetadataStore, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportId, ExportMeta,
+    ExportName, SimpleTreeMetadataStore,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -53,9 +53,15 @@ pub struct LocalExportRegistry {
 pub struct ExportFactory {
     config: ServerConfig,
     blob_dir: PathBuf,
+    catalog: Arc<dyn ExportCatalog>,
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
+}
+
+struct OpenedEngine {
+    meta: ExportMeta,
+    engine: ExportEngineHandle,
 }
 
 enum ActiveExportState {
@@ -205,9 +211,9 @@ impl LocalExportRegistry {
             export_name = %name,
             phase = "start",
         );
-        let meta = self
+        let descriptor = self
             .catalog
-            .load_export(name)
+            .load_export_descriptor(name)
             .await
             .map_err(ServerError::catalog)?;
         tracing::debug!(
@@ -216,14 +222,12 @@ impl LocalExportRegistry {
             service = observability::SERVICE_NAME,
             server_instance_id = observability::server_instance_id(),
             pid = observability::pid(),
-            export_id = %meta.id(),
-            export_name = %meta.name(),
-            engine_kind = %meta.engine_kind(),
-            layout_kind = %meta.head().layout_kind(),
-            size_bytes = meta.size_bytes(),
+            export_id = %descriptor.id(),
+            export_name = %descriptor.name(),
+            engine_kind = %descriptor.engine_kind(),
             phase = "complete",
         );
-        self.factory.open_export(meta).await
+        self.factory.open_export(descriptor).await
     }
 
     fn remove_opening(&self, name: &ExportName, owner: ExportOwner) -> Result<()> {
@@ -250,6 +254,7 @@ impl ExportFactory {
     pub fn new(
         config: ServerConfig,
         blob_dir: impl Into<PathBuf>,
+        catalog: Arc<dyn ExportCatalog>,
         simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
@@ -257,6 +262,7 @@ impl ExportFactory {
         Self {
             config,
             blob_dir: blob_dir.into(),
+            catalog,
             simple_tree_store,
             cow_tree_store,
             wal_provider,
@@ -275,8 +281,10 @@ impl ExportFactory {
         self.config.export_queue_depth.get()
     }
 
-    pub async fn open_export(&self, meta: ExportMeta) -> Result<ExportRuntimeHandle> {
-        let engine = self.open_engine(&meta).await?;
+    pub async fn open_export(&self, descriptor: ExportDescriptor) -> Result<ExportRuntimeHandle> {
+        let opened = self.open_engine(&descriptor).await?;
+        let meta = opened.meta;
+        let engine = opened.engine;
         tracing::info!(
             target: target::EXPORT,
             event = event::EXPORT_ENGINE_LOADED,
@@ -304,35 +312,66 @@ impl ExportFactory {
         Ok(runtime)
     }
 
-    async fn open_engine(&self, meta: &ExportMeta) -> Result<ExportEngineHandle> {
-        let engine: ExportEngineHandle = match meta.engine_kind() {
-            ExportEngineKind::Memory => Arc::new(MemoryExportEngine::new(meta)?),
-            ExportEngineKind::SimpleDurable => Arc::new(
-                SimpleDurableEngine::load(
-                    meta,
+    async fn open_engine(&self, descriptor: &ExportDescriptor) -> Result<OpenedEngine> {
+        let opened = match descriptor.engine_kind() {
+            ExportEngineKind::Memory => {
+                let head = self
+                    .catalog
+                    .load_export_head(descriptor.id())
+                    .await
+                    .map_err(ServerError::catalog)?;
+                let engine: ExportEngineHandle =
+                    Arc::new(MemoryExportEngine::from_descriptor(descriptor, &head)?);
+                OpenedEngine {
+                    meta: descriptor
+                        .clone()
+                        .into_meta(head)
+                        .map_err(ServerError::catalog)?,
+                    engine,
+                }
+            }
+            ExportEngineKind::SimpleDurable => {
+                let engine = SimpleDurableEngine::load(
+                    descriptor,
                     LocalBlobStore::new(self.blob_dir.clone()),
                     self.simple_tree_store.clone(),
                 )
-                .await?,
-            ),
+                .await?;
+                let head = engine.export_head().await?;
+                let engine: ExportEngineHandle = Arc::new(engine);
+                OpenedEngine {
+                    meta: descriptor
+                        .clone()
+                        .into_meta(head)
+                        .map_err(ServerError::catalog)?,
+                    engine,
+                }
+            }
             ExportEngineKind::WalDurable => {
-                let wal = self.open_wal(meta).await?;
-                Arc::new(
-                    WalDurableEngine::open_with_cow_tree(
-                        meta,
-                        wal,
-                        LocalBlobStore::new(self.blob_dir.clone()),
-                        self.cow_tree_store.clone(),
-                    )
-                    .await?,
+                let wal = self.open_wal(descriptor.id()).await?;
+                let engine = WalDurableEngine::open_with_cow_tree(
+                    descriptor,
+                    wal,
+                    LocalBlobStore::new(self.blob_dir.clone()),
+                    self.cow_tree_store.clone(),
                 )
+                .await?;
+                let head = engine.export_head().await?;
+                let engine: ExportEngineHandle = Arc::new(engine);
+                OpenedEngine {
+                    meta: descriptor
+                        .clone()
+                        .into_meta(head)
+                        .map_err(ServerError::catalog)?,
+                    engine,
+                }
             }
         };
-        Ok(engine)
+        Ok(opened)
     }
 
-    async fn open_wal(&self, meta: &ExportMeta) -> Result<ExportWalHandle> {
-        let domain = WalDomain::for_export_id(meta.id().clone());
+    async fn open_wal(&self, export_id: &ExportId) -> Result<ExportWalHandle> {
+        let domain = WalDomain::for_export_id(export_id.clone());
         self.wal_provider.open_export(OpenWal::new(domain)).await
     }
 }

@@ -4,8 +4,8 @@ use crate::{
     ExportWalHandle, LocalBlobStore, Result, ServerError, WalRecord, WalRequest,
 };
 use nbd_control_plane::{
-    CowTreeMetadataStore, CowTreeSnapshot, ExportLayoutKind, ExportMeta, ExportName, NodeId,
-    WalSeq, TREE_CHUNK_BYTES,
+    CowTreeMetadataStore, CowTreeSnapshot, ExportDescriptor, ExportHead, ExportLayoutKind,
+    ExportMeta, ExportName, NodeId, WalSeq, TREE_CHUNK_BYTES,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -98,26 +98,24 @@ impl WalDurableEngine {
     }
 
     pub async fn open_with_cow_tree(
-        meta: &ExportMeta,
+        descriptor: &ExportDescriptor,
         wal: ExportWalHandle,
         blob_store: LocalBlobStore,
         catalog: Arc<dyn CowTreeMetadataStore>,
     ) -> Result<Self> {
-        if meta.head().layout_kind() != ExportLayoutKind::CowImmutableTree {
+        if descriptor.engine_kind() != nbd_control_plane::ExportEngineKind::WalDurable {
             return Err(ServerError::Catalog {
-                message: format!(
-                    "export `{}` does not have a cow immutable tree head",
-                    meta.name()
-                ),
+                message: format!("export `{}` is not a wal_durable export", descriptor.name()),
             });
         }
 
-        let root = RootSnapshot::from_meta(meta);
         let snapshot = catalog
-            .load_cow_tree(meta.id())
+            .load_cow_tree(descriptor.id())
             .await
             .map_err(ServerError::catalog)?;
-        validate_snapshot_matches_meta(meta, &snapshot)?;
+        validate_snapshot_can_open(descriptor, &snapshot)?;
+        let size_bytes = snapshot.size_bytes();
+        let root = RootSnapshot::from_cow_snapshot(&snapshot);
         let read_view = ExportReadView::new(
             root.clone(),
             Arc::new(CowTreeBackingReader {
@@ -131,9 +129,9 @@ impl WalDurableEngine {
         }
 
         Ok(Self {
-            name: meta.name().clone(),
-            size_bytes: meta.size_bytes(),
-            block_size: meta.block_size(),
+            name: descriptor.name().clone(),
+            size_bytes,
+            block_size: descriptor.block_size(),
             wal,
             read_view,
             write_lock: Mutex::new(()),
@@ -150,6 +148,10 @@ impl WalDurableEngine {
 
     pub fn block_size(&self) -> u64 {
         self.block_size
+    }
+
+    pub async fn export_head(&self) -> Result<ExportHead> {
+        self.read_view.export_head().await
     }
 
     async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
@@ -244,6 +246,14 @@ impl RootSnapshot {
         }
     }
 
+    fn from_cow_snapshot(snapshot: &CowTreeSnapshot) -> Self {
+        Self {
+            root_node_id: snapshot.root_node_id().cloned(),
+            checkpoint_wal_seq: snapshot.checkpoint_wal_seq(),
+            size_bytes: snapshot.size_bytes(),
+        }
+    }
+
     pub fn root_node_id(&self) -> Option<&NodeId> {
         self.root_node_id.as_ref()
     }
@@ -254,6 +264,16 @@ impl RootSnapshot {
 
     pub fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+
+    fn to_export_head(&self) -> Result<ExportHead> {
+        ExportHead::new(
+            ExportLayoutKind::CowImmutableTree,
+            self.root_node_id.clone(),
+            self.size_bytes,
+            self.checkpoint_wal_seq,
+        )
+        .map_err(ServerError::catalog)
     }
 }
 
@@ -270,6 +290,10 @@ impl ExportReadView {
             }),
             backing,
         }
+    }
+
+    async fn export_head(&self) -> Result<ExportHead> {
+        self.state.read().await.root.to_export_head()
     }
 
     pub async fn read(&self, range: ByteRange) -> Result<Vec<u8>> {
@@ -390,36 +414,19 @@ impl BackingReader for CowTreeBackingReader {
     }
 }
 
-fn validate_snapshot_matches_meta(meta: &ExportMeta, snapshot: &CowTreeSnapshot) -> Result<()> {
-    if snapshot.export_id() != meta.id() {
+fn validate_snapshot_can_open(
+    descriptor: &ExportDescriptor,
+    snapshot: &CowTreeSnapshot,
+) -> Result<()> {
+    if snapshot.export_id() != descriptor.id() {
         return Err(ServerError::Catalog {
             message: format!(
                 "COW snapshot export id `{}` does not match export `{}`",
                 snapshot.export_id(),
-                meta.id()
+                descriptor.id()
             ),
         });
     }
-    if snapshot.size_bytes() != meta.size_bytes() {
-        return Err(ServerError::Catalog {
-            message: format!(
-                "COW snapshot size {} does not match export size {}",
-                snapshot.size_bytes(),
-                meta.size_bytes()
-            ),
-        });
-    }
-    if snapshot.root_node_id() != meta.head().root_node_id() {
-        return Err(ServerError::Catalog {
-            message: "COW snapshot root does not match export head".to_owned(),
-        });
-    }
-    if snapshot.checkpoint_wal_seq() != meta.head().checkpoint_wal_seq() {
-        return Err(ServerError::Catalog {
-            message: "COW snapshot checkpoint does not match export head".to_owned(),
-        });
-    }
-
     Ok(())
 }
 

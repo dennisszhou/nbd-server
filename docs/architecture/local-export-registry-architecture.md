@@ -181,9 +181,9 @@ Recovery after lease loss is out of scope for this architecture pass.
 NBD_OPT_GO(export_name)
   -> ExportLifecycleManager.begin_open(export_name)
        -> acquire serving lease
-       -> load and validate export metadata
+       -> load and validate exports-only descriptor
   -> LocalExportRegistry.register(..., lease, state = Opening)
-  -> initialize Export components
+  -> initialize Export components from latest head/tree snapshot
   -> replay WAL into ExportReadView
   -> transition local record to Active
   -> enter transmission phase
@@ -193,6 +193,12 @@ Registering the local record before replay lets the renewal worker refresh the
 lease while potentially slow recovery work is running. If initialization or WAL
 replay fails after `begin_open` succeeds, the open path must unregister the
 local record and release the lease before returning failure.
+
+The descriptor loaded during `begin_open` is stable export identity and
+configuration from `exports`; it is not the current serving head. Engines that
+depend on durable state load the latest head/tree snapshot while constructing
+their serving state. This keeps background compaction or future resize work
+from making a previously loaded head stale during open.
 
 The long-term system may support multiple connections for the same active
 serving domain only when they belong to the same authenticated client/host.
