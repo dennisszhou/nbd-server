@@ -8,8 +8,8 @@ The system needs durable metadata for two related but different tree layouts:
 
 - `simple_mutable_tree`, the current direct-commit local layout used by
   `SimpleDurableEngine`;
-- `cow_immutable_tree`, the future WAL/compaction layout used for clone,
-  checkpoints, and immutable S3-friendly blobs.
+- `cow_immutable_tree`, the WAL/compaction layout used for clone, checkpoints,
+  and immutable S3-friendly blobs.
 
 The old version of this document described only the future immutable COW model.
 That made it too easy to read immutable-node and generation rules as if they
@@ -19,15 +19,15 @@ also applied to `simple_mutable_tree`.
 
 Use `ExportCatalog` to track export lifecycle, the current export head, and
 layout-specific sparse tree metadata without conflating mutable direct-commit
-state with future immutable checkpoint history.
+state with immutable checkpoint history.
 
 The current serving source of truth is `export_heads`.
 
 For `simple_mutable_tree`, updates mutate export-private metadata under the
 current head through `SimpleMutableTree`.
 
-For future `cow_immutable_tree`, compaction creates immutable nodes and
-publishes a new root/checkpoint by advancing `export_heads`.
+For `cow_immutable_tree`, compaction creates immutable nodes and publishes a
+new root/checkpoint by advancing `export_heads`.
 
 # ExportCatalog Responsibilities
 
@@ -41,8 +41,8 @@ publishes a new root/checkpoint by advancing `export_heads`.
 - store export size, block size, and lifecycle state;
 - store one current `export_heads` row per export;
 - store simple mutable tree rows for `SimpleDurableEngine`;
-- publish future WAL/COW root/checkpoint updates by advancing the current head
-  to an immutable tree root.
+- publish WAL/COW root/checkpoint updates by advancing the current head to an
+  immutable tree root.
 
 It is not the local active export registry.
 
@@ -122,7 +122,7 @@ COW tree, but its rows are not immutable COW publication artifacts.
 
 ## `cow_immutable_tree`
 
-`cow_immutable_tree` is the future WAL/compaction layout.
+`cow_immutable_tree` is the WAL/compaction layout.
 
 Published nodes are immutable. Updating an export creates new nodes and moves
 the current head to a new immutable root/checkpoint.
@@ -170,17 +170,20 @@ Missing committed data zero-fills.
 
 # Copy-On-Write Roots And Clone
 
-This section applies only to future `cow_immutable_tree`.
+This section applies only to `cow_immutable_tree`.
 
 The committed tree is a persistent copy-on-write tree. Edges are immutable once
 published. Updates create new leaf blobs and new nodes along changed paths to a
 new root. Unchanged subtrees are shared by reference.
 
 Clone is O(1) because it copies the source export's current root pointer into a
-new export head.
+new export head. Clone requires a non-null source root. A null root represents
+the all-zero committed tree, so clone should fail with an operator-visible
+empty-snapshot error instead of creating another empty export.
 
 ```text
 clone src -> dst
+  -> require src.root_node_id is not null
   -> create dst export metadata
   -> create dst export_head:
        layout_kind = cow_immutable_tree
@@ -269,7 +272,9 @@ compaction attempts safe without a separate generation table.
 - Clones include only the source export's latest committed checkpoint.
 - New simple durable exports start with one current head and no materialized
   tree.
-- New and cloned COW exports start with one current head.
+- New COW exports start with one current head.
+- Cloned COW exports start with one current head copied from a non-null source
+  root.
 - Delete is logical first; physical deletion belongs to GC.
 - Missing tree data means zero-fill, never uninitialized bytes.
 - Materialized internal nodes with no reachable leaf descendants are

@@ -36,8 +36,8 @@ Define `ExportCatalog` as the durable metadata API for:
   per-export lease;
 - storing the current export head;
 - inserting simple mutable tree metadata for `SimpleDurableEngine`;
-- inserting immutable tree metadata for future WAL/COW compaction;
-- publishing future root/checkpoint updates by advancing `export_heads`.
+- inserting immutable tree metadata for WAL/COW compaction;
+- publishing root/checkpoint updates by advancing `export_heads`.
 
 # Catalog-Owned State
 
@@ -274,12 +274,17 @@ insert export_heads row:
 
 # Clone Export
 
-Clone is a future `cow_immutable_tree` operation. It copies the source
-export's latest committed COW root. It does not include the source export's
-uncheckpointed WAL.
+Clone is a `cow_immutable_tree` operation. It copies the source export's latest
+committed COW root. It does not include the source export's uncheckpointed WAL.
+
+Clone requires the source head to have a non-null `root_node_id`. A null root
+is the all-zero committed tree, so clone should reject it with an operator
+error that the source snapshot is empty rather than silently creating another
+empty export.
 
 ```text
 source = load active source export
+verify source.root_node_id is not null
 insert destination exports row
 insert destination export_heads row:
   layout_kind = cow_immutable_tree
@@ -320,8 +325,8 @@ mutable blobs after file-first failures.
 
 # Root And Checkpoint Publication
 
-`publish_compaction` is a future WAL/COW operation. It is called after
-compaction has written any new blobs. It inserts immutable tree metadata and
+`publish_compaction` is a WAL/COW operation. It is called after compaction has
+written any new blobs. It inserts immutable tree metadata and
 advances the current head in one transaction so the catalog never exposes a
 partially published tree. Publication must preserve the size from the head it
 compacted unless compaction explicitly observes and incorporates a newer resize
@@ -392,7 +397,9 @@ the write durability contract.
 - `simple_mutable_tree` writes update simple tree metadata through
   `SimpleMutableTree`, not by appending generations.
 - Cloned COW exports create their own head and checkpoint zero.
-- Clone copies the latest committed root only.
+- Clone copies the latest non-empty committed root only.
+- Clone rejects a source with `root_node_id = null` as an empty committed
+  snapshot.
 - Clone does not include source uncheckpointed WAL records.
 - `root_node_id = null` means an all-zero current tree.
 - Root/checkpoint publication advances the current head.
