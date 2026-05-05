@@ -133,8 +133,11 @@ KERNEL_SMOKE_ENGINE=memory make docker-smoke
 ```
 
 - `make test-protocol` runs the userspace TCP protocol integration baseline.
-- `make docker-smoke` runs the privileged kernel NBD smoke path.
-- `KERNEL_SMOKE_ENGINE=memory make docker-smoke` checks the volatile engine path.
+- `make docker-smoke` runs the privileged kernel NBD smoke path. It defaults
+  to `wal_durable`, verifies reattach and close compaction, and exports logs
+  and inspect snapshots under `./.tmp/docker-smoke`.
+- `KERNEL_SMOKE_ENGINE=memory make docker-smoke` checks the volatile engine
+  path.
 - `make build-tools` builds `nbd-server` and `nbdcli`.
 - `make -C prisma db-migrate` applies Prisma migrations to `DATABASE_URL`.
 - If Docker/kernel smoke cannot run, say exactly why and what was run instead.

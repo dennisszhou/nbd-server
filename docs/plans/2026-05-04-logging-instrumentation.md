@@ -771,10 +771,9 @@ Validation
 - `cargo test --workspace`
 - `make test-protocol`
 - `make docker-smoke`
-- A Docker smoke log sample was captured by bind-mounting `/tmp/nbd` to
-  `./.tmp/docker-smoke-log`; the default `docker-smoke` container is removed
-  at exit, so its in-container `/tmp/nbd/current.log` does not otherwise
-  survive the target.
+- Docker smoke bind-mounts `./.tmp/docker-smoke` as an artifact directory and
+  copies `current.log`, server stdout/stderr, and export inspect snapshots out
+  of the disposable container before exit.
 
 Deferred follow-up
 - Application-managed log rotation remains deferred.

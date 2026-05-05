@@ -5,6 +5,8 @@ DOCKER_WORKDIR ?= /work
 DOCKER_CARGO_TARGET_DIR ?= /cargo-target
 DOCKER_INTERACTIVE_FLAGS ?= -it
 DOCKER_PATH := $(DOCKER_CARGO_TARGET_DIR)/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+DOCKER_KERNEL_SMOKE_ARTIFACT_DIR ?= $(CURDIR)/.tmp/docker-smoke
+DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT ?= /tmp/nbd-smoke-artifacts
 
 DOCKER_RUN_BASE = docker run --rm \
 	--platform $(DOCKER_PLATFORM)
@@ -40,7 +42,11 @@ DOCKER_KERNEL_SMOKE_ENV = \
 	$(if $(KERNEL_SMOKE_ENGINE),-e KERNEL_SMOKE_ENGINE=$(KERNEL_SMOKE_ENGINE)) \
 	$(if $(KERNEL_SMOKE_REATTACH),-e KERNEL_SMOKE_REATTACH=$(KERNEL_SMOKE_REATTACH)) \
 	$(if $(KERNEL_SMOKE_PORT),-e KERNEL_SMOKE_PORT=$(KERNEL_SMOKE_PORT)) \
-	$(if $(KERNEL_SMOKE_DEVICE),-e KERNEL_SMOKE_DEVICE=$(KERNEL_SMOKE_DEVICE))
+	$(if $(KERNEL_SMOKE_DEVICE),-e KERNEL_SMOKE_DEVICE=$(KERNEL_SMOKE_DEVICE)) \
+	$(if $(KERNEL_SMOKE_RUST_LOG),-e KERNEL_SMOKE_RUST_LOG=$(KERNEL_SMOKE_RUST_LOG)) \
+	-e KERNEL_SMOKE_ARTIFACT_DIR=$(DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT)
+DOCKER_KERNEL_SMOKE_ARTIFACT_ARGS = \
+	-v "$(DOCKER_KERNEL_SMOKE_ARTIFACT_DIR):$(DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT)"
 
 .PHONY: test test-protocol fmt clippy build-tools docker-build docker-test \
 	docker-shell docker-kernel-shell docker-attach docker-smoke docker-stop \
@@ -83,7 +89,9 @@ docker-attach:
 		$(DOCKER_CONTAINER) bash
 
 docker-smoke: docker-build
-	$(DOCKER_RUN_WORKSPACE_READONLY) $(DOCKER_KERNEL_SMOKE_ENV) --privileged $(DOCKER_IMAGE) make kernel-smoke-inner
+	mkdir -p "$(DOCKER_KERNEL_SMOKE_ARTIFACT_DIR)"
+	$(DOCKER_RUN_WORKSPACE_READONLY) $(DOCKER_KERNEL_SMOKE_ENV) $(DOCKER_KERNEL_SMOKE_ARTIFACT_ARGS) --privileged $(DOCKER_IMAGE) make kernel-smoke-inner
+	@echo "docker smoke artifacts: $(DOCKER_KERNEL_SMOKE_ARTIFACT_DIR)"
 
 docker-stop:
 	-docker rm -f $(DOCKER_CONTAINER)
