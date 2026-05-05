@@ -17,6 +17,7 @@ pub struct NbdServer {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+    compaction_manager: Option<CompactionManager>,
 }
 
 impl NbdServer {
@@ -59,7 +60,7 @@ impl NbdServer {
             catalog.clone(),
             catalog.clone(),
             wal_provider,
-            compaction_manager,
+            compaction_manager.clone(),
         ));
         let registry = Arc::new(LocalExportRegistry::new(catalog, factory));
         let reply_capacity = config.server.connection.reply_queue_capacity.get();
@@ -130,6 +131,7 @@ impl NbdServer {
             addr,
             shutdown: Some(shutdown_tx),
             task: Some(task),
+            compaction_manager: Some(compaction_manager),
         })
     }
 
@@ -157,6 +159,9 @@ impl NbdServer {
                 )
             })?;
         }
+        if let Some(compaction_manager) = self.compaction_manager.take() {
+            compaction_manager.shutdown().await?;
+        }
         tracing::info!(
             target: target::OPS,
             event = event::SERVER_SHUTDOWN_COMPLETED,
@@ -183,6 +188,9 @@ impl Drop for NbdServer {
         }
         if let Some(task) = &self.task {
             task.abort();
+        }
+        if let Some(compaction_manager) = &self.compaction_manager {
+            compaction_manager.request_shutdown();
         }
     }
 }

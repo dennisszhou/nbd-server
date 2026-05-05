@@ -8,8 +8,10 @@ use nbd_control_plane::{
 };
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 const DEFAULT_COMPACTION_QUEUE_CAPACITY: usize = 16;
 
@@ -17,11 +19,19 @@ const DEFAULT_COMPACTION_QUEUE_CAPACITY: usize = 16;
 pub struct CompactionManager {
     worker: Arc<CompactionWorker>,
     queue: CompactionQueue,
+    shutdown: Arc<CompactionShutdownState>,
 }
 
 #[derive(Clone)]
 struct CompactionQueue {
     sender: mpsc::Sender<CompactionJob>,
+    accepting: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct CompactionShutdownState {
+    signal: Mutex<Option<oneshot::Sender<()>>>,
+    worker: Mutex<Option<JoinHandle<CompactionWorkerExit>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +45,11 @@ pub enum CompactionEnqueueOutcome {
     Queued,
     DroppedFull,
     ShuttingDown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionShutdown {
+    dropped_pending_jobs: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +74,11 @@ struct CompactionWorker {
     catalog: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
     blob_store: LocalBlobStore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactionWorkerExit {
+    dropped_pending_jobs: usize,
 }
 
 impl CompactionManager {
@@ -86,23 +106,83 @@ impl CompactionManager {
             wal_provider,
             blob_store,
         });
+        let accepting = Arc::new(AtomicBool::new(true));
         let (sender, receiver) = mpsc::channel(queue_capacity);
-        let queue = CompactionQueue { sender };
-        spawn_worker(worker.clone(), receiver);
+        let queue = CompactionQueue {
+            sender,
+            accepting: accepting.clone(),
+        };
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let worker_task = spawn_worker(worker.clone(), receiver, shutdown_rx, accepting);
+        let shutdown = Arc::new(CompactionShutdownState {
+            signal: Mutex::new(Some(shutdown_tx)),
+            worker: Mutex::new(Some(worker_task)),
+        });
 
-        Self { worker, queue }
+        Self {
+            worker,
+            queue,
+            shutdown,
+        }
     }
 
     pub fn enqueue(&self, job: CompactionJob) -> CompactionEnqueueOutcome {
+        if !self.queue.accepting.load(Ordering::Acquire) {
+            return CompactionEnqueueOutcome::ShuttingDown;
+        }
+
         match self.queue.sender.try_send(job) {
             Ok(()) => CompactionEnqueueOutcome::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => CompactionEnqueueOutcome::DroppedFull,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if self.queue.accepting.load(Ordering::Acquire) {
+                    CompactionEnqueueOutcome::DroppedFull
+                } else {
+                    CompactionEnqueueOutcome::ShuttingDown
+                }
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => CompactionEnqueueOutcome::ShuttingDown,
         }
     }
 
     pub async fn compact_export(&self, job: CompactionJob) -> Result<CompactionResult> {
         self.worker.compact_export(job).await
+    }
+
+    pub fn request_shutdown(&self) {
+        self.queue.accepting.store(false, Ordering::Release);
+        let Ok(mut signal) = self.shutdown.signal.lock() else {
+            return;
+        };
+        if let Some(signal) = signal.take() {
+            let _ = signal.send(());
+        }
+    }
+
+    pub async fn shutdown(&self) -> Result<CompactionShutdown> {
+        self.request_shutdown();
+        let worker = {
+            let mut worker =
+                self.shutdown
+                    .worker
+                    .lock()
+                    .map_err(|_| ServerError::LockPoisoned {
+                        resource: "compaction worker shutdown",
+                    })?;
+            worker.take()
+        };
+
+        let Some(worker) = worker else {
+            return Ok(CompactionShutdown::default());
+        };
+        let worker_exit = worker.await.map_err(|source| {
+            ServerError::io(
+                "join compaction worker",
+                std::io::Error::other(source.to_string()),
+            )
+        })?;
+        Ok(CompactionShutdown {
+            dropped_pending_jobs: worker_exit.dropped_pending_jobs,
+        })
     }
 }
 
@@ -139,6 +219,12 @@ impl CompactionResult {
 
     pub fn outcome(&self) -> CompactionOutcome {
         self.outcome
+    }
+}
+
+impl CompactionShutdown {
+    pub fn dropped_pending_jobs(&self) -> usize {
+        self.dropped_pending_jobs
     }
 }
 
@@ -305,39 +391,82 @@ fn snapshot_to_export_head(snapshot: &CowTreeSnapshot) -> Result<ExportHead> {
     .map_err(ServerError::catalog)
 }
 
-fn spawn_worker(worker: Arc<CompactionWorker>, mut receiver: mpsc::Receiver<CompactionJob>) {
+fn spawn_worker(
+    worker: Arc<CompactionWorker>,
+    mut receiver: mpsc::Receiver<CompactionJob>,
+    mut shutdown: oneshot::Receiver<()>,
+    accepting: Arc<AtomicBool>,
+) -> JoinHandle<CompactionWorkerExit> {
     tokio::spawn(async move {
-        while let Some(job) = receiver.recv().await {
-            let export_id = job.export_id().clone();
-            let through = job.through();
-            match worker.compact_export(job).await {
-                Ok(result) => {
-                    tracing::info!(
-                        target: target::STORAGE,
-                        event = event::COMPACTION_COMPLETED,
-                        service = observability::SERVICE_NAME,
-                        server_instance_id = observability::server_instance_id(),
-                        pid = observability::pid(),
-                        export_id = %result.export_id(),
-                        target_checkpoint = result.target_checkpoint().get(),
-                        compacted_records = result.compacted_records(),
-                        written_leaf_blobs = result.written_leaf_blobs(),
-                        outcome = ?result.outcome(),
-                    );
+        let mut dropped_pending_jobs = 0usize;
+        loop {
+            if !accepting.load(Ordering::Acquire) {
+                receiver.close();
+                dropped_pending_jobs += drain_pending_jobs(&mut receiver);
+                break;
+            }
+
+            tokio::select! {
+                biased;
+
+                _ = &mut shutdown => {
+                    accepting.store(false, Ordering::Release);
+                    receiver.close();
+                    dropped_pending_jobs += drain_pending_jobs(&mut receiver);
+                    break;
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        target: target::STORAGE,
-                        event = event::COMPACTION_FAILED,
-                        service = observability::SERVICE_NAME,
-                        server_instance_id = observability::server_instance_id(),
-                        pid = observability::pid(),
-                        export_id = %export_id,
-                        target_checkpoint = through.get(),
-                        error = %error,
-                    );
+                job = receiver.recv() => {
+                    let Some(job) = job else {
+                        break;
+                    };
+                    process_job(&worker, job).await;
                 }
             }
         }
-    });
+
+        CompactionWorkerExit {
+            dropped_pending_jobs,
+        }
+    })
+}
+
+async fn process_job(worker: &Arc<CompactionWorker>, job: CompactionJob) {
+    let export_id = job.export_id().clone();
+    let through = job.through();
+    match worker.compact_export(job).await {
+        Ok(result) => {
+            tracing::info!(
+                target: target::STORAGE,
+                event = event::COMPACTION_COMPLETED,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                export_id = %result.export_id(),
+                target_checkpoint = result.target_checkpoint().get(),
+                compacted_records = result.compacted_records(),
+                written_leaf_blobs = result.written_leaf_blobs(),
+                outcome = ?result.outcome(),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: target::STORAGE,
+                event = event::COMPACTION_FAILED,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                export_id = %export_id,
+                target_checkpoint = through.get(),
+                error = %error,
+            );
+        }
+    }
+}
+
+fn drain_pending_jobs(receiver: &mut mpsc::Receiver<CompactionJob>) -> usize {
+    let mut dropped = 0usize;
+    while receiver.try_recv().is_ok() {
+        dropped += 1;
+    }
+    dropped
 }

@@ -163,6 +163,12 @@ finishes after acknowledged writes are WAL-durable. The skipped compaction is
 logged, WAL records remain retained, and a later close, manual trigger, or
 future scheduler can retry.
 
+Manager shutdown is explicit. Shutdown stops new enqueues, signals the worker,
+lets the current compaction job finish, drops any jobs still pending in the
+bounded queue, and joins the worker before shutdown completion is reported.
+This keeps the active write/checkpoint operation coherent without pretending
+queued cleanup is required for durability.
+
 Cleanup safety is a narrow policy boundary. The planned policy is time-based
 retention plus periodic read-view refresh:
 
