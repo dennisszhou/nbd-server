@@ -1,6 +1,7 @@
 use crate::{
     extent_map::ExtentMap,
     observability::{self, event, target},
+    read_cache::{CacheInsertPlacement, ReadCache},
     tree_reader::{Block, BlockPart, TreeReader},
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
@@ -57,6 +58,7 @@ struct ExportReadViewState {
     root: RootSnapshot,
     last_applied_seq: WalSeq,
     overlay: OverlayExtentMap,
+    cache: ReadCache,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +80,8 @@ struct OverlayReadSlice {
     record: Arc<WalRecord>,
     record_offset: u64,
 }
+
+const DEFAULT_READ_CACHE_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalReplaySummary {
@@ -468,12 +472,21 @@ impl ExportReadView {
     }
 
     fn new(root: RootSnapshot, tree_reader: Arc<dyn TreeReader<RootSnapshot>>) -> Self {
+        Self::new_with_cache_budget(root, tree_reader, DEFAULT_READ_CACHE_BYTES)
+    }
+
+    fn new_with_cache_budget(
+        root: RootSnapshot,
+        tree_reader: Arc<dyn TreeReader<RootSnapshot>>,
+        cache_bytes: usize,
+    ) -> Self {
         let last_applied_seq = root.checkpoint_wal_seq();
         Self {
             state: RwLock::new(ExportReadViewState {
                 root,
                 last_applied_seq,
                 overlay: OverlayExtentMap::new(),
+                cache: ReadCache::new(cache_bytes),
             }),
             tree_reader,
         }
@@ -484,38 +497,71 @@ impl ExportReadView {
     }
 
     pub async fn read(&self, range: ByteRange) -> Result<Vec<u8>> {
-        let (root, overlay_slices) = {
+        let (root, overlay_slices, cache_slices, tree_misses) = {
             let state = self.state.read().await;
             validate_range("read", range, state.root.size_bytes())?;
             let overlay_slices = state.overlay.read_slices(range)?;
-            (state.root.clone(), overlay_slices)
+            let overlay_spans = overlay_slices
+                .iter()
+                .map(|slice| (slice.start, slice.end))
+                .collect::<Vec<_>>();
+            let mut cache_slices = Vec::new();
+            for cache_range in gaps_in_range(range, overlay_spans.clone())? {
+                cache_slices.extend(state.cache.read_slices(cache_range)?);
+            }
+            let mut covered_spans = overlay_spans;
+            covered_spans.extend(
+                cache_slices
+                    .iter()
+                    .map(|slice| (slice.start(), slice.end())),
+            );
+            let tree_misses = gaps_in_range(range, covered_spans)?;
+            (
+                state.root.clone(),
+                overlay_slices,
+                cache_slices,
+                tree_misses,
+            )
         };
 
-        let block = self.tree_reader.read_committed(&root, range).await?;
-        if block.range() != range {
-            return Err(ServerError::wal(
-                "read committed backing",
-                format!(
-                    "tree reader returned range {:?} for requested range {:?}",
-                    block.range(),
-                    range
-                ),
-            ));
-        }
-        let mut data = block.materialize()?;
-        if data.len() as u64 != range.len() {
-            return Err(ServerError::wal(
-                "read committed backing",
-                format!(
-                    "backing returned {} bytes for {} byte range",
-                    data.len(),
-                    range.len()
-                ),
-            ));
+        let mut data = vec![0; range.len() as usize];
+        for cache_slice in &cache_slices {
+            cache_slice.copy_to(range, &mut data)?;
         }
 
-        for overlay in overlay_slices {
-            overlay_record(&mut data, range, &overlay)?;
+        let mut tree_fills = Vec::new();
+        for miss in tree_misses {
+            let block = self.tree_reader.read_committed(&root, miss).await?;
+            if block.range() != miss {
+                return Err(ServerError::wal(
+                    "read committed backing",
+                    format!(
+                        "tree reader returned range {:?} for requested range {:?}",
+                        block.range(),
+                        miss
+                    ),
+                ));
+            }
+            copy_tree_block(&mut data, range, &block)?;
+            tree_fills.push(block);
+        }
+
+        for overlay in &overlay_slices {
+            overlay_record(&mut data, range, overlay)?;
+        }
+
+        if !cache_slices.is_empty() || !tree_fills.is_empty() {
+            let cache_hits = cache_slices
+                .iter()
+                .map(|slice| slice.object_id())
+                .collect::<Vec<_>>();
+            let mut state = self.state.write().await;
+            state.cache.promote_hits(cache_hits);
+            if state.root == root {
+                for block in tree_fills {
+                    insert_tree_block_fills(&mut state, &block)?;
+                }
+            }
         }
         Ok(data)
     }
@@ -545,8 +591,10 @@ impl ExportReadView {
                 format!("expected WAL sequence {expected_seq}, got {}", record.seq()),
             ));
         }
+        let record_range = record.range();
         let record = Arc::new(record);
         state.overlay.insert_record(record)?;
+        state.cache.trim_range(record_range)?;
         state.last_applied_seq = expected_seq;
         Ok(())
     }
@@ -672,6 +720,76 @@ fn range_end(range: ByteRange) -> u64 {
     range.start().saturating_add(range.len())
 }
 
+fn copy_tree_block(data: &mut [u8], read_range: ByteRange, block: &Block) -> Result<()> {
+    let block_range = block.range();
+    if range_end(block_range) > range_end(read_range) || block_range.start() < read_range.start() {
+        return Err(ServerError::wal(
+            "read committed backing",
+            format!(
+                "tree reader returned range {:?} outside requested range {:?}",
+                block_range, read_range
+            ),
+        ));
+    }
+    let materialized = block.materialize()?;
+    if materialized.len() as u64 != block_range.len() {
+        return Err(ServerError::wal(
+            "read committed backing",
+            format!(
+                "backing returned {} bytes for {} byte range",
+                materialized.len(),
+                block_range.len()
+            ),
+        ));
+    }
+    let dst_start = usize::try_from(block_range.start() - read_range.start()).map_err(|_| {
+        ServerError::wal(
+            "read committed backing",
+            "read range offset does not fit usize",
+        )
+    })?;
+    data[dst_start..dst_start + materialized.len()].copy_from_slice(&materialized);
+    Ok(())
+}
+
+fn insert_tree_block_fills(state: &mut ExportReadViewState, block: &Block) -> Result<()> {
+    for part in block.parts() {
+        let BlockPart::Data { range, bytes } = part else {
+            continue;
+        };
+        let mut covered_spans = state
+            .overlay
+            .read_slices(*range)?
+            .into_iter()
+            .map(|slice| (slice.start, slice.end))
+            .collect::<Vec<_>>();
+        covered_spans.extend(
+            state
+                .cache
+                .read_slices(*range)?
+                .into_iter()
+                .map(|slice| (slice.start(), slice.end())),
+        );
+
+        for hole in gaps_in_range(*range, covered_spans)? {
+            let bytes_start = usize::try_from(hole.start() - range.start()).map_err(|_| {
+                ServerError::wal("insert tree cache fill", "slice start does not fit usize")
+            })?;
+            let bytes_end = bytes_start
+                .checked_add(usize::try_from(hole.len()).map_err(|_| {
+                    ServerError::wal("insert tree cache fill", "slice length does not fit usize")
+                })?)
+                .ok_or_else(|| ServerError::wal("insert tree cache fill", "slice overflowed"))?;
+            state.cache.insert_bytes(
+                hole,
+                bytes.slice(bytes_start..bytes_end),
+                CacheInsertPlacement::Hot,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn overlay_record(
     data: &mut [u8],
     read_range: ByteRange,
@@ -701,12 +819,49 @@ fn overlay_record(
     Ok(())
 }
 
+fn gaps_in_range(range: ByteRange, mut spans: Vec<(u64, u64)>) -> Result<Vec<ByteRange>> {
+    let start = range.start();
+    let end = range_end(range);
+    spans.sort_by_key(|(span_start, _)| *span_start);
+
+    let mut gaps = Vec::new();
+    let mut cursor = start;
+    for (span_start, span_end) in spans {
+        let span_start = span_start.max(start);
+        let span_end = span_end.min(end);
+        if span_end <= cursor {
+            continue;
+        }
+        if span_start > cursor {
+            gaps.push(byte_range_from_bounds(cursor, span_start)?);
+        }
+        cursor = cursor.max(span_end);
+        if cursor == end {
+            break;
+        }
+    }
+    if cursor < end {
+        gaps.push(byte_range_from_bounds(cursor, end)?);
+    }
+    Ok(gaps)
+}
+
+fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> {
+    let len = end
+        .checked_sub(start)
+        .ok_or_else(|| ServerError::wal("build byte range", "range end before start"))?;
+    let len = u32::try_from(len)
+        .map_err(|_| ServerError::wal("build byte range", "range length does not fit u32"))?;
+    Ok(ByteRange::new(start, len))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nbd_control_plane::{ChunkIndex, CowChunkRef, ExportId};
     use nbd_test_support::TestRuntime;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn read_view_overlay_keeps_only_latest_repeated_write() {
@@ -776,6 +931,83 @@ mod tests {
             .expect_err("reject skipped WAL sequence");
 
         assert!(matches!(error, ServerError::Wal { .. }));
+    }
+
+    #[tokio::test]
+    async fn read_view_cache_serves_warm_tree_reads() {
+        let reader = Arc::new(CountingTreeReader::new(Bytes::from_static(
+            b"0123456789abcdef",
+        )));
+        let read_view =
+            ExportReadView::new_with_cache_budget(zero_root(4096), reader.clone(), 1024);
+
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 4))
+                .await
+                .expect("cold read"),
+            b"0123",
+        );
+        assert_eq!(reader.reads(), 1);
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 4))
+                .await
+                .expect("warm read"),
+            b"0123",
+        );
+        assert_eq!(reader.reads(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_view_write_trims_stale_cache_range() {
+        let reader = Arc::new(CountingTreeReader::new(Bytes::from_static(
+            b"0123456789abcdef",
+        )));
+        let read_view =
+            ExportReadView::new_with_cache_budget(zero_root(4096), reader.clone(), 1024);
+        read_view
+            .read(ByteRange::new(0, 4))
+            .await
+            .expect("seed cache");
+
+        read_view
+            .apply_wal_record(wal_record(1, 1, b"ZZ"))
+            .await
+            .expect("apply write");
+
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 4))
+                .await
+                .expect("read after write"),
+            b"0ZZ3",
+        );
+        assert_eq!(reader.reads(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_view_cache_eviction_is_byte_budgeted() {
+        let reader = Arc::new(CountingTreeReader::new(Bytes::from_static(
+            b"0123456789abcdef",
+        )));
+        let read_view = ExportReadView::new_with_cache_budget(zero_root(4096), reader.clone(), 4);
+
+        read_view
+            .read(ByteRange::new(0, 4))
+            .await
+            .expect("read first cache object");
+        read_view
+            .read(ByteRange::new(8, 4))
+            .await
+            .expect("read second cache object");
+        assert_eq!(reader.reads(), 2);
+
+        read_view
+            .read(ByteRange::new(0, 4))
+            .await
+            .expect("read evicted object again");
+        assert_eq!(reader.reads(), 3);
     }
 
     #[tokio::test]
@@ -913,5 +1145,40 @@ mod tests {
             data.to_vec(),
         )
         .expect("WAL record")
+    }
+
+    #[derive(Debug)]
+    struct CountingTreeReader {
+        data: Bytes,
+        reads: AtomicUsize,
+    }
+
+    impl CountingTreeReader {
+        fn new(data: Bytes) -> Self {
+            Self {
+                data,
+                reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TreeReader<RootSnapshot> for CountingTreeReader {
+        async fn read_committed(&self, _root: &RootSnapshot, range: ByteRange) -> Result<Block> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let start = usize::try_from(range.start()).expect("range start fits usize");
+            let end = start + range.len() as usize;
+            Block::new(
+                range,
+                vec![BlockPart::Data {
+                    range,
+                    bytes: self.data.slice(start..end),
+                }],
+            )
+        }
     }
 }
