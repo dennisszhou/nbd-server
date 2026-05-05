@@ -40,6 +40,10 @@ pub enum ServerError {
     Catalog {
         message: String,
     },
+    Wal {
+        context: &'static str,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +66,13 @@ impl ServerError {
         }
     }
 
+    pub(crate) fn wal(context: &'static str, message: impl Into<String>) -> Self {
+        Self::Wal {
+            context,
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn request_failure_log_level(&self) -> RequestFailureLogLevel {
         match self {
             Self::OutOfBounds { .. } | Self::Protocol { .. } => RequestFailureLogLevel::Debug,
@@ -71,7 +82,8 @@ impl ServerError {
             | Self::LockPoisoned { .. }
             | Self::RuntimeClosed { .. }
             | Self::Io { .. }
-            | Self::Catalog { .. } => RequestFailureLogLevel::Warn,
+            | Self::Catalog { .. }
+            | Self::Wal { .. } => RequestFailureLogLevel::Warn,
         }
     }
 }
@@ -111,6 +123,7 @@ impl fmt::Display for ServerError {
             Self::Io { context, message } => write!(f, "{context}: {message}"),
             Self::Protocol { source } => write!(f, "{source}"),
             Self::Catalog { message } => write!(f, "{message}"),
+            Self::Wal { context, message } => write!(f, "{context}: {message}"),
         }
     }
 }

@@ -15,6 +15,7 @@ pub mod registry;
 pub mod runtime;
 pub mod server;
 pub mod simple_durable;
+pub mod wal;
 
 pub use admission::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
@@ -35,4 +36,8 @@ pub use runtime::{
 pub use server::NbdServer;
 pub use simple_durable::{
     LocalBlobStore, SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree,
+};
+pub use wal::{
+    ExportWal, ExportWalHandle, OpenWal, WalBounds, WalDomain, WalProvider, WalPruneResult,
+    WalRecord, WalReplay, WalRequest,
 };
