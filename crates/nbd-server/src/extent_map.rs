@@ -97,6 +97,13 @@ impl<V> ExtentMap<V> {
             .map(|(&start, extent)| extent_ref(start, extent))
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn get(&self, start: u64) -> Option<ExtentRef<'_, V>> {
+        self.extents
+            .get(&start)
+            .map(|extent| extent_ref(start, extent))
+    }
+
     pub(crate) fn overlapping(&self, start: u64, end: u64) -> Result<Vec<ExtentRef<'_, V>>> {
         if start == end {
             return Ok(Vec::new());

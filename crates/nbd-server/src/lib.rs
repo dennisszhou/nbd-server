@@ -13,6 +13,7 @@ mod extent_map;
 #[allow(unsafe_code)]
 pub mod memory;
 pub mod observability;
+mod read_cache;
 pub mod registry;
 pub mod runtime;
 pub mod server;
