@@ -8,6 +8,7 @@ mod connection;
 
 pub mod error;
 pub mod export;
+mod extent_map;
 // The memory module owns the admitted unsafe byte-storage boundary.
 #[allow(unsafe_code)]
 pub mod memory;
