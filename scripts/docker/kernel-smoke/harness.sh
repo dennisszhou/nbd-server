@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 EXPORT_NAME="${KERNEL_SMOKE_EXPORT:-smoke}"
+CLONE_EXPORT_NAME="${KERNEL_SMOKE_CLONE_EXPORT:-${EXPORT_NAME}-clone}"
 SIZE_BYTES="${KERNEL_SMOKE_SIZE_BYTES:-67108864}"
 PORT="${KERNEL_SMOKE_PORT:-10809}"
 DEVICE="${KERNEL_SMOKE_DEVICE:-/dev/nbd0}"
@@ -15,6 +16,7 @@ CATALOG="${SMOKE_HOME}/.nbd/catalog.db"
 LOG_FILE="/tmp/nbd/current.log"
 PROBE_EXPECTED="${ROOT}/probe.expected"
 SECOND_PROBE_EXPECTED="${ROOT}/probe-second.expected"
+CLONE_PROBE_EXPECTED="${ROOT}/probe-clone.expected"
 SERVER_STDOUT="${ROOT}/server.stdout.log"
 SERVER_STDERR="${ROOT}/server.stderr.log"
 MOUNT_DIR="/mnt/nbd-smoke"
@@ -96,8 +98,10 @@ stop_server() {
 }
 
 connect_device() {
+    local export_name="${1:-${EXPORT_NAME}}"
+
     "${NBD_CLIENT}" 127.0.0.1 "${PORT}" "${DEVICE}" \
-        -name "${EXPORT_NAME}" \
+        -name "${export_name}" \
         -block-size 4096
     DEVICE_CONNECTED=1
 }
@@ -126,13 +130,16 @@ drop_page_cache() {
 }
 
 inspect_export() {
-    HOME="${SMOKE_HOME}" "${NBDCLI}" inspect "${EXPORT_NAME}"
+    local export_name="${1:-${EXPORT_NAME}}"
+
+    HOME="${SMOKE_HOME}" "${NBDCLI}" inspect "${export_name}"
 }
 
 write_inspect_artifact() {
     local label="$1"
+    local export_name="${2:-${EXPORT_NAME}}"
     local path="${ROOT}/inspect-${label}.txt"
-    inspect_export >"${path}"
+    inspect_export "${export_name}" >"${path}"
     echo "${path}"
 }
 
@@ -145,10 +152,11 @@ inspect_field() {
 wait_for_wal_compaction() {
     local target_wal_seq="$1"
     local label="$2"
+    local export_name="${3:-${EXPORT_NAME}}"
     local path wal_seq root
 
     for _ in $(seq 1 500); do
-        path="$(write_inspect_artifact "${label}")"
+        path="$(write_inspect_artifact "${label}" "${export_name}")"
         wal_seq="$(inspect_field "${path}" "checkpoint_wal_seq")"
         root="$(inspect_field "${path}" "root_node_id")"
         if [[ "${wal_seq}" =~ ^[0-9]+$ ]] &&
@@ -161,16 +169,17 @@ wait_for_wal_compaction() {
         sleep 0.02
     done
 
-    echo "timed out waiting for ${EXPORT_NAME} compaction WAL sequence" \
+    echo "timed out waiting for ${export_name} compaction WAL sequence" \
         "${target_wal_seq}" >&2
     return 1
 }
 
 wait_for_wal_reattach_base() {
     local expected_base="$1"
+    local export_name="${2:-${EXPORT_NAME}}"
 
     for _ in $(seq 1 100); do
-        if node - "${LOG_FILE}" "${EXPORT_NAME}" "${expected_base}" <<'NODE'
+        if node - "${LOG_FILE}" "${export_name}" "${expected_base}" <<'NODE'
 const fs = require("fs");
 
 const [, , logFile, exportName, expectedRaw] = process.argv;
@@ -227,7 +236,7 @@ NODE
         sleep 0.02
     done
 
-    echo "timed out waiting for ${EXPORT_NAME} WAL reattach base" \
+    echo "timed out waiting for ${export_name} WAL reattach base" \
         "${expected_base}" >&2
     return 1
 }
@@ -259,6 +268,15 @@ verify_probe() {
 
     drop_page_cache
     cmp "${expected_path}" "${MOUNT_DIR}/${target_name}"
+}
+
+verify_absent() {
+    local target_name="$1"
+
+    if [ -e "${MOUNT_DIR}/${target_name}" ]; then
+        echo "${target_name} unexpectedly exists on mounted export" >&2
+        return 1
+    fi
 }
 
 settle_compaction() {
@@ -338,10 +356,35 @@ prepare_kernel_smoke() {
 
 create_export() {
     local engine="$1"
+    local export_name="${2:-${EXPORT_NAME}}"
 
-    HOME="${SMOKE_HOME}" "${NBDCLI}" create "${EXPORT_NAME}" \
+    HOME="${SMOKE_HOME}" "${NBDCLI}" create "${export_name}" \
         --size "${SIZE_BYTES}" \
         --block-size 4096 \
         --engine "${engine}"
     test -f "${CONFIG}"
+}
+
+clone_export() {
+    local source_name="${1:-${EXPORT_NAME}}"
+    local destination_name="${2:-${CLONE_EXPORT_NAME}}"
+
+    HOME="${SMOKE_HOME}" "${NBDCLI}" clone \
+        "${source_name}" \
+        "${destination_name}"
+}
+
+assert_export_field() {
+    local export_name="$1"
+    local field="$2"
+    local expected="$3"
+    local label="$4"
+    local path actual
+
+    path="$(write_inspect_artifact "${label}" "${export_name}")"
+    actual="$(inspect_field "${path}" "${field}")"
+    if [ "${actual}" != "${expected}" ]; then
+        echo "${export_name} ${field} expected ${expected}, got ${actual}" >&2
+        return 1
+    fi
 }
