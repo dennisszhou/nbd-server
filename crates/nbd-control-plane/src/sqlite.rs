@@ -605,13 +605,21 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
             .map_err(map_sqlx_error)?;
         }
 
-        sqlx::query(
+        let expected_root = request.expected_base().root_node_id().map(NodeId::as_str);
+        let update = sqlx::query(
             r#"
             UPDATE export_heads
             SET root_node_id = ?,
                 checkpoint_wal_seq = ?,
                 updated_at = ?
             WHERE export_id = ?
+              AND layout_kind = ?
+              AND (
+                (root_node_id IS NULL AND ? IS NULL)
+                OR root_node_id = ?
+              )
+              AND size_bytes = ?
+              AND checkpoint_wal_seq = ?
             "#,
         )
         .bind(root.as_str())
@@ -621,9 +629,26 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
         )?)
         .bind(now.as_str())
         .bind(request.export_id().as_str())
+        .bind(request.expected_base().layout_kind().to_string())
+        .bind(expected_root)
+        .bind(expected_root)
+        .bind(u64_to_i64(
+            "size_bytes",
+            request.expected_base().size_bytes(),
+        )?)
+        .bind(u64_to_i64(
+            "checkpoint_wal_seq",
+            request.expected_base().checkpoint_wal_seq().get(),
+        )?)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
+
+        if update.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            let current = fetch_export_meta_by_id(&self.pool, request.export_id()).await?;
+            return Ok(PublishCompactionOutcome::StalePlan(current));
+        }
 
         sqlx::query(
             r#"
@@ -1120,6 +1145,37 @@ async fn fetch_export_meta_by_id_in_tx(
     )
     .bind(export_id.as_str())
     .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| CatalogError::database(format!("export `{export_id}` not found")))?;
+
+    row_to_export_meta(&row)
+}
+
+async fn fetch_export_meta_by_id(pool: &SqlitePool, export_id: &ExportId) -> Result<ExportMeta> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+          e.id,
+          e.name,
+          e.block_size,
+          e.engine_kind,
+          e.state,
+          e.created_at,
+          e.updated_at,
+          e.deleted_at,
+          h.layout_kind,
+          h.root_node_id,
+          h.size_bytes,
+          h.checkpoint_wal_seq
+        FROM exports e
+        JOIN export_heads h
+          ON h.export_id = e.id
+        WHERE e.id = ?
+        "#,
+    )
+    .bind(export_id.as_str())
+    .fetch_optional(pool)
     .await
     .map_err(map_sqlx_error)?
     .ok_or_else(|| CatalogError::database(format!("export `{export_id}` not found")))?;

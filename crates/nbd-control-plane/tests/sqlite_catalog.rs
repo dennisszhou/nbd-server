@@ -669,6 +669,81 @@ async fn cow_tree_publish_rejects_stale_base() {
 }
 
 #[tokio::test]
+async fn cow_tree_concurrent_publish_allows_only_one_winner() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+    let base = created.head().clone();
+    let left = catalog.clone();
+    let right = catalog.clone();
+    let left_request = PublishCompaction::new(
+        created.id().clone(),
+        base.clone(),
+        WalSeq::new(4),
+        vec![cow_chunk(0, "blob-left")],
+    )
+    .expect("left publish request");
+    let right_request = PublishCompaction::new(
+        created.id().clone(),
+        base,
+        WalSeq::new(6),
+        vec![cow_chunk(1, "blob-right")],
+    )
+    .expect("right publish request");
+
+    let (left_result, right_result) = tokio::join!(
+        left.publish_compaction(left_request),
+        right.publish_compaction(right_request),
+    );
+    let outcomes = [left_result, right_result];
+    // The losing publisher may observe a stale/covered head or a backend
+    // contention error. The catalog contract is one winner and a consistent
+    // final serving head, not a SQLite-specific loser error.
+    let published = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            Ok(PublishCompactionOutcome::Published(meta)) => Some(meta),
+            Ok(
+                PublishCompactionOutcome::AlreadyCovered(_)
+                | PublishCompactionOutcome::StalePlan(_),
+            )
+            | Err(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let non_published = outcomes
+        .iter()
+        .filter(|outcome| !matches!(outcome, Ok(PublishCompactionOutcome::Published(_))))
+        .count();
+
+    assert_eq!(
+        published.len(),
+        1,
+        "exactly one concurrent compaction publish should win: {outcomes:?}",
+    );
+    assert_eq!(
+        non_published, 1,
+        "the competing publish must fail or observe a covered/stale head: {outcomes:?}",
+    );
+
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load cow tree");
+    assert_eq!(snapshot.root_node_id(), published[0].head().root_node_id());
+    assert_eq!(
+        snapshot.checkpoint_wal_seq(),
+        published[0].head().checkpoint_wal_seq(),
+    );
+}
+
+#[tokio::test]
 async fn cow_tree_publish_rejects_deleted_and_wrong_layout_exports() {
     let (_runtime, catalog) = migrated_catalog().await;
     let memory = catalog
