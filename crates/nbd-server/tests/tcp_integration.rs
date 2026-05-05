@@ -811,6 +811,33 @@ async fn simple_durable_protocol_reads_writes_and_flushes() {
 }
 
 #[tokio::test]
+async fn wal_durable_protocol_reads_writes_and_flushes() {
+    let fixture = ServerFixture::new(EngineProfile::WAL_DURABLE)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-wal", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = NbdClient::connect(server.addr(), "disk-wal")
+        .await
+        .expect("connect client");
+
+    assert_eq!(client.read(0, 8).await.expect("zero read"), vec![0; 8]);
+    client.write(2, b"abcd").await.expect("write");
+    client.flush().await.expect("flush");
+    assert_eq!(
+        client.read(0, 8).await.expect("read WAL overlay"),
+        b"\0\0abcd\0\0".to_vec(),
+    );
+
+    client.disconnect().await.expect("disconnect");
+    server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
 async fn simple_durable_protocol_persists_across_restart() {
     let fixture = ServerFixture::new(EngineProfile::SIMPLE_DURABLE)
         .await
@@ -851,6 +878,54 @@ async fn simple_durable_protocol_persists_across_restart() {
     );
     assert_eq!(
         client.read(1024, 4).await.expect("read sparse middle"),
+        vec![0; 4],
+    );
+
+    client
+        .disconnect()
+        .await
+        .expect("disconnect restarted client");
+    restarted
+        .shutdown()
+        .await
+        .expect("shutdown restarted server");
+}
+
+#[tokio::test]
+async fn wal_durable_protocol_recovers_wal_across_restart() {
+    let fixture = ServerFixture::new(EngineProfile::WAL_DURABLE)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-wal", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = NbdClient::connect(server.addr(), "disk-wal")
+        .await
+        .expect("connect first client");
+    client.write(0, b"persist").await.expect("write head");
+    client.write(1024, b"tail").await.expect("write tail");
+    client.flush().await.expect("flush writes");
+    client.disconnect().await.expect("disconnect first client");
+    server.shutdown().await.expect("shutdown first server");
+
+    let restarted = fixture.start_server().await.expect("restart server");
+    let mut client = NbdClient::connect(restarted.addr(), "disk-wal")
+        .await
+        .expect("connect restarted client");
+
+    assert_eq!(
+        client.read(0, 7).await.expect("read replayed head"),
+        b"persist".to_vec(),
+    );
+    assert_eq!(
+        client.read(1020, 12).await.expect("read replayed tail"),
+        b"\0\0\0\0tail\0\0\0\0".to_vec(),
+    );
+    assert_eq!(
+        client.read(2048, 4).await.expect("read sparse middle"),
         vec![0; 4],
     );
 
