@@ -1,10 +1,13 @@
 use crate::{
     observability::{self, event, target},
-    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, LocalBlobStore,
-    MemoryExportEngine, Result, SerialExportRuntime, ServerError, SimpleDurableEngine,
+    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, ExportWalHandle,
+    LocalBlobStore, MemoryExportEngine, OpenWal, Result, SerialExportRuntime, ServerError,
+    SimpleDurableEngine, WalDomain, WalDurableEngine, WalProvider,
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
-use nbd_control_plane::{ExportCatalog, ExportEngineKind, ExportName, SimpleTreeMetadataStore};
+use nbd_control_plane::{
+    ExportCatalog, ExportEngineKind, ExportMeta, ExportName, SimpleTreeMetadataStore,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,10 +44,16 @@ impl ExportOwnerId {
 
 pub struct LocalExportRegistry {
     catalog: Arc<dyn ExportCatalog>,
-    simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+    factory: Arc<ExportFactory>,
+    active: Mutex<HashMap<ExportName, ActiveExportState>>,
+}
+
+/// Concrete factory for active export runtimes and their backing engines.
+pub struct ExportFactory {
     config: ServerConfig,
     blob_dir: PathBuf,
-    active: Mutex<HashMap<ExportName, ActiveExportState>>,
+    simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+    wal_provider: Arc<dyn WalProvider>,
 }
 
 enum ActiveExportState {
@@ -60,23 +69,19 @@ struct ActiveExport {
 }
 
 impl LocalExportRegistry {
-    pub fn new<T>(catalog: Arc<T>, config: ServerConfig, blob_dir: impl Into<PathBuf>) -> Self
+    pub fn new<T>(catalog: Arc<T>, factory: Arc<ExportFactory>) -> Self
     where
-        T: ExportCatalog + SimpleTreeMetadataStore + 'static,
+        T: ExportCatalog + 'static,
     {
-        let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
-        let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog;
         Self {
-            catalog: export_catalog,
-            simple_tree_store,
-            config,
-            blob_dir: blob_dir.into(),
+            catalog,
+            factory,
             active: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn blob_dir(&self) -> &Path {
-        &self.blob_dir
+        self.factory.blob_dir()
     }
 
     pub async fn open(&self, name: ExportName, owner: ExportOwner) -> Result<ExportRuntimeHandle> {
@@ -116,8 +121,8 @@ impl LocalExportRegistry {
                     export_name = %meta.name(),
                     owner_id = owner.id().raw(),
                     engine_kind = %meta.engine_kind(),
-                    runtime_kind = runtime_kind_name(self.config.export_runtime),
-                    queue_depth = self.config.export_queue_depth.get(),
+                    runtime_kind = runtime_kind_name(self.factory.export_runtime_kind()),
+                    queue_depth = self.factory.export_queue_depth(),
                     connections = 1usize,
                 );
                 Ok(runtime)
@@ -216,49 +221,7 @@ impl LocalExportRegistry {
             size_bytes = meta.size_bytes(),
             phase = "complete",
         );
-        let engine: ExportEngineHandle = match meta.engine_kind() {
-            ExportEngineKind::Memory => Arc::new(MemoryExportEngine::new(&meta)?),
-            ExportEngineKind::SimpleDurable => Arc::new(
-                SimpleDurableEngine::load(
-                    &meta,
-                    LocalBlobStore::new(self.blob_dir.clone()),
-                    self.simple_tree_store.clone(),
-                )
-                .await?,
-            ),
-            ExportEngineKind::WalDurable => {
-                return Err(ServerError::Catalog {
-                    message: format!(
-                        "export `{}` uses wal_durable before the WAL engine is wired",
-                        meta.name()
-                    ),
-                });
-            }
-        };
-        tracing::info!(
-            target: target::EXPORT,
-            event = event::EXPORT_ENGINE_LOADED,
-            service = observability::SERVICE_NAME,
-            server_instance_id = observability::server_instance_id(),
-            pid = observability::pid(),
-            export_id = %meta.id(),
-            export_name = %meta.name(),
-            engine_kind = %meta.engine_kind(),
-            size_bytes = meta.size_bytes(),
-        );
-        let runtime: ExportRuntimeHandle = match self.config.export_runtime {
-            ExportRuntimeKind::Serial => Arc::new(SerialExportRuntime::with_capacity(
-                meta,
-                engine,
-                self.config.export_queue_depth.get(),
-            )),
-            ExportRuntimeKind::Concurrent => Arc::new(ConcurrentExportRuntime::with_capacity(
-                meta,
-                engine,
-                self.config.export_queue_depth.get(),
-            )),
-        };
-        Ok(runtime)
+        self.factory.open_export(meta).await
     }
 
     fn remove_opening(&self, name: &ExportName, owner: ExportOwner) -> Result<()> {
@@ -278,6 +241,87 @@ impl LocalExportRegistry {
         self.active.lock().map_err(|_| ServerError::LockPoisoned {
             resource: "local export registry",
         })
+    }
+}
+
+impl ExportFactory {
+    pub fn new(
+        config: ServerConfig,
+        blob_dir: impl Into<PathBuf>,
+        simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+        wal_provider: Arc<dyn WalProvider>,
+    ) -> Self {
+        Self {
+            config,
+            blob_dir: blob_dir.into(),
+            simple_tree_store,
+            wal_provider,
+        }
+    }
+
+    pub fn blob_dir(&self) -> &Path {
+        &self.blob_dir
+    }
+
+    fn export_runtime_kind(&self) -> ExportRuntimeKind {
+        self.config.export_runtime
+    }
+
+    fn export_queue_depth(&self) -> usize {
+        self.config.export_queue_depth.get()
+    }
+
+    pub async fn open_export(&self, meta: ExportMeta) -> Result<ExportRuntimeHandle> {
+        let engine = self.open_engine(&meta).await?;
+        tracing::info!(
+            target: target::EXPORT,
+            event = event::EXPORT_ENGINE_LOADED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            export_id = %meta.id(),
+            export_name = %meta.name(),
+            engine_kind = %meta.engine_kind(),
+            size_bytes = meta.size_bytes(),
+        );
+
+        let runtime: ExportRuntimeHandle = match self.config.export_runtime {
+            ExportRuntimeKind::Serial => Arc::new(SerialExportRuntime::with_capacity(
+                meta,
+                engine,
+                self.config.export_queue_depth.get(),
+            )),
+            ExportRuntimeKind::Concurrent => Arc::new(ConcurrentExportRuntime::with_capacity(
+                meta,
+                engine,
+                self.config.export_queue_depth.get(),
+            )),
+        };
+        Ok(runtime)
+    }
+
+    async fn open_engine(&self, meta: &ExportMeta) -> Result<ExportEngineHandle> {
+        let engine: ExportEngineHandle = match meta.engine_kind() {
+            ExportEngineKind::Memory => Arc::new(MemoryExportEngine::new(meta)?),
+            ExportEngineKind::SimpleDurable => Arc::new(
+                SimpleDurableEngine::load(
+                    meta,
+                    LocalBlobStore::new(self.blob_dir.clone()),
+                    self.simple_tree_store.clone(),
+                )
+                .await?,
+            ),
+            ExportEngineKind::WalDurable => {
+                let wal = self.open_wal(meta).await?;
+                Arc::new(WalDurableEngine::open(meta, wal).await?)
+            }
+        };
+        Ok(engine)
+    }
+
+    async fn open_wal(&self, meta: &ExportMeta) -> Result<ExportWalHandle> {
+        let domain = WalDomain::for_export_id(meta.id().clone());
+        self.wal_provider.open_export(OpenWal::new(domain)).await
     }
 }
 

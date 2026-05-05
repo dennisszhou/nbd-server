@@ -1,7 +1,7 @@
 use crate::{
     connection,
     observability::{self, event, target},
-    ConnectionId, LocalExportRegistry, Result, ServerError,
+    ConnectionId, ExportFactory, LocalExportRegistry, LocalWalProvider, Result, ServerError,
 };
 use nbd_config::NbdConfig;
 use nbd_control_plane::{CatalogProvider, CatalogUrl, SQLiteExportCatalog};
@@ -44,11 +44,14 @@ impl NbdServer {
             pid = observability::pid(),
             catalog_provider = catalog_provider_name(catalog_url.provider()),
         );
-        let registry = Arc::new(LocalExportRegistry::new(
-            Arc::new(catalog),
+        let catalog = Arc::new(catalog);
+        let factory = Arc::new(ExportFactory::new(
             config.server.clone(),
             config.runtime.blob_dir.clone(),
+            catalog.clone(),
+            Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone())),
         ));
+        let registry = Arc::new(LocalExportRegistry::new(catalog, factory));
         let reply_capacity = config.server.connection.reply_queue_capacity.get();
         let listener = TcpListener::bind(listen)
             .await

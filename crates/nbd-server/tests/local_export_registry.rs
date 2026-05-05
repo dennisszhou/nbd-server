@@ -1,9 +1,11 @@
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
+    SimpleTreeMetadataStore,
 };
 use nbd_server::{
-    ExportOwner, ExportReply, LocalExportRegistry, ServerError, MAX_MEMORY_EXPORT_BYTES,
+    ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider, ServerError,
+    MAX_MEMORY_EXPORT_BYTES,
 };
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
@@ -18,9 +20,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
     ),
-    include_str!(
-        "../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"
-    ),
+    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
 ];
 
 #[tokio::test]
@@ -31,11 +31,7 @@ async fn registry_rejects_second_unique_owner_until_close() {
         .create_export(create_export("disk-a", 4096, 4096))
         .await
         .expect("create export");
-    let registry = LocalExportRegistry::new(
-        Arc::new(catalog),
-        ServerConfig::default(),
-        blob_dir(&runtime),
-    );
+    let registry = local_registry(catalog, &runtime, ServerConfig::default());
     runtime.assert_path_inside(registry.blob_dir());
     let owner_a = ExportOwner::unique_connection();
     let owner_b = ExportOwner::unique_connection();
@@ -79,11 +75,7 @@ async fn failed_open_removes_opening_reservation() {
         .create_export(create_export("huge", MAX_MEMORY_EXPORT_BYTES + 1, 4096))
         .await
         .expect("create export");
-    let registry = LocalExportRegistry::new(
-        Arc::new(catalog),
-        ServerConfig::default(),
-        blob_dir(&runtime),
-    );
+    let registry = local_registry(catalog, &runtime, ServerConfig::default());
 
     for _ in 0..2 {
         assert!(matches!(
@@ -113,7 +105,7 @@ async fn registry_applies_configured_export_queue_depth() {
         export_queue_depth: NonZeroUsize::new(1).expect("nonzero queue depth"),
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
+    let registry = local_registry(catalog, &runtime, config);
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -152,7 +144,7 @@ async fn registry_can_open_concurrent_runtime_from_config() {
         export_runtime: ExportRuntimeKind::Concurrent,
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
+    let registry = local_registry(catalog, &runtime, config);
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -192,7 +184,7 @@ async fn registry_can_open_serial_runtime_from_config() {
         export_runtime: ExportRuntimeKind::Serial,
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
+    let registry = local_registry(catalog, &runtime, config);
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -227,7 +219,7 @@ async fn registry_shares_active_runtime_for_same_owner() {
         export_runtime: ExportRuntimeKind::Concurrent,
         ..ServerConfig::default()
     };
-    let registry = LocalExportRegistry::new(Arc::new(catalog), config, blob_dir(&runtime));
+    let registry = local_registry(catalog, &runtime, config);
     let owner = ExportOwner::unique_connection();
 
     let first_runtime = registry
@@ -273,11 +265,7 @@ async fn registry_opens_simple_durable_runtime_from_catalog() {
         ))
         .await
         .expect("create export");
-    let registry = LocalExportRegistry::new(
-        Arc::new(catalog),
-        ServerConfig::default(),
-        blob_dir(&runtime),
-    );
+    let registry = local_registry(catalog, &runtime, ServerConfig::default());
     let owner = ExportOwner::unique_connection();
 
     let export_runtime = registry
@@ -321,6 +309,53 @@ async fn registry_opens_simple_durable_runtime_from_catalog() {
         .expect("close simple durable runtime");
 }
 
+#[tokio::test]
+async fn registry_opens_wal_durable_runtime_from_catalog() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            4096,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+    let registry = local_registry(catalog, &runtime, ServerConfig::default());
+    let owner = ExportOwner::unique_connection();
+
+    let export_runtime = registry
+        .open(export_name("disk-wal"), owner)
+        .await
+        .expect("open wal durable runtime");
+    execute_request(
+        &export_runtime,
+        nbd_server::ExportRequest::Write {
+            offset: 4,
+            data: b"wal".to_vec(),
+        },
+    )
+    .await
+    .expect("write");
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            nbd_server::ExportRequest::Read { offset: 0, len: 8 },
+        )
+        .await
+        .expect("read"),
+        ExportReply::Read {
+            data: b"\0\0\0\0wal\0".to_vec(),
+        },
+    );
+
+    registry
+        .close(&export_name("disk-wal"), &owner)
+        .await
+        .expect("close wal durable runtime");
+}
+
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -343,6 +378,34 @@ fn export_name(name: &str) -> ExportName {
 
 fn blob_dir(runtime: &TestRuntime) -> PathBuf {
     runtime.state_dir().join("blobs")
+}
+
+fn local_registry(
+    catalog: SQLiteExportCatalog,
+    runtime: &TestRuntime,
+    config: ServerConfig,
+) -> LocalExportRegistry {
+    let catalog = Arc::new(catalog);
+    let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
+    let factory = Arc::new(ExportFactory::new(
+        config,
+        blob_dir(runtime),
+        simple_tree_store,
+        Arc::new(LocalWalProvider::new(runtime.wal_dir())),
+    ));
+    LocalExportRegistry::new(catalog, factory)
+}
+
+async fn execute_request(
+    export_runtime: &nbd_server::ExportRuntimeHandle,
+    request: nbd_server::ExportRequest,
+) -> nbd_server::Result<ExportReply> {
+    let queue_slot = export_runtime.reserve().await?;
+    let (job, receiver) = nbd_server::ExportJob::oneshot(request, queue_slot);
+    export_runtime.submit(job).await?;
+    let completed = receiver.await.expect("runtime completion");
+    let (result, _queue_slot) = completed.into_parts();
+    result
 }
 
 fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {

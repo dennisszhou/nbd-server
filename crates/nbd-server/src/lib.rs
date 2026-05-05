@@ -29,7 +29,7 @@ pub use export::{
 };
 pub use memory::{MemoryAdmissionPolicy, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
 pub use observability::{ConnectionId, ExportJobContext, RequestSequence};
-pub use registry::{ExportOwner, LocalExportRegistry};
+pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use runtime::{
     ConcurrentExportRuntime, ExportQueueSlot, ExportRuntime, ExportRuntimeHandle,
     SerialExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY,
