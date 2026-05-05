@@ -95,6 +95,20 @@ struct SegmentScan {
     records: Vec<WalRecord>,
 }
 
+#[derive(Debug)]
+struct RecordDecodeError {
+    kind: RecordDecodeErrorKind,
+    error: ServerError,
+}
+
+#[derive(Debug)]
+enum RecordDecodeErrorKind {
+    PartialHeader,
+    PartialPayload,
+    ChecksumMismatch { next_offset: usize },
+    Corrupt,
+}
+
 impl WalDomain {
     pub fn for_export_id(export_id: ExportId) -> Self {
         Self { export_id }
@@ -468,7 +482,8 @@ async fn scan_segments(dir: &Path) -> Result<Vec<SegmentScan>> {
 
     let mut scans = Vec::new();
     let mut expected_seq = WalSeq::new(1);
-    for (first_seq, path) in entries {
+    let entry_count = entries.len();
+    for (index, (first_seq, path)) in entries.into_iter().enumerate() {
         if first_seq != expected_seq {
             return Err(ServerError::wal(
                 "scan WAL",
@@ -480,7 +495,7 @@ async fn scan_segments(dir: &Path) -> Result<Vec<SegmentScan>> {
                 ),
             ));
         }
-        let scan = scan_segment(path, expected_seq).await?;
+        let scan = scan_segment(path, expected_seq, index + 1 == entry_count).await?;
         expected_seq = match scan.records.last() {
             Some(record) => next_seq_after(record.seq())?,
             None => scan.first_seq,
@@ -491,7 +506,11 @@ async fn scan_segments(dir: &Path) -> Result<Vec<SegmentScan>> {
     Ok(scans)
 }
 
-async fn scan_segment(path: PathBuf, expected_first_seq: WalSeq) -> Result<SegmentScan> {
+async fn scan_segment(
+    path: PathBuf,
+    expected_first_seq: WalSeq,
+    is_newest: bool,
+) -> Result<SegmentScan> {
     let data = fs::read(&path)
         .await
         .map_err(|source| ServerError::io("read WAL segment", source))?;
@@ -509,8 +528,17 @@ async fn scan_segment(path: PathBuf, expected_first_seq: WalSeq) -> Result<Segme
     let mut offset = SEGMENT_HEADER_LEN;
     let mut expected_seq = first_seq;
     let mut records = Vec::new();
+    let mut len_bytes = data.len();
     while offset < data.len() {
-        let (record, next_offset) = decode_record_at(&path, &data, offset)?;
+        let (record, next_offset) = match decode_record_at(&path, &data, offset) {
+            Ok(decoded) => decoded,
+            Err(error) if is_newest && error.repair_offset(data.len(), offset).is_some() => {
+                truncate_segment_tail(&path, offset).await?;
+                len_bytes = offset;
+                break;
+            }
+            Err(error) => return Err(error.into_error()),
+        };
         if record.seq() != expected_seq {
             return Err(ServerError::wal(
                 "scan WAL segment",
@@ -529,7 +557,7 @@ async fn scan_segment(path: PathBuf, expected_first_seq: WalSeq) -> Result<Segme
     Ok(SegmentScan {
         first_seq,
         path,
-        len_bytes: data.len() as u64,
+        len_bytes: len_bytes as u64,
         records,
     })
 }
@@ -575,6 +603,20 @@ async fn write_new_segment(path: &Path, first_seq: WalSeq) -> Result<()> {
     file.sync_all()
         .await
         .map_err(|source| ServerError::io("sync WAL segment header", source))
+}
+
+async fn truncate_segment_tail(path: &Path, offset: usize) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .await
+        .map_err(|source| ServerError::io("open WAL segment for tail repair", source))?;
+    file.set_len(offset as u64)
+        .await
+        .map_err(|source| ServerError::io("truncate WAL segment tail", source))?;
+    file.sync_all()
+        .await
+        .map_err(|source| ServerError::io("sync WAL segment after tail repair", source))
 }
 
 fn encode_segment_header(first_seq: WalSeq) -> Vec<u8> {
@@ -655,52 +697,53 @@ fn encode_record(record: &WalRecord) -> Result<Vec<u8>> {
     Ok(header)
 }
 
-fn decode_record_at(path: &Path, data: &[u8], offset: usize) -> Result<(WalRecord, usize)> {
+fn decode_record_at(
+    path: &Path,
+    data: &[u8],
+    offset: usize,
+) -> std::result::Result<(WalRecord, usize), RecordDecodeError> {
     if data.len() - offset < RECORD_HEADER_LEN {
-        return Err(ServerError::wal(
-            "read WAL record",
-            format!("segment {} has partial record header", path.display()),
-        ));
+        return Err(RecordDecodeError::partial_header(path));
     }
     let header = &data[offset..offset + RECORD_HEADER_LEN];
     if &header[0..8] != RECORD_MAGIC {
-        return Err(ServerError::wal(
+        return Err(RecordDecodeError::corrupt(ServerError::wal(
             "read WAL record",
             format!("segment {} has invalid record magic", path.display()),
-        ));
+        )));
     }
     let version = u16_at(header, 8);
     if version != WAL_FORMAT_VERSION {
-        return Err(ServerError::wal(
+        return Err(RecordDecodeError::corrupt(ServerError::wal(
             "read WAL record",
             format!(
                 "segment {} has unsupported record version {}",
                 path.display(),
                 version
             ),
-        ));
+        )));
     }
     let header_len = u16_at(header, 10) as usize;
     if header_len != RECORD_HEADER_LEN {
-        return Err(ServerError::wal(
+        return Err(RecordDecodeError::corrupt(ServerError::wal(
             "read WAL record",
             format!(
                 "segment {} has invalid record header length {}",
                 path.display(),
                 header_len
             ),
-        ));
+        )));
     }
     let record_kind = u16_at(header, 12);
     if record_kind != RECORD_KIND_WRITE {
-        return Err(ServerError::wal(
+        return Err(RecordDecodeError::corrupt(ServerError::wal(
             "read WAL record",
             format!(
                 "segment {} has unsupported record kind {}",
                 path.display(),
                 record_kind
             ),
-        ));
+        )));
     }
 
     let seq = WalSeq::new(u64_at(header, 16));
@@ -709,12 +752,14 @@ fn decode_record_at(path: &Path, data: &[u8], offset: usize) -> Result<(WalRecor
     let next_offset = offset
         .checked_add(RECORD_HEADER_LEN)
         .and_then(|value| value.checked_add(data_len as usize))
-        .ok_or_else(|| ServerError::wal("read WAL record", "record length overflow"))?;
+        .ok_or_else(|| {
+            RecordDecodeError::corrupt(ServerError::wal(
+                "read WAL record",
+                "record length overflow",
+            ))
+        })?;
     if next_offset > data.len() {
-        return Err(ServerError::wal(
-            "read WAL record",
-            format!("segment {} has partial record payload", path.display()),
-        ));
+        return Err(RecordDecodeError::partial_payload(path));
     }
 
     let payload = &data[offset + RECORD_HEADER_LEN..next_offset];
@@ -724,14 +769,67 @@ fn decode_record_at(path: &Path, data: &[u8], offset: usize) -> Result<(WalRecor
     let actual = digest.finalize();
     let expected = u32_at(header, RECORD_CRC_OFFSET);
     if expected != actual {
-        return Err(ServerError::wal(
-            "read WAL record",
-            format!("segment {} record checksum mismatch", path.display()),
-        ));
+        return Err(RecordDecodeError::checksum_mismatch(path, next_offset));
     }
 
-    let record = WalRecord::new(seq, ByteRange::new(start, data_len), payload.to_vec())?;
+    let record = WalRecord::new(seq, ByteRange::new(start, data_len), payload.to_vec())
+        .map_err(RecordDecodeError::corrupt)?;
     Ok((record, next_offset))
+}
+
+impl RecordDecodeError {
+    fn partial_header(path: &Path) -> Self {
+        Self {
+            kind: RecordDecodeErrorKind::PartialHeader,
+            error: ServerError::wal(
+                "read WAL record",
+                format!("segment {} has partial record header", path.display()),
+            ),
+        }
+    }
+
+    fn partial_payload(path: &Path) -> Self {
+        Self {
+            kind: RecordDecodeErrorKind::PartialPayload,
+            error: ServerError::wal(
+                "read WAL record",
+                format!("segment {} has partial record payload", path.display()),
+            ),
+        }
+    }
+
+    fn checksum_mismatch(path: &Path, next_offset: usize) -> Self {
+        Self {
+            kind: RecordDecodeErrorKind::ChecksumMismatch { next_offset },
+            error: ServerError::wal(
+                "read WAL record",
+                format!("segment {} record checksum mismatch", path.display()),
+            ),
+        }
+    }
+
+    fn corrupt(error: ServerError) -> Self {
+        Self {
+            kind: RecordDecodeErrorKind::Corrupt,
+            error,
+        }
+    }
+
+    fn repair_offset(&self, data_len: usize, offset: usize) -> Option<usize> {
+        match self.kind {
+            RecordDecodeErrorKind::PartialHeader | RecordDecodeErrorKind::PartialPayload => {
+                Some(offset)
+            }
+            RecordDecodeErrorKind::ChecksumMismatch { next_offset } if next_offset == data_len => {
+                Some(offset)
+            }
+            RecordDecodeErrorKind::ChecksumMismatch { .. } | RecordDecodeErrorKind::Corrupt => None,
+        }
+    }
+
+    fn into_error(self) -> ServerError {
+        self.error
+    }
 }
 
 fn export_wal_dir(root: &Path, export_id: &ExportId) -> Result<PathBuf> {

@@ -4,6 +4,10 @@ use nbd_server::{
     WalPruneResult, WalRecord, WalReplay, WalRequest,
 };
 use nbd_test_support::TestRuntime;
+use std::path::{Path, PathBuf};
+
+const SEGMENT_HEADER_LEN: usize = 24;
+const RECORD_HEADER_LEN: usize = 40;
 
 #[test]
 fn wal_domain_keeps_export_identity() {
@@ -193,6 +197,82 @@ async fn local_wal_rejects_replay_past_durable_bounds() {
     ));
 }
 
+#[tokio::test]
+async fn local_wal_repairs_final_partial_tail() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let wal = open_local_wal(&runtime, "export-tail").await;
+    let first = append(&wal, 0, b"first").await;
+    append(&wal, 4096, b"second").await;
+    drop(wal);
+
+    let segment = only_segment_file(runtime.wal_dir()).await;
+    let len = tokio::fs::metadata(&segment).await.expect("metadata").len();
+    truncate_file(&segment, len - 2).await;
+
+    let repaired = open_local_wal(&runtime, "export-tail").await;
+
+    assert_eq!(
+        repaired.bounds().await.expect("bounds"),
+        WalBounds {
+            pruned_through: WalSeq::zero(),
+            last_durable: WalSeq::new(1),
+        },
+    );
+    assert_eq!(
+        collect(repaired.replay_after(WalSeq::zero()).await.expect("replay")).await,
+        vec![first],
+    );
+    assert_eq!(append(&repaired, 8192, b"new").await.seq(), WalSeq::new(2));
+}
+
+#[tokio::test]
+async fn local_wal_repairs_final_checksum_tail() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let wal = open_local_wal(&runtime, "export-checksum-tail").await;
+    let first = append(&wal, 0, b"first").await;
+    append(&wal, 4096, b"second").await;
+    drop(wal);
+
+    let segment = only_segment_file(runtime.wal_dir()).await;
+    corrupt_record_payload(&segment, 1, b"first".len()).await;
+
+    let repaired = open_local_wal(&runtime, "export-checksum-tail").await;
+
+    assert_eq!(
+        repaired.bounds().await.expect("bounds").last_durable,
+        WalSeq::new(1),
+    );
+    assert_eq!(
+        collect(repaired.replay_after(WalSeq::zero()).await.expect("replay")).await,
+        vec![first],
+    );
+}
+
+#[tokio::test]
+async fn local_wal_rejects_interior_checksum_corruption() {
+    let runtime = TestRuntime::new().expect("runtime");
+    let wal = open_local_wal(&runtime, "export-interior").await;
+    append(&wal, 0, b"first").await;
+    append(&wal, 4096, b"second").await;
+    drop(wal);
+
+    let segment = only_segment_file(runtime.wal_dir()).await;
+    corrupt_record_payload(&segment, 0, 0).await;
+
+    let provider = LocalWalProvider::new(runtime.wal_dir());
+    assert!(matches!(
+        provider
+            .open_export(OpenWal::new(WalDomain::for_export_id(
+                ExportId::new("export-interior").expect("export id"),
+            )))
+            .await,
+        Err(ServerError::Wal {
+            context: "read WAL record",
+            ..
+        }),
+    ));
+}
+
 async fn open_local_wal(runtime: &TestRuntime, export_id: &str) -> nbd_server::ExportWalHandle {
     let provider = LocalWalProvider::new(runtime.wal_dir());
     provider
@@ -218,4 +298,52 @@ async fn collect(mut replay: WalReplay) -> Vec<WalRecord> {
         records.push(record);
     }
     records
+}
+
+async fn only_segment_file(root: &Path) -> PathBuf {
+    let mut export_dirs = tokio::fs::read_dir(root).await.expect("read wal root");
+    let export_dir = export_dirs
+        .next_entry()
+        .await
+        .expect("read export dir")
+        .expect("export dir")
+        .path();
+    assert!(export_dirs
+        .next_entry()
+        .await
+        .expect("read export dir")
+        .is_none());
+
+    let mut segments = tokio::fs::read_dir(export_dir)
+        .await
+        .expect("read export wal dir");
+    let segment = segments
+        .next_entry()
+        .await
+        .expect("read segment")
+        .expect("segment")
+        .path();
+    assert!(segments.next_entry().await.expect("read segment").is_none());
+    segment
+}
+
+async fn truncate_file(path: &Path, len: u64) {
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .await
+        .expect("open for truncate");
+    file.set_len(len).await.expect("truncate");
+    file.sync_all().await.expect("sync truncated file");
+}
+
+async fn corrupt_record_payload(path: &Path, record_index: usize, previous_payload_len: usize) {
+    let mut data = tokio::fs::read(path).await.expect("read segment");
+    let record_offset =
+        SEGMENT_HEADER_LEN + record_index * RECORD_HEADER_LEN + previous_payload_len;
+    let payload_offset = record_offset + RECORD_HEADER_LEN;
+    data[payload_offset] ^= 0xff;
+    tokio::fs::write(path, data)
+        .await
+        .expect("write corrupted segment");
 }
