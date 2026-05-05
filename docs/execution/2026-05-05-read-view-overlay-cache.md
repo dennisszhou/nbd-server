@@ -1,11 +1,11 @@
 Title: Read View Overlay Cache Execution
 Date: 2026-05-05
-Status: approved
+Status: finished
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved
+- current state: complete
 Completion:
-- execution complete: no
+- execution complete: yes
 
 ## Goal
 
@@ -45,7 +45,7 @@ live for WAL durable reads, writes trim stale cache ranges, root advancement is
 implemented at the read-view boundary, and tests cover repeated writes, middle
 splits, cache hits, write trimming, merge/no-merge cases, byte-budget eviction,
 and retired WAL demotion.
-Approval: approved
+Approval: finished
 Verification plan:
 - `cargo test -p nbd-server extent_map`
 - `cargo test -p nbd-server wal_durable`
@@ -86,3 +86,26 @@ under writes.
 Add `advance_root` with checkpoint validation, visible overlay retirement,
 retired WAL cache insertion, and tests proving shadowed WAL records are not
 cached.
+
+## Closeout
+
+Completed in one implementation series. The landed stack introduced the
+approved docs, the extent-map primitive, the authoritative overlay extent map,
+the read-cache object store, tree-fill caching, write cache trimming, and
+`advance_root` retired-overlay demotion.
+
+Verification completed:
+
+- `cargo fmt --all --check`
+- `cargo test -p nbd-server extent_map`
+- `cargo test -p nbd-server wal_durable`
+- `cargo test -p nbd-server --test wal_durable`
+- `cargo test -p nbd-server --test compaction`
+- `cargo test -p nbd-server --test local_export_registry`
+- `cargo clippy -p nbd-server --all-targets -- -D warnings`
+- `make test-protocol`
+
+Deferred follow-up remains the explicitly out-of-scope work: wiring live
+compaction callers to `advance_root`, operator cache configuration,
+process-wide cache coordination, WAL payload reload after eviction, benchmark
+harnesses, and scatter/gather replies.
