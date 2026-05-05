@@ -25,7 +25,7 @@ CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 NBDCLI="${CARGO_TARGET_DIR}/debug/nbdcli"
 NBD_SERVER="${CARGO_TARGET_DIR}/debug/nbd-server"
 NBD_CLIENT="/usr/sbin/nbd-client"
-COMPACTION_CHECKPOINT=""
+COMPACTION_WAL_SEQ=""
 COMPACTION_ROOT=""
 ARTIFACTS_CLEARED=0
 
@@ -143,26 +143,92 @@ inspect_field() {
 }
 
 wait_for_wal_compaction() {
-    local target_checkpoint="$1"
+    local target_wal_seq="$1"
     local label="$2"
-    local path checkpoint root
+    local path wal_seq root
 
     for _ in $(seq 1 500); do
         path="$(write_inspect_artifact "${label}")"
-        checkpoint="$(inspect_field "${path}" "checkpoint_wal_seq")"
+        wal_seq="$(inspect_field "${path}" "checkpoint_wal_seq")"
         root="$(inspect_field "${path}" "root_node_id")"
-        if [[ "${checkpoint}" =~ ^[0-9]+$ ]] &&
-            [ "${checkpoint}" -ge "${target_checkpoint}" ] &&
+        if [[ "${wal_seq}" =~ ^[0-9]+$ ]] &&
+            [ "${wal_seq}" -ge "${target_wal_seq}" ] &&
             [ "${root}" != "<empty>" ]; then
-            COMPACTION_CHECKPOINT="${checkpoint}"
+            COMPACTION_WAL_SEQ="${wal_seq}"
             COMPACTION_ROOT="${root}"
             return 0
         fi
         sleep 0.02
     done
 
-    echo "timed out waiting for ${EXPORT_NAME} compaction checkpoint" \
-        "${target_checkpoint}" >&2
+    echo "timed out waiting for ${EXPORT_NAME} compaction WAL sequence" \
+        "${target_wal_seq}" >&2
+    return 1
+}
+
+wait_for_wal_reattach_base() {
+    local expected_base="$1"
+
+    for _ in $(seq 1 100); do
+        if node - "${LOG_FILE}" "${EXPORT_NAME}" "${expected_base}" <<'NODE'
+const fs = require("fs");
+
+const [, , logFile, exportName, expectedRaw] = process.argv;
+const expected = Number(expectedRaw);
+const contents = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "";
+const lines = contents.split(/\n/).filter(Boolean);
+let compactionLine = -1;
+let rootLine = -1;
+
+for (let i = 0; i < lines.length; i++) {
+    let fields;
+    try {
+        fields = JSON.parse(lines[i]).fields || {};
+    } catch {
+        continue;
+    }
+
+    if (
+        fields.event === "wal.compaction.completed" &&
+        Number(fields.target_wal_seq) === expected
+    ) {
+        compactionLine = i;
+    }
+
+    if (
+        compactionLine >= 0 &&
+        i > compactionLine &&
+        fields.event === "wal.root.loaded" &&
+        fields.export_name === exportName &&
+        Number(fields.base_wal_seq) === expected &&
+        fields.root_node_id &&
+        fields.root_node_id !== "<empty>"
+    ) {
+        rootLine = i;
+    }
+
+    if (
+        rootLine >= 0 &&
+        i > rootLine &&
+        fields.event === "wal.replay.completed" &&
+        fields.export_name === exportName &&
+        Number(fields.base_wal_seq) === expected &&
+        Number(fields.replayed_through_wal_seq) === expected
+    ) {
+        process.exit(0);
+    }
+}
+
+process.exit(1);
+NODE
+        then
+            return 0
+        fi
+        sleep 0.02
+    done
+
+    echo "timed out waiting for ${EXPORT_NAME} WAL reattach base" \
+        "${expected_base}" >&2
     return 1
 }
 

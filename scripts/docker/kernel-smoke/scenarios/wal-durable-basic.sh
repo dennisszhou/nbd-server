@@ -2,7 +2,7 @@
 
 run_smoke_scenario() {
     local first_root
-    local first_checkpoint
+    local first_wal_seq
 
     create_export "wal_durable"
 
@@ -18,12 +18,13 @@ run_smoke_scenario() {
     settle_compaction
     wait_for_wal_compaction 1 "first-close"
     first_root="${COMPACTION_ROOT}"
-    first_checkpoint="${COMPACTION_CHECKPOINT}"
+    first_wal_seq="${COMPACTION_WAL_SEQ}"
     write_inspect_artifact "before-second-open" >/dev/null
     stop_server
 
     start_server
     connect_device
+    wait_for_wal_reattach_base "${first_wal_seq}"
     mount_device
     verify_probe "${PROBE_EXPECTED}" "probe.txt"
     write_and_verify_probe \
@@ -34,7 +35,7 @@ run_smoke_scenario() {
     unmount_device
     disconnect_device
     settle_compaction
-    wait_for_wal_compaction "$((first_checkpoint + 1))" "second-close"
+    wait_for_wal_compaction "$((first_wal_seq + 1))" "second-close"
     if [ "${COMPACTION_ROOT}" = "${first_root}" ]; then
         echo "second compaction reused root ${COMPACTION_ROOT}" >&2
         exit 1
