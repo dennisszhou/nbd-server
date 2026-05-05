@@ -83,6 +83,8 @@ pub mod event {
     pub const CATALOG_ERROR: &str = "catalog.error";
 
     pub const COMPACTION_COMPLETED: &str = "compaction.completed";
+    pub const COMPACTION_ENQUEUED: &str = "compaction.enqueued";
+    pub const COMPACTION_ENQUEUE_FAILED: &str = "compaction.enqueue_failed";
     pub const COMPACTION_FAILED: &str = "compaction.failed";
 }
 

@@ -1,8 +1,9 @@
 use crate::{
     observability::{self, event, target},
-    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, ExportWalHandle,
-    LocalBlobStore, MemoryExportEngine, OpenWal, Result, SerialExportRuntime, ServerError,
-    SimpleDurableEngine, WalDomain, WalDurableEngine, WalProvider,
+    CompactionEnqueueOutcome, CompactionJob, CompactionManager, ConcurrentExportRuntime,
+    ExportEngineHandle, ExportRuntimeHandle, ExportWalHandle, LocalBlobStore, MemoryExportEngine,
+    OpenWal, Result, SerialExportRuntime, ServerError, SimpleDurableEngine, WalDomain,
+    WalDurableEngine, WalProvider,
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
@@ -57,6 +58,7 @@ pub struct ExportFactory {
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
+    compaction_manager: CompactionManager,
 }
 
 struct OpenedEngine {
@@ -187,7 +189,9 @@ impl LocalExportRegistry {
             runtime
         };
 
+        let meta = runtime.export_meta();
         runtime.close().await?;
+        self.factory.enqueue_close_compaction(&meta).await;
         self.active()?.remove(name);
         tracing::info!(
             target: target::EXPORT,
@@ -258,6 +262,7 @@ impl ExportFactory {
         simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
+        compaction_manager: CompactionManager,
     ) -> Self {
         Self {
             config,
@@ -266,6 +271,7 @@ impl ExportFactory {
             simple_tree_store,
             cow_tree_store,
             wal_provider,
+            compaction_manager,
         }
     }
 
@@ -373,6 +379,74 @@ impl ExportFactory {
     async fn open_wal(&self, export_id: &ExportId) -> Result<ExportWalHandle> {
         let domain = WalDomain::for_export_id(export_id.clone());
         self.wal_provider.open_export(OpenWal::new(domain)).await
+    }
+
+    async fn enqueue_close_compaction(&self, meta: &ExportMeta) {
+        if meta.engine_kind() != ExportEngineKind::WalDurable {
+            return;
+        }
+
+        let target = match self.open_wal(meta.id()).await {
+            Ok(wal) => match wal.bounds().await {
+                Ok(bounds) => bounds.last_durable,
+                Err(error) => {
+                    tracing::warn!(
+                        target: target::STORAGE,
+                        event = event::COMPACTION_ENQUEUE_FAILED,
+                        service = observability::SERVICE_NAME,
+                        server_instance_id = observability::server_instance_id(),
+                        pid = observability::pid(),
+                        export_id = %meta.id(),
+                        export_name = %meta.name(),
+                        error = %error,
+                    );
+                    return;
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    target: target::STORAGE,
+                    event = event::COMPACTION_ENQUEUE_FAILED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    export_id = %meta.id(),
+                    export_name = %meta.name(),
+                    error = %error,
+                );
+                return;
+            }
+        };
+
+        let outcome = self
+            .compaction_manager
+            .enqueue(CompactionJob::new(meta.id().clone(), target));
+        match outcome {
+            CompactionEnqueueOutcome::Queued => tracing::info!(
+                target: target::STORAGE,
+                event = event::COMPACTION_ENQUEUED,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                export_id = %meta.id(),
+                export_name = %meta.name(),
+                target_checkpoint = target.get(),
+                outcome = "queued",
+            ),
+            CompactionEnqueueOutcome::DroppedFull | CompactionEnqueueOutcome::ShuttingDown => {
+                tracing::warn!(
+                    target: target::STORAGE,
+                    event = event::COMPACTION_ENQUEUE_FAILED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    export_id = %meta.id(),
+                    export_name = %meta.name(),
+                    target_checkpoint = target.get(),
+                    outcome = ?outcome,
+                );
+            }
+        }
     }
 }
 

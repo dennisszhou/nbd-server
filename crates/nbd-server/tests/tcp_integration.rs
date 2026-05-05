@@ -1,7 +1,7 @@
 mod support;
 
 use nbd_config::{ExportRuntimeKind, ServerConfig};
-use nbd_control_plane::SIMPLE_CHUNK_BYTES;
+use nbd_control_plane::{WalSeq, SIMPLE_CHUNK_BYTES};
 use nbd_protocol::constants::{
     NBD_CMD_WRITE, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT,
     NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
@@ -11,9 +11,11 @@ use nbd_protocol::{OptionReply, RequestHeader};
 use nbd_us_client::{ClientError, NbdClient};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::time::Duration;
 use support::nbd::{
     EngineProfile, RawNbdConnection, RawNbdOptionClient, RawNbdReply, ServerFixture,
 };
+use tokio::time::{sleep, timeout};
 
 #[tokio::test]
 async fn active_export_negotiates_over_tcp() {
@@ -892,7 +894,7 @@ async fn simple_durable_protocol_persists_across_restart() {
 }
 
 #[tokio::test]
-async fn wal_durable_protocol_recovers_wal_across_restart() {
+async fn wal_durable_protocol_compacts_on_disconnect_and_restarts() {
     let fixture = ServerFixture::new(EngineProfile::WAL_DURABLE)
         .await
         .expect("server fixture");
@@ -909,6 +911,7 @@ async fn wal_durable_protocol_recovers_wal_across_restart() {
     client.write(1024, b"tail").await.expect("write tail");
     client.flush().await.expect("flush writes");
     client.disconnect().await.expect("disconnect first client");
+    wait_for_compacted_head(&fixture, "disk-wal", WalSeq::new(2)).await;
     server.shutdown().await.expect("shutdown first server");
 
     let restarted = fixture.start_server().await.expect("restart server");
@@ -937,6 +940,22 @@ async fn wal_durable_protocol_recovers_wal_across_restart() {
         .shutdown()
         .await
         .expect("shutdown restarted server");
+}
+
+async fn wait_for_compacted_head(fixture: &ServerFixture, name: &str, checkpoint: WalSeq) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let meta = fixture.inspect_export(name).await.expect("inspect export");
+            if meta.head().checkpoint_wal_seq() >= checkpoint
+                && meta.head().root_node_id().is_some()
+            {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("wait for compacted head");
 }
 
 fn assert_unknown_export(result: nbd_us_client::Result<NbdClient>) {

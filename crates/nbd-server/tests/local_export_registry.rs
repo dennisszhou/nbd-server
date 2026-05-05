@@ -1,16 +1,18 @@
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     CatalogUrl, CowTreeMetadataStore, CreateExport, ExportCatalog, ExportEngineKind, ExportName,
-    SQLiteExportCatalog, SimpleTreeMetadataStore,
+    SQLiteExportCatalog, SimpleTreeMetadataStore, WalSeq,
 };
 use nbd_server::{
-    ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider, ServerError,
-    MAX_MEMORY_EXPORT_BYTES,
+    CompactionManager, ExportFactory, ExportOwner, ExportReply, LocalBlobStore,
+    LocalExportRegistry, LocalWalProvider, ServerError, MAX_MEMORY_EXPORT_BYTES,
 };
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::{sleep, timeout};
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
@@ -314,7 +316,7 @@ async fn registry_opens_simple_durable_runtime_from_catalog() {
 async fn registry_opens_wal_durable_runtime_from_catalog() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
-    catalog
+    let created = catalog
         .create_export(create_export_with_engine(
             "disk-wal",
             4096,
@@ -323,6 +325,7 @@ async fn registry_opens_wal_durable_runtime_from_catalog() {
         ))
         .await
         .expect("create export");
+    let catalog_for_assert = catalog.clone();
     let registry = local_registry(catalog, &runtime, ServerConfig::default());
     let owner = ExportOwner::unique_connection();
 
@@ -355,6 +358,7 @@ async fn registry_opens_wal_durable_runtime_from_catalog() {
         .close(&export_name("disk-wal"), &owner)
         .await
         .expect("close wal durable runtime");
+    wait_for_checkpoint(&catalog_for_assert, created.id(), WalSeq::new(1)).await;
 }
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
@@ -390,13 +394,21 @@ fn local_registry(
     let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
     let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
     let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
+    let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
+    let compaction_manager = CompactionManager::with_queue_capacity(
+        cow_tree_store.clone(),
+        wal_provider.clone(),
+        LocalBlobStore::new(blob_dir(runtime)),
+        4,
+    );
     let factory = Arc::new(ExportFactory::new(
         config,
         blob_dir(runtime),
         export_catalog,
         simple_tree_store,
         cow_tree_store,
-        Arc::new(LocalWalProvider::new(runtime.wal_dir())),
+        wal_provider,
+        compaction_manager,
     ));
     LocalExportRegistry::new(catalog, factory)
 }
@@ -425,4 +437,25 @@ fn create_export_with_engine(
 ) -> CreateExport {
     CreateExport::new(export_name(name), size_bytes, block_size, engine_kind)
         .expect("valid create export request")
+}
+
+async fn wait_for_checkpoint(
+    catalog: &SQLiteExportCatalog,
+    export_id: &nbd_control_plane::ExportId,
+    checkpoint: WalSeq,
+) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = catalog
+                .load_cow_tree(export_id)
+                .await
+                .expect("load cow tree");
+            if snapshot.checkpoint_wal_seq() >= checkpoint && snapshot.root_node_id().is_some() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("compaction checkpoint");
 }

@@ -98,6 +98,13 @@ impl ServerFixture {
             .await?)
     }
 
+    pub async fn inspect_export(&self, name: &str) -> TestResult<ExportMeta> {
+        Ok(self
+            .catalog
+            .inspect_export(nbd_control_plane::InspectExport::new(export_name(name)))
+            .await?)
+    }
+
     pub fn configure_server(&self, server: ServerConfig) -> TestResult<()> {
         Ok(self.runtime.write_server_config(server)?)
     }
