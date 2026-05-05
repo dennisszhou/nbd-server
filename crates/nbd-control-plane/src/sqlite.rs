@@ -958,20 +958,13 @@ fn validate_simple_root_row(
 
 fn validate_cow_root_row(
     row: &SqliteRow,
-    export_id: &ExportId,
+    _export_id: &ExportId,
     root_node_id: &NodeId,
 ) -> Result<()> {
     let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
     if layout_kind != ExportLayoutKind::CowImmutableTree.to_string() {
         return Err(CatalogError::database(format!(
             "cow tree root `{root_node_id}` has layout `{layout_kind}`"
-        )));
-    }
-
-    let owner_export_id: Option<String> = row.try_get("owner_export_id").map_err(map_sqlx_error)?;
-    if owner_export_id.as_deref() != Some(export_id.as_str()) {
-        return Err(CatalogError::database(format!(
-            "cow tree root `{root_node_id}` is not owned by export `{export_id}`"
         )));
     }
 
@@ -1037,20 +1030,13 @@ fn validate_simple_leaf_row(
 
 fn validate_cow_leaf_row(
     row: &SqliteRow,
-    export_id: &ExportId,
+    _export_id: &ExportId,
     chunk_index: ChunkIndex,
 ) -> Result<()> {
     let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
     if layout_kind != ExportLayoutKind::CowImmutableTree.to_string() {
         return Err(CatalogError::database(format!(
             "cow tree leaf for chunk {chunk_index} has layout `{layout_kind}`"
-        )));
-    }
-
-    let owner_export_id: Option<String> = row.try_get("owner_export_id").map_err(map_sqlx_error)?;
-    if owner_export_id.as_deref() != Some(export_id.as_str()) {
-        return Err(CatalogError::database(format!(
-            "cow tree leaf for chunk {chunk_index} is not owned by export `{export_id}`"
         )));
     }
 

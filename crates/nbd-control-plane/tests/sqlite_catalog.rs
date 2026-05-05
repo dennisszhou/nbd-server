@@ -478,6 +478,61 @@ async fn simple_tree_commits_new_leaf_metadata() {
 }
 
 #[tokio::test]
+async fn simple_tree_rejects_foreign_root() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let source = catalog
+        .create_export(create_export_with_engine(
+            "source",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create source export");
+    let destination = catalog
+        .create_export(create_export_with_engine(
+            "destination",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create destination export");
+    let source_snapshot = catalog
+        .commit_simple_chunks(
+            source.id(),
+            vec![SimpleChunkRef::new(
+                ChunkIndex::new(2),
+                BlobKey::new("source-simple").expect("valid blob key"),
+                SIMPLE_CHUNK_BYTES,
+            )
+            .expect("valid simple chunk")],
+        )
+        .await
+        .expect("commit source chunk");
+    let source_root = source_snapshot.root_node_id().expect("source root");
+
+    sqlx::query(
+        r#"
+        UPDATE export_heads
+        SET root_node_id = ?
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(source_root.as_str())
+    .bind(destination.id().as_str())
+    .execute(catalog.pool())
+    .await
+    .expect("point destination at source root");
+
+    let error = catalog
+        .load_simple_tree(destination.id())
+        .await
+        .expect_err("simple roots must remain export-private");
+    assert!(error.to_string().contains("not owned by export"));
+}
+
+#[tokio::test]
 async fn simple_tree_rejects_existing_leaf_metadata() {
     let (_runtime, catalog) = migrated_catalog().await;
     let created = catalog
@@ -557,6 +612,66 @@ async fn cow_tree_publish_creates_checkpoint_root() {
     assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(4));
     assert_eq!(snapshot.chunk(ChunkIndex::new(2)), Some(&chunk));
     assert!(snapshot.chunk(ChunkIndex::new(1)).is_none());
+}
+
+#[tokio::test]
+async fn cow_tree_allows_shared_immutable_root() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let source = catalog
+        .create_export(create_export_with_engine(
+            "source",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create source export");
+    let destination = catalog
+        .create_export(create_export_with_engine(
+            "destination",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create destination export");
+    let chunk = cow_chunk(2, "source-cow");
+    let published = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                source.id().clone(),
+                source.head().clone(),
+                WalSeq::new(4),
+                vec![chunk.clone()],
+            )
+            .expect("publish request"),
+        )
+        .await
+        .expect("publish compaction")
+        .into_meta();
+    let source_root = published.head().root_node_id().expect("source root");
+
+    sqlx::query(
+        r#"
+        UPDATE export_heads
+        SET root_node_id = ?
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(source_root.as_str())
+    .bind(destination.id().as_str())
+    .execute(catalog.pool())
+    .await
+    .expect("point destination at source root");
+
+    let snapshot = catalog
+        .load_cow_tree(destination.id())
+        .await
+        .expect("load shared cow tree");
+    assert_eq!(snapshot.export_id(), destination.id());
+    assert_eq!(snapshot.root_node_id(), Some(source_root));
+    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(snapshot.chunk(ChunkIndex::new(2)), Some(&chunk));
 }
 
 #[tokio::test]
