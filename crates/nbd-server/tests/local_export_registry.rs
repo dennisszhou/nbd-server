@@ -1,7 +1,8 @@
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    CatalogUrl, CowTreeMetadataStore, CreateExport, ExportCatalog, ExportEngineKind, ExportName,
-    SQLiteExportCatalog, SimpleTreeMetadataStore, WalSeq,
+    CatalogError, CatalogUrl, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, ExportCatalog,
+    ExportEngineKind, ExportName, PublishCompaction, PublishCompactionOutcome, SQLiteExportCatalog,
+    SimpleTreeMetadataStore, WalSeq,
 };
 use nbd_server::{
     CompactionManager, ExportFactory, ExportOwner, ExportReply, LocalBlobStore,
@@ -10,8 +11,10 @@ use nbd_server::{
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
 
 const MIGRATIONS: &[&str] = &[
@@ -361,6 +364,76 @@ async fn registry_opens_wal_durable_runtime_from_catalog() {
     wait_for_checkpoint(&catalog_for_assert, created.id(), WalSeq::new(1)).await;
 }
 
+#[tokio::test]
+async fn registry_reopen_replays_wal_after_close_compaction_fails() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            4096,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+    let catalog_for_assert = catalog.clone();
+    let failing_compaction_store = Arc::new(FailingCowTreeStore::new());
+    let registry = local_registry_with_compaction_store(
+        catalog,
+        &runtime,
+        ServerConfig::default(),
+        failing_compaction_store.clone(),
+    );
+    let owner = ExportOwner::unique_connection();
+
+    let export_runtime = registry
+        .open(export_name("disk-wal"), owner)
+        .await
+        .expect("open wal durable runtime");
+    execute_request(
+        &export_runtime,
+        nbd_server::ExportRequest::Write {
+            offset: 4,
+            data: b"replay".to_vec(),
+        },
+    )
+    .await
+    .expect("write");
+    registry
+        .close(&export_name("disk-wal"), &owner)
+        .await
+        .expect("close wal durable runtime");
+    failing_compaction_store.wait_for_attempt().await;
+    let snapshot = catalog_for_assert
+        .load_cow_tree(created.id())
+        .await
+        .expect("load cow tree after failed compaction");
+    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::zero());
+    assert!(snapshot.root_node_id().is_none());
+
+    let reopened_owner = ExportOwner::unique_connection();
+    let reopened = registry
+        .open(export_name("disk-wal"), reopened_owner)
+        .await
+        .expect("reopen wal durable runtime");
+    assert_eq!(
+        execute_request(
+            &reopened,
+            nbd_server::ExportRequest::Read { offset: 0, len: 12 },
+        )
+        .await
+        .expect("read replayed data"),
+        ExportReply::Read {
+            data: b"\0\0\0\0replay\0\0".to_vec(),
+        },
+    );
+    registry
+        .close(&export_name("disk-wal"), &reopened_owner)
+        .await
+        .expect("close reopened runtime");
+}
+
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -390,13 +463,23 @@ fn local_registry(
     runtime: &TestRuntime,
     config: ServerConfig,
 ) -> LocalExportRegistry {
+    let compaction_store = Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>;
+    local_registry_with_compaction_store(catalog, runtime, config, compaction_store)
+}
+
+fn local_registry_with_compaction_store(
+    catalog: SQLiteExportCatalog,
+    runtime: &TestRuntime,
+    config: ServerConfig,
+    compaction_store: Arc<dyn CowTreeMetadataStore>,
+) -> LocalExportRegistry {
     let catalog = Arc::new(catalog);
     let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
     let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
     let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
     let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
     let compaction_manager = CompactionManager::with_queue_capacity(
-        cow_tree_store.clone(),
+        compaction_store,
         wal_provider.clone(),
         LocalBlobStore::new(blob_dir(runtime)),
         4,
@@ -411,6 +494,59 @@ fn local_registry(
         compaction_manager,
     ));
     LocalExportRegistry::new(catalog, factory)
+}
+
+struct FailingCowTreeStore {
+    attempted: AtomicBool,
+    notify: Notify,
+}
+
+impl FailingCowTreeStore {
+    fn new() -> Self {
+        Self {
+            attempted: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    async fn wait_for_attempt(&self) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if self.attempted.load(Ordering::SeqCst) {
+                    return;
+                }
+                self.notify.notified().await;
+            }
+        })
+        .await
+        .expect("wait for failed compaction attempt");
+    }
+
+    fn mark_attempted(&self) {
+        self.attempted.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl CowTreeMetadataStore for FailingCowTreeStore {
+    async fn load_cow_tree(
+        &self,
+        _export_id: &nbd_control_plane::ExportId,
+    ) -> nbd_control_plane::Result<CowTreeSnapshot> {
+        self.mark_attempted();
+        Err(CatalogError::database("injected compaction load failure"))
+    }
+
+    async fn publish_compaction(
+        &self,
+        _request: PublishCompaction,
+    ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
+        self.mark_attempted();
+        Err(CatalogError::database(
+            "injected compaction publish failure",
+        ))
+    }
 }
 
 async fn execute_request(
