@@ -1,4 +1,5 @@
 use crate::{
+    observability::{self, event, target},
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
     ExportWalHandle, LocalBlobStore, Result, ServerError, WalRecord, WalRequest,
@@ -47,6 +48,12 @@ struct ExportReadViewState {
     wal_overlay: BTreeMap<WalSeq, WalRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WalReplaySummary {
+    replayed_records: u64,
+    replayed_through_wal_seq: WalSeq,
+}
+
 #[async_trait::async_trait]
 trait BackingReader: Send + Sync {
     async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>>;
@@ -81,11 +88,10 @@ impl WalDurableEngine {
         }
 
         let root = RootSnapshot::from_meta(meta);
+        log_root_loaded(meta.id(), meta.name(), &root);
         let read_view = ExportReadView::zero_filled(root.clone());
-        let mut replay = wal.replay_after(root.checkpoint_wal_seq()).await?;
-        while let Some(record) = replay.next_record().await? {
-            read_view.apply_wal_record(record).await?;
-        }
+        let replay = replay_wal_after(&wal, &read_view, &root).await?;
+        log_replay_completed(meta.id(), meta.name(), &root, replay);
 
         Ok(Self {
             name: meta.name().clone(),
@@ -116,6 +122,7 @@ impl WalDurableEngine {
         validate_snapshot_can_open(descriptor, &snapshot)?;
         let size_bytes = snapshot.size_bytes();
         let root = RootSnapshot::from_cow_snapshot(&snapshot);
+        log_root_loaded(descriptor.id(), descriptor.name(), &root);
         let read_view = ExportReadView::new(
             root.clone(),
             Arc::new(CowTreeBackingReader {
@@ -123,10 +130,8 @@ impl WalDurableEngine {
                 blob_store,
             }),
         );
-        let mut replay = wal.replay_after(root.checkpoint_wal_seq()).await?;
-        while let Some(record) = replay.next_record().await? {
-            read_view.apply_wal_record(record).await?;
-        }
+        let replay = replay_wal_after(&wal, &read_view, &root).await?;
+        log_replay_completed(descriptor.id(), descriptor.name(), &root, replay);
 
         Ok(Self {
             name: descriptor.name().clone(),
@@ -235,6 +240,69 @@ impl ExportEngine for WalDurableEngine {
             }
         }
     }
+}
+
+async fn replay_wal_after(
+    wal: &ExportWalHandle,
+    read_view: &ExportReadView,
+    root: &RootSnapshot,
+) -> Result<WalReplaySummary> {
+    let mut replay = wal.replay_after(root.checkpoint_wal_seq()).await?;
+    let mut replayed_records = 0u64;
+    let mut replayed_through_wal_seq = root.checkpoint_wal_seq();
+    while let Some(record) = replay.next_record().await? {
+        replayed_records += 1;
+        replayed_through_wal_seq = record.seq();
+        read_view.apply_wal_record(record).await?;
+    }
+
+    Ok(WalReplaySummary {
+        replayed_records,
+        replayed_through_wal_seq,
+    })
+}
+
+fn log_root_loaded(
+    export_id: &nbd_control_plane::ExportId,
+    name: &ExportName,
+    root: &RootSnapshot,
+) {
+    tracing::info!(
+        target: target::WAL,
+        event = event::WAL_ROOT_LOADED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %export_id,
+        export_name = %name,
+        root_node_id = root_node_id_for_log(root),
+        base_wal_seq = root.checkpoint_wal_seq().get(),
+        size_bytes = root.size_bytes(),
+    );
+}
+
+fn log_replay_completed(
+    export_id: &nbd_control_plane::ExportId,
+    name: &ExportName,
+    root: &RootSnapshot,
+    replay: WalReplaySummary,
+) {
+    tracing::info!(
+        target: target::WAL,
+        event = event::WAL_REPLAY_COMPLETED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        export_id = %export_id,
+        export_name = %name,
+        base_wal_seq = root.checkpoint_wal_seq().get(),
+        replayed_records = replay.replayed_records,
+        replayed_through_wal_seq = replay.replayed_through_wal_seq.get(),
+    );
+}
+
+fn root_node_id_for_log(root: &RootSnapshot) -> &str {
+    root.root_node_id().map(NodeId::as_str).unwrap_or("<empty>")
 }
 
 impl RootSnapshot {
