@@ -28,10 +28,12 @@ Define `LocalExportRegistry` as the in-process registry for active exports:
 It may be empty after process restart. Durable recovery comes from
 `ExportCatalog` plus WAL.
 
-Writer fencing is out of scope for this document. The current architecture
-uses etcd leases as the active-export signal and relies on lease loss halting
-the export. A future fencing design can add stronger durable mutation checks
-behind the lease/catalog/WAL boundaries.
+Writer fencing is out of scope for this document. The architecture targets
+etcd leases as the active-export signal and relies on lease loss halting the
+export once leases exist. The current prototype uses only process-local active
+export state and one active writable owner per export. A future fencing design
+can add stronger durable mutation checks behind the lease/catalog/WAL
+boundaries.
 
 # Data Structures
 
@@ -131,6 +133,11 @@ Etcd leases are the per-export lifecycle exclusion truth that other processes
 use. `nbdcli delete` should acquire the lease through the lifecycle model
 rather than checking a Unix domain socket or process-local registry API.
 
+This is the target lifecycle model, not a statement that the first local
+prototype already has distributed exclusion. Until `ExportLeaseStore` is
+implemented, `LocalExportRegistry` is a single-process routing and close
+boundary only.
+
 The lease store is a boundary separate from the in-process registry:
 
 ```rust
@@ -169,9 +176,9 @@ the in-memory lease timestamp after each successful renewal. The active
 successful renewal. If `now > expires_at`, the server has lost the lease and
 the export must halt rather than continue serving or writing.
 
-The first implementation should use a one minute serving lease and renew
-it every 30 seconds. This gives the renewal worker one missed refresh before
-the lease expires.
+When the lease layer is implemented, the initial policy should use a one
+minute serving lease and renew it every 30 seconds. This gives the renewal
+worker one missed refresh before the lease expires.
 
 Recovery after lease loss is out of scope for this architecture pass.
 

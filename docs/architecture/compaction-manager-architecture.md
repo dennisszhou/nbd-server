@@ -239,7 +239,8 @@ Active export:
 - writes may continue during background compaction;
 - compaction captures `base_root` and target checkpoint `S`;
 - writes that land after `S` remain in WAL overlay state;
-- after publication, the active `ExportReadView` is notified.
+- after publication, the active `ExportReadView` catches up by notification or
+  periodic refresh.
 
 Inactive export:
 
@@ -363,9 +364,9 @@ first lifecycle model.
 
 # Close-Time Compaction
 
-Close-time compaction is an intended feature. On clean close, the server should
-request compaction for that export, usually targeting the current durable WAL
-high watermark.
+Close-time compaction is the first implemented compaction trigger. On clean
+close, the server requests compaction for that export, usually targeting the
+current durable WAL high watermark.
 
 Close does not wait for compaction to finish. Close remains correct if
 close-time compaction fails because acknowledged writes are still durable in

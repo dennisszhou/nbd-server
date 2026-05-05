@@ -62,6 +62,11 @@ This connection registry is not durable metadata and is not the
 `LocalExportRegistry`. `LocalExportRegistry` tracks active exports and serving
 leases; the connection registry tracks socket/task lifecycle.
 
+The current prototype joins the listener task and shuts down background
+compaction, but it does not yet own a full accepted-connection task registry.
+Until that lands, `server.shutdown.completed` should not be read as proof that
+every accepted connection task was joined.
+
 ## NBDConnection
 
 Owns one client connection. It is the transport owner for that socket, not the

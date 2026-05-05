@@ -295,6 +295,11 @@ destination replay from its own WAL on top of the shared committed root.
 `ExportCatalog.delete_export` marks catalog state deleted. It does not inspect
 etcd leases by itself.
 
+The current local prototype lets `nbdcli delete` call this catalog primitive
+directly because the lease/lifecycle layer is not implemented yet. That is a
+prototype shortcut. The target delete path goes through
+`ExportLifecycleManager` before calling the catalog.
+
 Delete flow:
 
 ```text

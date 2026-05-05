@@ -227,10 +227,10 @@ recovery from lease loss is out of scope.
 ## CompactionManager
 
 Turns WAL records into committed tree state, publishes new roots through
-`ExportCatalog`, and notifies active exports that checkpoints advanced.
-Close-time compaction is an intended feature to reduce future WAL replay, but
-close remains correct if compaction fails and acknowledged writes remain durable
-in WAL.
+`ExportCatalog`, and lets active exports catch up to advanced checkpoints by
+notification or refresh. Close-time compaction is an intended feature to reduce
+future WAL replay, but close remains correct if compaction fails and
+acknowledged writes remain durable in WAL.
 
 ## nbdcli
 
@@ -311,30 +311,34 @@ Flush does not need to compact WAL records into committed leaf blobs.
 - Untagged logical read caches are forbidden.
 - Workqueue admission, completion, cancellation, and shutdown are explicit.
 
-# First Prototype Boundary
+# Prototype Boundary
 
-The first implementation should prove the central data-path invariant without
-requiring the full long-term storage system.
+Early local prototypes should prove the central data-path invariant without
+requiring the full long-term storage system or distributed lease machinery.
 
 Include:
 
 - NBD protocol subset;
-- `Export` API;
+- `ExportRuntime` / `ExportEngine` API;
 - conservative `ExportAdmissionCtl`;
+- concurrent export runtime with bounded queue depth;
 - `WalProvider` / `ExportWal` with durable local WAL;
-- `ExportReadView` read serving;
-- local `StorageEngine`;
-- minimal `ExportCatalog`;
-- minimal `ExportLifecycleManager`;
-- minimal serving lease renewal;
+- `WalDurableEngine` read serving from committed COW tree plus retained WAL;
+- local `LocalBlobStore`;
+- SQLite `ExportCatalog` with `exports`, `export_heads`, simple mutable tree,
+  and COW tree metadata;
 - basic `nbdcli` create/list/delete/inspect.
 
 Defer:
 
-- sparse tree compaction;
+- external WAL service;
 - clone/fork;
 - S3/MinIO backend;
 - garbage collection;
+- physical WAL pruning;
+- serving read-view refresh workers;
+- `ExportLifecycleManager`;
+- serving lease renewal;
 - writer fencing;
 - advanced lease protocol hardening;
 - authenticated same-client multi-connection support;
@@ -359,5 +363,5 @@ This architecture is ready to drive roadmap planning when:
 - read-view read-through and checkpoint invalidation responsibilities are
   accepted;
 - the durable/serving source-of-truth distinction is accepted; and
-- the first prototype boundary can be derived without changing the long-term
+- the prototype boundary can be derived without changing the long-term
   component model.

@@ -30,6 +30,14 @@ child pointers, root pointers, checkpoints, and blob references.
 `ExportWal` does not use `StorageEngine`. The WAL has its own replaceable
 backend behind `WalProvider`.
 
+The long-term `StorageEngine` contract is the immutable blobstore contract used
+by `cow_immutable_tree`, compaction, clone, and future S3 storage. The current
+local prototype also has `LocalBlobStore`, which is a lower-level local file
+primitive used by both `simple_mutable_tree` and WAL/COW compaction. Its
+mutable replace operation is valid only for export-private
+`storage_kind = mutable_blob` refs owned by `SimpleMutableTree`; it is not the
+contract for immutable COW blobs or S3-compatible storage.
+
 # API Shape
 
 Conceptual API:

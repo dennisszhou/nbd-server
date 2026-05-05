@@ -40,6 +40,10 @@ It does not store metadata by itself. It coordinates:
 - `ExportLeaseStore` for per-export lifecycle exclusion;
 - `LocalExportRegistry` only after an NBD server has acquired a serving lease.
 
+This is the target open/delete race-prevention boundary. The current local
+prototype has catalog delete and process-local open exclusion, but it does not
+yet implement `ExportLifecycleManager` or `ExportLeaseStore`.
+
 # Lease Model
 
 Open and delete contend on the same per-export lease namespace.

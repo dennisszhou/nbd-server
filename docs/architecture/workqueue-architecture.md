@@ -162,6 +162,12 @@ If the compaction queue is full or shutting down, enqueue failure delays
 cleanup but does not invalidate close or write durability. WAL replay remains
 the recovery path.
 
+The first compaction queue shutdown policy is explicit: stop accepting new
+jobs, let the currently running job finish, drop pending queued jobs, and join
+the worker before manager shutdown completes. Dropping queued compaction work
+is safe because compaction is cleanup/checkpointing, not the write durability
+boundary.
+
 # Invariants
 
 - Queue capacity is bounded.
