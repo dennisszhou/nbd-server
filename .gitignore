@@ -3,6 +3,7 @@
 
 # Local scratch files used by agent and developer workflows.
 .tmp/
+.worktrees/
 
 # Local environment and database files.
 .env
