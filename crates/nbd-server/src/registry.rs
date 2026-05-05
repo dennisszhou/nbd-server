@@ -226,6 +226,14 @@ impl LocalExportRegistry {
                 )
                 .await?,
             ),
+            ExportEngineKind::WalDurable => {
+                return Err(ServerError::Catalog {
+                    message: format!(
+                        "export `{}` uses wal_durable before the WAL engine is wired",
+                        meta.name()
+                    ),
+                });
+            }
         };
         tracing::info!(
             target: target::EXPORT,

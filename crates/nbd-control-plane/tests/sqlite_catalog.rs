@@ -13,6 +13,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
     ),
+    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
 ];
 
 #[tokio::test]
@@ -70,6 +71,29 @@ async fn create_export_initializes_simple_durable_head() {
     assert_eq!(snapshot.export_id(), created.id());
     assert!(snapshot.root_node_id().is_none());
     assert!(snapshot.chunks().is_empty());
+}
+
+#[tokio::test]
+async fn create_export_initializes_wal_durable_head() {
+    let (_runtime, catalog) = migrated_catalog().await;
+
+    let created = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create export");
+
+    assert_eq!(created.engine_kind(), ExportEngineKind::WalDurable);
+    assert_eq!(
+        created.head().layout_kind(),
+        ExportLayoutKind::CowImmutableTree
+    );
+    assert!(created.head().root_node_id().is_none());
+    assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
 }
 
 #[tokio::test]
@@ -142,7 +166,7 @@ async fn migration_does_not_create_export_generations() {
 }
 
 #[tokio::test]
-async fn simple_durable_engine_kind_migration_preserves_existing_exports() {
+async fn durable_engine_kind_migrations_preserve_existing_exports() {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -187,6 +211,40 @@ async fn simple_durable_engine_kind_migration_preserves_existing_exports() {
         durable.head().layout_kind(),
         ExportLayoutKind::SimpleMutableTree,
     );
+
+    sqlx::raw_sql(MIGRATIONS[3])
+        .execute(catalog.pool())
+        .await
+        .expect("apply wal durable engine migration");
+
+    let memory = catalog
+        .inspect_export(InspectExport::new(export_name("disk-memory")))
+        .await
+        .expect("inspect migrated memory export after wal migration");
+    assert_eq!(memory.engine_kind(), ExportEngineKind::Memory);
+    assert_eq!(memory.head().layout_kind(), ExportLayoutKind::MemoryEmpty);
+
+    let durable = catalog
+        .inspect_export(InspectExport::new(export_name("disk-durable")))
+        .await
+        .expect("inspect migrated simple durable export");
+    assert_eq!(durable.engine_kind(), ExportEngineKind::SimpleDurable);
+    assert_eq!(
+        durable.head().layout_kind(),
+        ExportLayoutKind::SimpleMutableTree,
+    );
+
+    let wal = catalog
+        .create_export(create_export_with_engine(
+            "disk-wal",
+            1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create wal durable after migration");
+    assert_eq!(wal.engine_kind(), ExportEngineKind::WalDurable);
+    assert_eq!(wal.head().layout_kind(), ExportLayoutKind::CowImmutableTree);
 }
 
 #[tokio::test]

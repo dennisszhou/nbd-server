@@ -94,6 +94,7 @@ impl ExportCatalog for SQLiteExportCatalog {
             ExportEngineKind::SimpleDurable => {
                 ExportHead::simple_mutable_tree(request.size_bytes())?
             }
+            ExportEngineKind::WalDurable => ExportHead::cow_immutable_tree(request.size_bytes())?,
         };
 
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;

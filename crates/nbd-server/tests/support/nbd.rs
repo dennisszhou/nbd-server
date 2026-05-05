@@ -32,6 +32,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
     ),
+    include_str!(
+        "../../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"
+    ),
 ];
 
 pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -47,6 +50,9 @@ impl EngineProfile {
     };
     pub const SIMPLE_DURABLE: Self = Self {
         kind: ExportEngineKind::SimpleDurable,
+    };
+    pub const WAL_DURABLE: Self = Self {
+        kind: ExportEngineKind::WalDurable,
     };
 
     pub fn kind(self) -> ExportEngineKind {

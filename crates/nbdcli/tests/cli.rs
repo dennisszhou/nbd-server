@@ -11,6 +11,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!(
         "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
     ),
+    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
 ];
 
 #[tokio::test]
@@ -104,6 +105,34 @@ async fn cli_creates_simple_durable_exports() {
     let inspected = json_stdout(&inspect);
     assert_eq!(inspected["engine_kind"], "simple_durable");
     assert_eq!(inspected["head"]["layout_kind"], "simple_mutable_tree");
+    assert!(inspected["head"]["root_node_id"].is_null());
+}
+
+#[tokio::test]
+async fn cli_creates_wal_durable_exports() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+
+    let create = nbdcli(
+        &runtime,
+        &[
+            "create",
+            "disk-wal",
+            "--size",
+            "1048576",
+            "--engine",
+            "wal_durable",
+        ],
+    );
+    assert_success(&create);
+    assert!(stdout(&create).contains("engine=wal_durable"));
+
+    let inspect = nbdcli(&runtime, &["inspect", "disk-wal", "--json"]);
+    assert_success(&inspect);
+    let inspected = json_stdout(&inspect);
+    assert_eq!(inspected["engine_kind"], "wal_durable");
+    assert_eq!(inspected["head"]["layout_kind"], "cow_immutable_tree");
+    assert_eq!(inspected["head"]["checkpoint_wal_seq"], 0);
     assert!(inspected["head"]["root_node_id"].is_null());
 }
 

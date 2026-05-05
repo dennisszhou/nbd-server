@@ -78,6 +78,17 @@ fn export_head_can_represent_simple_mutable_tree() {
 }
 
 #[test]
+fn export_head_can_represent_empty_cow_tree() {
+    let head = ExportHead::cow_immutable_tree(4096).expect("cow tree head");
+
+    assert_eq!(head.layout_kind(), ExportLayoutKind::CowImmutableTree);
+    assert!(head.root_node_id().is_none());
+    assert_eq!(head.size_bytes(), 4096);
+    assert_eq!(head.checkpoint_wal_seq(), WalSeq::zero());
+    assert!(ExportHead::cow_immutable_tree(0).is_err());
+}
+
+#[test]
 fn blob_keys_are_safe_path_components() {
     let key = BlobKey::new("blob-123").expect("valid blob key");
 
@@ -135,11 +146,16 @@ fn export_engine_kind_round_trips_catalog_values() {
         ExportEngineKind::from_str("simple_durable").unwrap(),
         ExportEngineKind::SimpleDurable,
     );
+    assert_eq!(
+        ExportEngineKind::from_str("wal_durable").unwrap(),
+        ExportEngineKind::WalDurable,
+    );
     assert_eq!(ExportEngineKind::Memory.to_string(), "memory");
     assert_eq!(
         ExportEngineKind::SimpleDurable.to_string(),
         "simple_durable",
     );
+    assert_eq!(ExportEngineKind::WalDurable.to_string(), "wal_durable");
     assert!(ExportEngineKind::from_str("durable").is_err());
 }
 
@@ -153,10 +169,18 @@ fn export_layout_kind_round_trips_catalog_values() {
         ExportLayoutKind::from_str("simple_mutable_tree").unwrap(),
         ExportLayoutKind::SimpleMutableTree
     );
+    assert_eq!(
+        ExportLayoutKind::from_str("cow_immutable_tree").unwrap(),
+        ExportLayoutKind::CowImmutableTree
+    );
     assert_eq!(ExportLayoutKind::MemoryEmpty.to_string(), "memory_empty");
     assert_eq!(
         ExportLayoutKind::SimpleMutableTree.to_string(),
         "simple_mutable_tree"
+    );
+    assert_eq!(
+        ExportLayoutKind::CowImmutableTree.to_string(),
+        "cow_immutable_tree"
     );
     assert!(ExportLayoutKind::from_str("generation").is_err());
 }

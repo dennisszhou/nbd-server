@@ -42,6 +42,7 @@ pub enum ExportState {
 pub enum ExportEngineKind {
     Memory,
     SimpleDurable,
+    WalDurable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ pub enum ExportEngineKind {
 pub enum ExportLayoutKind {
     MemoryEmpty,
     SimpleMutableTree,
+    CowImmutableTree,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +263,15 @@ impl ExportHead {
     pub fn simple_mutable_tree(size_bytes: u64) -> Result<Self> {
         Self::new(
             ExportLayoutKind::SimpleMutableTree,
+            None,
+            size_bytes,
+            WalSeq::zero(),
+        )
+    }
+
+    pub fn cow_immutable_tree(size_bytes: u64) -> Result<Self> {
+        Self::new(
+            ExportLayoutKind::CowImmutableTree,
             None,
             size_bytes,
             WalSeq::zero(),
@@ -526,6 +537,7 @@ impl FromStr for ExportEngineKind {
         match engine_kind {
             "memory" => Ok(Self::Memory),
             "simple_durable" => Ok(Self::SimpleDurable),
+            "wal_durable" => Ok(Self::WalDurable),
             engine_kind => Err(CatalogError::InvalidExportEngineKind {
                 engine_kind: engine_kind.to_owned(),
             }),
@@ -540,6 +552,7 @@ impl FromStr for ExportLayoutKind {
         match layout_kind {
             "memory_empty" => Ok(Self::MemoryEmpty),
             "simple_mutable_tree" => Ok(Self::SimpleMutableTree),
+            "cow_immutable_tree" => Ok(Self::CowImmutableTree),
             layout_kind => Err(CatalogError::invalid_field(
                 "layout_kind",
                 format!("invalid export layout kind `{layout_kind}`"),
@@ -592,6 +605,7 @@ impl fmt::Display for ExportEngineKind {
         match self {
             Self::Memory => f.write_str("memory"),
             Self::SimpleDurable => f.write_str("simple_durable"),
+            Self::WalDurable => f.write_str("wal_durable"),
         }
     }
 }
@@ -601,6 +615,7 @@ impl fmt::Display for ExportLayoutKind {
         match self {
             Self::MemoryEmpty => f.write_str("memory_empty"),
             Self::SimpleMutableTree => f.write_str("simple_mutable_tree"),
+            Self::CowImmutableTree => f.write_str("cow_immutable_tree"),
         }
     }
 }
