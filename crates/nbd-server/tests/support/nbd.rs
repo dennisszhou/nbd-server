@@ -1,7 +1,7 @@
 use nbd_config::{ConfigSource, NbdConfig, ServerConfig};
 use nbd_control_plane::{
-    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportMeta,
-    ExportName, SQLiteExportCatalog,
+    CatalogUrl, CloneExport, CloneExportResult, CreateExport, DeleteExport, ExportCatalog,
+    ExportEngineKind, ExportMeta, ExportName, SQLiteExportCatalog,
 };
 use nbd_protocol::constants::{
     IHAVEOPT_MAGIC, INIT_PASSWD, NBD_FLAG_FIXED_NEWSTYLE, NBD_FLAG_NO_ZEROES, NBD_INFO_EXPORT,
@@ -95,6 +95,20 @@ impl ServerFixture {
         Ok(self
             .catalog
             .delete_export(DeleteExport::new(export_name(name)))
+            .await?)
+    }
+
+    pub async fn clone_export(
+        &self,
+        source: &str,
+        destination: &str,
+    ) -> TestResult<CloneExportResult> {
+        Ok(self
+            .catalog
+            .clone_export(CloneExport::new(
+                export_name(source),
+                export_name(destination),
+            )?)
             .await?)
     }
 

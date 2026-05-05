@@ -1,8 +1,8 @@
 //! SQLite implementation of the export catalog.
 
 use crate::{
-    BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex, CowChunkRef,
-    CowTreeMetadataStore, CowTreeSnapshot, CreateExport, DeleteExport, ExportCatalog,
+    BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport, CloneExportResult,
+    CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, DeleteExport, ExportCatalog,
     ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta,
     ExportName, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
     PublishCompactionOutcome, Result, SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot,
@@ -187,6 +187,79 @@ impl ExportCatalog for SQLiteExportCatalog {
             now,
             None,
         )
+    }
+
+    async fn clone_export(&self, request: CloneExport) -> Result<CloneExportResult> {
+        let destination_id = ExportId::new(Uuid::new_v4().to_string())?;
+        let now = current_timestamp()?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let source = fetch_export_meta_by_name_in_tx(&mut tx, request.source()).await?;
+        if source.state() == ExportState::Deleted {
+            return Err(CatalogError::ExportDeleted {
+                name: request.source().clone(),
+            });
+        }
+        if source.engine_kind() != ExportEngineKind::WalDurable {
+            return Err(CatalogError::invalid_field(
+                "source",
+                "clone requires a wal_durable source",
+            ));
+        }
+        if source.head().layout_kind() != ExportLayoutKind::CowImmutableTree {
+            return Err(CatalogError::invalid_field(
+                "source",
+                "clone requires a cow_immutable_tree source head",
+            ));
+        }
+        let source_root = source.head().root_node_id().ok_or_else(|| {
+            CatalogError::invalid_field("source", "source committed snapshot is empty")
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO exports (
+              id, name, engine_kind, block_size, state, created_at, updated_at
+            )
+            VALUES (?, ?, 'wal_durable', ?, 'active', ?, ?)
+            "#,
+        )
+        .bind(destination_id.as_str())
+        .bind(request.destination().as_str())
+        .bind(u64_to_i64("block_size", source.block_size())?)
+        .bind(now.as_str())
+        .bind(now.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            if is_unique_violation(&error) {
+                CatalogError::ExportAlreadyExists {
+                    name: request.destination().clone(),
+                }
+            } else {
+                map_sqlx_error(error)
+            }
+        })?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO export_heads (
+              export_id, layout_kind, root_node_id, size_bytes,
+              checkpoint_wal_seq, updated_at
+            )
+            VALUES (?, 'cow_immutable_tree', ?, ?, 0, ?)
+            "#,
+        )
+        .bind(destination_id.as_str())
+        .bind(source_root.as_str())
+        .bind(u64_to_i64("size_bytes", source.size_bytes())?)
+        .bind(now.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let destination = fetch_export_meta_by_id_in_tx(&mut tx, &destination_id).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(CloneExportResult::new(source, destination))
     }
 
     async fn delete_export(&self, request: DeleteExport) -> Result<()> {
@@ -544,8 +617,14 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
         .await
         .map_err(map_sqlx_error)?;
 
+        let reusable_leaf_nodes = load_reusable_cow_leaf_nodes_in_tx(
+            &mut tx,
+            request.export_id(),
+            request.expected_base(),
+        )
+        .await?;
+
         for chunk in request.chunks() {
-            let leaf = NodeId::new(Uuid::new_v4().to_string())?;
             let span_start = chunk
                 .chunk_index()
                 .get()
@@ -556,7 +635,31 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
                         format!("chunk {} overflows byte offset", chunk.chunk_index()),
                     )
                 })?;
+            let slot = u64_to_i64("chunk_index", chunk.chunk_index().get())?;
 
+            if let Some(existing) = reusable_leaf_nodes.get(&chunk.chunk_index()) {
+                if existing.blob_key.as_str() == chunk.blob_key().as_str()
+                    && existing.len_bytes == chunk.len_bytes()
+                {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO tree_edges (
+                          parent_node_id, slot, child_node_id
+                        )
+                        VALUES (?, ?, ?)
+                        "#,
+                    )
+                    .bind(root.as_str())
+                    .bind(slot)
+                    .bind(existing.node_id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(map_sqlx_error)?;
+                    continue;
+                }
+            }
+
+            let leaf = NodeId::new(Uuid::new_v4().to_string())?;
             sqlx::query(
                 r#"
                 INSERT INTO tree_nodes (
@@ -598,7 +701,7 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
                 "#,
             )
             .bind(root.as_str())
-            .bind(u64_to_i64("chunk_index", chunk.chunk_index().get())?)
+            .bind(slot)
             .bind(leaf.as_str())
             .execute(&mut *tx)
             .await
@@ -743,6 +846,88 @@ async fn load_simple_tree_snapshot(
     }
 
     SimpleTreeSnapshot::new(export_id.clone(), size_bytes, root_node_id, chunks)
+}
+
+struct ReusableCowLeafNode {
+    node_id: NodeId,
+    blob_key: BlobKey,
+    len_bytes: u64,
+}
+
+async fn load_reusable_cow_leaf_nodes_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    export_id: &ExportId,
+    head: &ExportHead,
+) -> Result<BTreeMap<ChunkIndex, ReusableCowLeafNode>> {
+    let Some(root_node_id) = head.root_node_id() else {
+        return Ok(BTreeMap::new());
+    };
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          e.slot,
+          e.child_node_id,
+          n.layout_kind,
+          n.owner_export_id,
+          n.kind,
+          n.level,
+          r.storage_kind,
+          r.storage_key,
+          r.len_bytes
+        FROM tree_edges e
+        JOIN tree_nodes n
+          ON n.id = e.child_node_id
+        LEFT JOIN tree_leaf_refs r
+          ON r.node_id = n.id
+        WHERE e.parent_node_id = ?
+        ORDER BY e.slot ASC
+        "#,
+    )
+    .bind(root_node_id.as_str())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    let mut nodes = BTreeMap::new();
+    for row in rows {
+        let slot = i64_to_u64("chunk_index", row.try_get("slot").map_err(map_sqlx_error)?)?;
+        let chunk_index = ChunkIndex::new(slot);
+        validate_tree_chunk_in_export(chunk_index, head.size_bytes())?;
+        validate_cow_leaf_row(&row, export_id, chunk_index)?;
+        let child_node_id = NodeId::new(
+            row.try_get::<String, _>("child_node_id")
+                .map_err(map_sqlx_error)?,
+        )?;
+        let key = row
+            .try_get::<Option<String>, _>("storage_key")
+            .map_err(map_sqlx_error)?
+            .ok_or_else(|| {
+                CatalogError::database(format!(
+                    "cow tree leaf for chunk {chunk_index} is missing storage key"
+                ))
+            })?;
+        let len_bytes = i64_to_u64(
+            "len_bytes",
+            row.try_get::<Option<i64>, _>("len_bytes")
+                .map_err(map_sqlx_error)?
+                .ok_or_else(|| {
+                    CatalogError::database(format!(
+                        "cow tree leaf for chunk {chunk_index} is missing length"
+                    ))
+                })?,
+        )?;
+        nodes.insert(
+            chunk_index,
+            ReusableCowLeafNode {
+                node_id: child_node_id,
+                blob_key: BlobKey::new(key)?,
+                len_bytes,
+            },
+        );
+    }
+
+    Ok(nodes)
 }
 
 async fn load_cow_tree_snapshot(
@@ -1134,6 +1319,40 @@ async fn fetch_export_meta_by_id_in_tx(
     .await
     .map_err(map_sqlx_error)?
     .ok_or_else(|| CatalogError::database(format!("export `{export_id}` not found")))?;
+
+    row_to_export_meta(&row)
+}
+
+async fn fetch_export_meta_by_name_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    name: &ExportName,
+) -> Result<ExportMeta> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+          e.id,
+          e.name,
+          e.block_size,
+          e.engine_kind,
+          e.state,
+          e.created_at,
+          e.updated_at,
+          e.deleted_at,
+          h.layout_kind,
+          h.root_node_id,
+          h.size_bytes,
+          h.checkpoint_wal_seq
+        FROM exports e
+        JOIN export_heads h
+          ON h.export_id = e.id
+        WHERE e.name = ?
+        "#,
+    )
+    .bind(name.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?
+    .ok_or_else(|| CatalogError::ExportNotFound { name: name.clone() })?;
 
     row_to_export_meta(&row)
 }

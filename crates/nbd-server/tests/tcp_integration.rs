@@ -842,6 +842,103 @@ async fn wal_durable_protocol_compacts_on_disconnect_and_restarts() {
         .expect("shutdown restarted server");
 }
 
+#[tokio::test]
+async fn wal_durable_protocol_clones_committed_snapshot() {
+    let fixture = ServerFixture::new(EngineProfile::WAL_DURABLE)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("source", 4096, 4096)
+        .await
+        .expect("create source export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut source = NbdClient::connect(server.addr(), "source")
+        .await
+        .expect("connect source");
+    source.write(0, b"source0").await.expect("write head");
+    source.write(1024, b"shared").await.expect("write tail");
+    source.flush().await.expect("flush source");
+    source.disconnect().await.expect("disconnect source");
+    wait_for_compacted_head(&fixture, "source", WalSeq::new(2)).await;
+
+    let cloned = fixture
+        .clone_export("source", "clone")
+        .await
+        .expect("clone export");
+    assert_ne!(cloned.source().id(), cloned.destination().id());
+    assert_eq!(
+        cloned.destination().head().root_node_id(),
+        cloned.source().head().root_node_id(),
+    );
+    assert_eq!(
+        cloned.destination().head().checkpoint_wal_seq(),
+        WalSeq::zero(),
+    );
+
+    let mut clone = NbdClient::connect(server.addr(), "clone")
+        .await
+        .expect("connect clone");
+    assert_eq!(
+        clone.read(0, 7).await.expect("read cloned head"),
+        b"source0".to_vec(),
+    );
+    assert_eq!(
+        clone.read(1024, 6).await.expect("read cloned tail"),
+        b"shared".to_vec(),
+    );
+    clone.write(0, b"clone00").await.expect("write clone");
+    clone.flush().await.expect("flush clone");
+    assert_eq!(
+        clone.read(0, 7).await.expect("read clone override"),
+        b"clone00".to_vec(),
+    );
+    clone.disconnect().await.expect("disconnect clone");
+    wait_for_compacted_head(&fixture, "clone", WalSeq::new(1)).await;
+
+    let source_after = fixture
+        .inspect_export("source")
+        .await
+        .expect("inspect source");
+    let clone_after = fixture
+        .inspect_export("clone")
+        .await
+        .expect("inspect clone");
+    assert_ne!(
+        source_after.head().root_node_id(),
+        clone_after.head().root_node_id(),
+    );
+    assert_eq!(source_after.head().checkpoint_wal_seq(), WalSeq::new(2));
+    assert_eq!(clone_after.head().checkpoint_wal_seq(), WalSeq::new(1));
+
+    let mut source = NbdClient::connect(server.addr(), "source")
+        .await
+        .expect("reconnect source");
+    let mut clone = NbdClient::connect(server.addr(), "clone")
+        .await
+        .expect("reconnect clone");
+    assert_eq!(
+        source.read(0, 7).await.expect("read source head"),
+        b"source0".to_vec(),
+    );
+    assert_eq!(
+        clone.read(0, 7).await.expect("read clone head"),
+        b"clone00".to_vec(),
+    );
+    assert_eq!(
+        source.read(1024, 6).await.expect("read source shared"),
+        b"shared".to_vec(),
+    );
+    assert_eq!(
+        clone.read(1024, 6).await.expect("read clone shared"),
+        b"shared".to_vec(),
+    );
+
+    source.disconnect().await.expect("disconnect source");
+    clone.disconnect().await.expect("disconnect clone");
+    server.shutdown().await.expect("shutdown server");
+}
+
 async fn wait_for_compacted_head(fixture: &ServerFixture, name: &str, checkpoint: WalSeq) {
     timeout(Duration::from_secs(5), async {
         loop {

@@ -1,10 +1,12 @@
 use nbd_control_plane::{
-    BlobKey, CatalogError, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CreateExport,
-    DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName, ExportState,
-    InspectExport, ListExports, PublishCompaction, PublishCompactionOutcome, SQLiteExportCatalog,
-    SimpleChunkRef, SimpleTreeMetadataStore, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    BlobKey, CatalogError, CatalogUrl, ChunkIndex, CloneExport, CowChunkRef, CowTreeMetadataStore,
+    CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportMeta,
+    ExportName, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+    PublishCompactionOutcome, SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore, WalSeq,
+    SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 use nbd_test_support::TestRuntime;
+use sqlx::Row;
 
 const MIGRATIONS: &[&str] = &[
     include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
@@ -675,6 +677,214 @@ async fn cow_tree_allows_shared_immutable_root() {
 }
 
 #[tokio::test]
+async fn clone_export_copies_root_and_reuses_unchanged_nodes() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let source = catalog
+        .create_export(create_export_with_engine(
+            "source",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create source export");
+    let source_zero = cow_chunk(0, "source-zero");
+    let source_one = cow_chunk(1, "source-one");
+    let source = publish_cow_root(
+        &catalog,
+        &source,
+        4,
+        vec![source_zero.clone(), source_one.clone()],
+    )
+    .await;
+    let source_root = source.head().root_node_id().expect("source root");
+
+    let cloned = catalog
+        .clone_export(
+            CloneExport::new(export_name("source"), export_name("destination"))
+                .expect("clone request"),
+        )
+        .await
+        .expect("clone export");
+    let destination = cloned.destination();
+    assert_eq!(cloned.source().id(), source.id());
+    assert_ne!(destination.id(), source.id());
+    assert_eq!(destination.engine_kind(), ExportEngineKind::WalDurable);
+    assert_eq!(
+        destination.head().layout_kind(),
+        ExportLayoutKind::CowImmutableTree
+    );
+    assert_eq!(destination.head().root_node_id(), Some(source_root));
+    assert_eq!(destination.head().checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(destination.size_bytes(), source.size_bytes());
+    assert_eq!(destination.block_size(), source.block_size());
+
+    let child_zero = cow_chunk(0, "child-zero");
+    let published_child = catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                destination.id().clone(),
+                destination.head().clone(),
+                WalSeq::new(1),
+                vec![child_zero.clone(), source_one.clone()],
+            )
+            .expect("publish child request"),
+        )
+        .await
+        .expect("publish child compaction")
+        .into_meta();
+    let child_root = published_child.head().root_node_id().expect("child root");
+    assert_ne!(child_root, source_root);
+
+    assert_ne!(
+        cow_child_node(&catalog, source_root, 0).await,
+        cow_child_node(&catalog, child_root, 0).await,
+    );
+    assert_eq!(
+        cow_child_node(&catalog, source_root, 1).await,
+        cow_child_node(&catalog, child_root, 1).await,
+    );
+
+    let source_snapshot = catalog
+        .load_cow_tree(source.id())
+        .await
+        .expect("load source tree");
+    let destination_snapshot = catalog
+        .load_cow_tree(destination.id())
+        .await
+        .expect("load destination tree");
+    assert_eq!(
+        source_snapshot.chunk(ChunkIndex::new(0)),
+        Some(&source_zero)
+    );
+    assert_eq!(
+        destination_snapshot.chunk(ChunkIndex::new(0)),
+        Some(&child_zero)
+    );
+    assert_eq!(
+        source_snapshot.chunk(ChunkIndex::new(1)),
+        destination_snapshot.chunk(ChunkIndex::new(1)),
+    );
+}
+
+#[tokio::test]
+async fn clone_export_rejects_empty_cow_source() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    catalog
+        .create_export(create_export_with_engine(
+            "empty",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create empty source");
+
+    let error = catalog
+        .clone_export(
+            CloneExport::new(export_name("empty"), export_name("destination"))
+                .expect("clone request"),
+        )
+        .await
+        .expect_err("empty source must be rejected");
+    assert!(error
+        .to_string()
+        .contains("source committed snapshot is empty"));
+}
+
+#[tokio::test]
+async fn clone_export_rejects_invalid_sources_and_destinations() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let missing = catalog
+        .clone_export(
+            CloneExport::new(export_name("missing"), export_name("destination"))
+                .expect("clone request"),
+        )
+        .await
+        .expect_err("missing source should fail");
+    assert!(matches!(missing, CatalogError::ExportNotFound { .. }));
+
+    catalog
+        .create_export(create_export("memory", TREE_CHUNK_BYTES, 4096))
+        .await
+        .expect("create memory source");
+    let memory = catalog
+        .clone_export(
+            CloneExport::new(export_name("memory"), export_name("memory-clone"))
+                .expect("clone request"),
+        )
+        .await
+        .expect_err("memory source should fail");
+    assert!(memory.to_string().contains("wal_durable"));
+
+    catalog
+        .create_export(create_export_with_engine(
+            "simple",
+            TREE_CHUNK_BYTES,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create simple source");
+    let simple = catalog
+        .clone_export(
+            CloneExport::new(export_name("simple"), export_name("simple-clone"))
+                .expect("clone request"),
+        )
+        .await
+        .expect_err("simple source should fail");
+    assert!(simple.to_string().contains("wal_durable"));
+
+    let _deleted = catalog
+        .create_export(create_export_with_engine(
+            "deleted",
+            TREE_CHUNK_BYTES,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create deleted source");
+    catalog
+        .delete_export(DeleteExport::new(export_name("deleted")))
+        .await
+        .expect("delete source");
+    let deleted_error = catalog
+        .clone_export(
+            CloneExport::new(export_name("deleted"), export_name("deleted-clone"))
+                .expect("clone request"),
+        )
+        .await
+        .expect_err("deleted source should fail");
+    assert!(matches!(deleted_error, CatalogError::ExportDeleted { .. }));
+
+    let source = catalog
+        .create_export(create_export_with_engine(
+            "dupe-source",
+            TREE_CHUNK_BYTES,
+            4096,
+            ExportEngineKind::WalDurable,
+        ))
+        .await
+        .expect("create duplicate source");
+    publish_cow_root(&catalog, &source, 1, vec![cow_chunk(0, "dupe-source")]).await;
+    catalog
+        .create_export(create_export("existing", TREE_CHUNK_BYTES, 4096))
+        .await
+        .expect("create existing destination");
+    let duplicate = catalog
+        .clone_export(
+            CloneExport::new(export_name("dupe-source"), export_name("existing"))
+                .expect("clone request"),
+        )
+        .await
+        .expect_err("duplicate destination should fail");
+    assert!(matches!(
+        duplicate,
+        CatalogError::ExportAlreadyExists { .. }
+    ));
+}
+
+#[tokio::test]
 async fn cow_tree_publish_is_idempotent_for_covered_checkpoint() {
     let (_runtime, catalog) = migrated_catalog().await;
     let created = catalog
@@ -927,6 +1137,48 @@ async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
 
 fn export_name(name: &str) -> ExportName {
     ExportName::new(name).expect("valid export name")
+}
+
+async fn publish_cow_root(
+    catalog: &SQLiteExportCatalog,
+    export: &ExportMeta,
+    checkpoint: u64,
+    chunks: Vec<CowChunkRef>,
+) -> ExportMeta {
+    catalog
+        .publish_compaction(
+            PublishCompaction::new(
+                export.id().clone(),
+                export.head().clone(),
+                WalSeq::new(checkpoint),
+                chunks,
+            )
+            .expect("publish request"),
+        )
+        .await
+        .expect("publish compaction")
+        .into_meta()
+}
+
+async fn cow_child_node(catalog: &SQLiteExportCatalog, root: &NodeId, slot: u64) -> NodeId {
+    let row = sqlx::query(
+        r#"
+        SELECT child_node_id
+        FROM tree_edges
+        WHERE parent_node_id = ? AND slot = ?
+        "#,
+    )
+    .bind(root.as_str())
+    .bind(slot as i64)
+    .fetch_one(catalog.pool())
+    .await
+    .expect("load child edge");
+
+    NodeId::new(
+        row.try_get::<String, _>("child_node_id")
+            .expect("child node id"),
+    )
+    .expect("valid child node id")
 }
 
 fn create_export(name: &str, size_bytes: u64, block_size: u64) -> CreateExport {

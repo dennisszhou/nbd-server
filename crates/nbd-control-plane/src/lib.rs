@@ -10,11 +10,11 @@ pub mod sqlite;
 pub use catalog_url::{CatalogProvider, CatalogUrl};
 pub use error::{CatalogError, Result};
 pub use model::{
-    BlobKey, ChunkIndex, CowChunkRef, CowTreeSnapshot, CreateExport, DeleteExport,
-    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta,
-    ExportName, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-    PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot, Timestamp, WalSeq,
-    SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    BlobKey, ChunkIndex, CloneExport, CloneExportResult, CowChunkRef, CowTreeSnapshot,
+    CreateExport, DeleteExport, ExportDescriptor, ExportEngineKind, ExportHead, ExportId,
+    ExportLayoutKind, ExportMeta, ExportName, ExportState, InspectExport, ListExports, NodeId,
+    PublishCompaction, PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot, Timestamp,
+    WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 pub use sqlite::SQLiteExportCatalog;
 use std::sync::Arc;
@@ -23,6 +23,8 @@ use std::sync::Arc;
 #[async_trait::async_trait]
 pub trait ExportCatalog: Send + Sync {
     async fn create_export(&self, request: CreateExport) -> Result<ExportMeta>;
+
+    async fn clone_export(&self, request: CloneExport) -> Result<CloneExportResult>;
 
     async fn delete_export(&self, request: DeleteExport) -> Result<()>;
 

@@ -129,6 +129,18 @@ pub struct CreateExport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloneExport {
+    source: ExportName,
+    destination: ExportName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloneExportResult {
+    source: ExportMeta,
+    destination: ExportMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteExport {
     name: ExportName,
 }
@@ -694,6 +706,47 @@ impl CreateExport {
 
     pub fn engine_kind(&self) -> ExportEngineKind {
         self.engine_kind
+    }
+}
+
+impl CloneExport {
+    pub fn new(source: ExportName, destination: ExportName) -> Result<Self> {
+        if source == destination {
+            return Err(CatalogError::invalid_field(
+                "destination",
+                "clone destination must differ from source",
+            ));
+        }
+
+        Ok(Self {
+            source,
+            destination,
+        })
+    }
+
+    pub fn source(&self) -> &ExportName {
+        &self.source
+    }
+
+    pub fn destination(&self) -> &ExportName {
+        &self.destination
+    }
+}
+
+impl CloneExportResult {
+    pub fn new(source: ExportMeta, destination: ExportMeta) -> Self {
+        Self {
+            source,
+            destination,
+        }
+    }
+
+    pub fn source(&self) -> &ExportMeta {
+        &self.source
+    }
+
+    pub fn destination(&self) -> &ExportMeta {
+        &self.destination
     }
 }
 

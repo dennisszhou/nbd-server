@@ -1,7 +1,8 @@
 use nbd_control_plane::{
-    BlobKey, CatalogProvider, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeSnapshot, CreateExport,
-    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName, ExportState, ListExports,
-    NodeId, PublishCompaction, SimpleChunkRef, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    BlobKey, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport, CowChunkRef, CowTreeSnapshot,
+    CreateExport, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
+    ExportState, ListExports, NodeId, PublishCompaction, SimpleChunkRef, WalSeq,
+    SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -46,6 +47,23 @@ fn create_export_validates_basic_domain_values() {
         4096,
         0,
         ExportEngineKind::Memory,
+    )
+    .is_err());
+}
+
+#[test]
+fn clone_export_validates_distinct_names() {
+    let request = CloneExport::new(
+        ExportName::new("source").expect("source name"),
+        ExportName::new("destination").expect("destination name"),
+    )
+    .expect("valid clone request");
+
+    assert_eq!(request.source().as_str(), "source");
+    assert_eq!(request.destination().as_str(), "destination");
+    assert!(CloneExport::new(
+        ExportName::new("same").expect("source name"),
+        ExportName::new("same").expect("destination name"),
     )
     .is_err());
 }
