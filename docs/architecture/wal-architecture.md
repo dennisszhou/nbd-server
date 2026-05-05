@@ -12,22 +12,25 @@ semantics without forcing immediate compaction into committed tree blobs.
 
 Define a WAL model where:
 
-- WAL sequence numbers are per export and durable;
+- WAL sequence numbers are scoped to one WAL domain and durable;
 - writes are acknowledged only after their WAL record is durable;
 - read-view visibility follows WAL durability;
 - flush waits for prior writes to become WAL-durable and read-view-visible;
 - replay rebuilds `ExportReadView` after restart;
-- compaction can later checkpoint a global WAL prefix into committed tree state;
-- the first implementation can use a local per-export WAL;
+- compaction can later checkpoint a WAL domain prefix into committed tree
+  state;
+- the first implementation can use a local WAL domain backed by `export_id`;
 - the long-term implementation can replace the local WAL with a WAL service
   behind the same API.
 
 # Ownership
 
-`WALManager` owns the export-facing WAL contract. It assigns WAL sequence
-numbers when using the local WAL implementation, and it delegates sequence
-assignment to a remote WAL service if that service becomes the durable
-sequencer later.
+`WalProvider` is the replaceable WAL service facade. It opens an `ExportWal`
+handle for one `WalDomain`. `ExportWal` owns the request-facing WAL contract
+for that domain: append, bounds, replay, and prefix pruning. It assigns WAL
+sequence numbers when using the local WAL implementation, and it can delegate
+sequence assignment to a remote WAL service if that service becomes the
+durable sequencer later.
 
 `ExportAdmissionCtl` may assign volatile admission tickets for scheduling, but
 those tickets are not durable and are not used for replay.
@@ -37,44 +40,53 @@ Conceptual API:
 ```rust
 struct WalRecord {
     seq: WalSeq,
-    export_id: ExportId,
     range: ByteRange,
-    data_ref: WalDataRef,
-    checksum: Checksum,
+    data: Vec<u8>,
 }
 
-impl WALManager {
-    async fn append_write(&self, range: ByteRange, data: Bytes)
-        -> Result<WalRecord>;
+struct WalDomain {
+    export_id: ExportId,
+}
 
-    async fn wait_durable_through(&self, seq: WalSeq) -> Result<()>;
+struct OpenWal {
+    domain: WalDomain,
+}
 
-    async fn replay_from(&self, checkpoint: Option<WalSeq>)
-        -> Result<WalReplayStream>;
+trait WalProvider {
+    async fn open_export(&self, request: OpenWal) -> Result<ExportWalHandle>;
+}
+
+trait ExportWal {
+    async fn append(&self, request: WalRequest) -> Result<WalRecord>;
+
+    async fn bounds(&self) -> Result<WalBounds>;
+
+    async fn replay_after(&self, after: WalSeq) -> Result<WalReplay>;
+
+    async fn replay_range(
+        &self,
+        after: WalSeq,
+        through: WalSeq,
+    ) -> Result<WalReplay>;
+
+    async fn prune_through(&self, seq: WalSeq) -> Result<WalPruneResult>;
 }
 ```
 
-`WALManager` should be backed by a replaceable lower-level WAL backend:
+The first provider is `LocalWalProvider`, which returns `LocalExportWal`
+handles. The long-term provider can be remote without changing
+`WalDurableEngine`.
 
-```rust
-trait WalStore {
-    async fn append(&self, request: WalAppend) -> Result<DurableWalRecord>;
-
-    async fn scan_from(&self, after: Option<WalSeq>)
-        -> Result<WalReplayStream>;
-
-    async fn durable_high_watermark(&self) -> Result<Option<WalSeq>>;
-}
-```
-
-The first backend is `LocalWalStore`. The long-term backend can be
-`RemoteWalServiceStore` without changing `Export`.
+`WalDomain` is a facade over the WAL namespace. The first local implementation
+stores it as `export_id`. A future WAL service can change the domain internals
+to `(owner, export_name)` when auth/client identity exists, without changing
+`WalDurableEngine`.
 
 # Backend Strategy
 
-## LocalWalStore
+## LocalWalProvider
 
-The initial WAL backend is local and per export.
+The initial WAL backend is local and keyed by `export_id`.
 
 Responsibilities:
 
@@ -87,26 +99,29 @@ Responsibilities:
 Local WAL durability is enough for the first prototype. It is not the final
 cross-machine durability model.
 
-## RemoteWalServiceStore
+## RemoteWalProvider
 
 The long-term target is a WAL service.
 
 Responsibilities:
 
-- provide durable per-export sequencing;
+- provide durable domain sequencing;
 - persist records to infrastructure whose durability is independent of the NBD
   server process;
 - expose replay from a sequence boundary;
-- provide durability acknowledgements that preserve the same `WALManager`
+- provide durability acknowledgements that preserve the same `ExportWal`
   contract.
 
-The WAL service should replace the backend implementation, not the `Export`
+The WAL service should replace `WalProvider` / `ExportWal`, not the NBD
 read/write/flush contract.
 
-## Per-Export Scope
+## Domain Scope
 
-The WAL is scoped per export. This keeps replay, compaction checkpoints, local
-file lifetimes, and delete/GC rules easier to reason about.
+The WAL is scoped per `WalDomain`. This keeps replay, compaction checkpoints,
+local file lifetimes, and delete/GC rules easier to reason about.
+
+The v1 domain is `export_id`, which is already stable catalog identity. The
+facade keeps the service boundary ready for a later `(owner, export_name)` key.
 
 Cross-export ordering is not part of the WAL contract.
 
@@ -115,7 +130,7 @@ Cross-export ordering is not part of the WAL contract.
 ```text
 Export.write(range, data)
   -> acquire write admission permit
-  -> WALManager.append_write(range, data)
+  -> ExportWal.append(WalRequest)
   -> apply durable WalRecord to ExportReadView
   -> reply success
 ```
@@ -136,8 +151,7 @@ Export.flush()
 ```
 
 For a conservative first implementation, the flush admission permit can act as
-the barrier. Later, `wait_durable_through(seq)` can support more concurrent
-write scheduling.
+the barrier.
 
 # Replay
 
@@ -154,23 +168,23 @@ load export metadata and checkpoint
 Replay must tolerate a final partial or corrupt record by rejecting it and
 keeping only verified durable records.
 
-With `LocalWalStore`, startup scans the local export WAL. With a remote WAL
-service, startup asks the service for records after `checkpoint_wal_seq`. Both
-paths produce the same ordered `WalReplayStream`.
+With `LocalExportWal`, startup scans the local per-export WAL. With a remote
+WAL service, startup asks the service for records after `checkpoint_wal_seq`.
+Both paths produce the same ordered `WalReplay`.
 
 # Compaction Checkpoints
 
-Compaction consumes a global WAL sequence prefix and publishes committed tree
+Compaction consumes a WAL domain sequence prefix and publishes committed tree
 state.
 
 After catalog publication succeeds:
 
 ```text
-checkpoint.compacted_through = wal_seq
+export_heads.checkpoint_wal_seq = wal_seq
 ```
 
 The published root must represent every WAL record with sequence
-`<= checkpoint.compacted_through`. WAL records at or below the checkpoint
+`<= export_heads.checkpoint_wal_seq`. WAL records at or below the checkpoint
 remain needed until active read views have installed the checkpoint and GC
 decides they are unreachable.
 
@@ -234,7 +248,7 @@ on bounded serving staleness and reasonably correct cleanup clocks.
 # ReadView Interaction
 
 `ExportReadView` is the single in-process owner of materialized WAL overlay
-state for an active export. `WALManager` appends and replays durable records,
+state for an active export. `ExportWal` appends and replays durable records,
 but request-path reads consult the read view.
 
 Write flow:
@@ -262,17 +276,17 @@ segment is deleted.
 
 # Invariants
 
-- `WALManager` assigns durable sequence numbers.
-- If a remote WAL service owns sequencing later, `WALManager` preserves the
-  export-facing sequencing contract while delegating assignment to the service.
-- WAL sequence is scoped per export.
+- `ExportWal` assigns durable sequence numbers for one `WalDomain`.
+- If a remote WAL service owns sequencing later, `ExportWal` preserves the
+  domain sequencing contract while delegating assignment to the service.
+- WAL sequence is scoped per `WalDomain`.
 - A write response implies the corresponding WAL record is durable.
 - Read-view apply happens only after WAL append succeeds.
 - Replay applies records in WAL sequence order.
-- Checkpoints advance monotonically as a global WAL prefix.
+- Checkpoints advance monotonically as a WAL domain prefix.
 - WAL truncation or deletion is a GC decision, not a write-path side effect.
-- `Export` depends on `WALManager`, not on a specific local or remote WAL
-  backend.
+- `WalDurableEngine` depends on `ExportWal`, not on a specific local or remote
+  WAL backend.
 - Pruning requires a published checkpoint that represents the WAL records being
   pruned.
 - Time-based pruning requires serving read views to refresh or close before
