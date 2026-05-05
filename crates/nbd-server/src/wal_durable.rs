@@ -1,5 +1,6 @@
 use crate::{
     observability::{self, event, target},
+    tree_reader::TreeReader,
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
     ExportWalHandle, LocalBlobStore, Result, ServerError, WalRecord, WalRequest,
@@ -47,7 +48,7 @@ enum RootBacking {
 /// Materialized read view for one open WAL durable export.
 pub struct ExportReadView {
     state: RwLock<ExportReadViewState>,
-    backing: Arc<dyn BackingReader>,
+    tree_reader: Arc<dyn TreeReader<RootSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,16 +63,11 @@ struct WalReplaySummary {
     replayed_through_wal_seq: WalSeq,
 }
 
-#[async_trait::async_trait]
-trait BackingReader: Send + Sync {
-    async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>>;
-}
+#[derive(Debug)]
+struct ZeroTreeReader;
 
 #[derive(Debug)]
-struct ZeroBackingReader;
-
-#[derive(Debug)]
-struct CowTreeBackingReader {
+struct CowTreeReader {
     blob_store: LocalBlobStore,
 }
 
@@ -130,8 +126,7 @@ impl WalDurableEngine {
         let size_bytes = snapshot.size_bytes();
         let root = RootSnapshot::from_cow_snapshot(snapshot);
         log_root_loaded(descriptor.id(), descriptor.name(), &root);
-        let read_view =
-            ExportReadView::new(root.clone(), Arc::new(CowTreeBackingReader { blob_store }));
+        let read_view = ExportReadView::new(root.clone(), Arc::new(CowTreeReader { blob_store }));
         let replay = replay_wal_after(&wal, &read_view, &root).await?;
         log_replay_completed(descriptor.id(), descriptor.name(), &root, replay);
 
@@ -371,16 +366,16 @@ impl RootSnapshot {
 
 impl ExportReadView {
     fn zero_filled(root: RootSnapshot) -> Self {
-        Self::new(root, Arc::new(ZeroBackingReader))
+        Self::new(root, Arc::new(ZeroTreeReader))
     }
 
-    fn new(root: RootSnapshot, backing: Arc<dyn BackingReader>) -> Self {
+    fn new(root: RootSnapshot, tree_reader: Arc<dyn TreeReader<RootSnapshot>>) -> Self {
         Self {
             state: RwLock::new(ExportReadViewState {
                 root,
                 wal_overlay: BTreeMap::new(),
             }),
-            backing,
+            tree_reader,
         }
     }
 
@@ -401,7 +396,7 @@ impl ExportReadView {
             (state.root.clone(), records)
         };
 
-        let mut data = self.backing.read_committed(&root, range).await?;
+        let mut data = self.tree_reader.read_committed(&root, range).await?;
         if data.len() as u64 != range.len() {
             return Err(ServerError::wal(
                 "read committed backing",
@@ -460,7 +455,7 @@ impl fmt::Debug for ExportReadView {
 }
 
 #[async_trait::async_trait]
-impl BackingReader for ZeroBackingReader {
+impl TreeReader<RootSnapshot> for ZeroTreeReader {
     async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
         validate_range("read", range, root.size_bytes())?;
         if !root.is_zero_backed() {
@@ -473,7 +468,7 @@ impl BackingReader for ZeroBackingReader {
 }
 
 #[async_trait::async_trait]
-impl BackingReader for CowTreeBackingReader {
+impl TreeReader<RootSnapshot> for CowTreeReader {
     async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Vec<u8>> {
         validate_range("read", range, root.size_bytes())?;
         let snapshot = root.cow_tree().ok_or_else(|| ServerError::Catalog {
@@ -588,7 +583,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
-    async fn cow_backing_reader_reads_from_root_snapshot() {
+    async fn cow_tree_reader_reads_from_root_snapshot() {
         let runtime = TestRuntime::new().expect("test runtime");
         let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
         let mut chunk_data = vec![0; 4096];
@@ -607,7 +602,7 @@ mod tests {
         )
         .expect("cow snapshot");
         let root = RootSnapshot::from_cow_snapshot(snapshot);
-        let reader = CowTreeBackingReader { blob_store };
+        let reader = CowTreeReader { blob_store };
 
         let data = reader
             .read_committed(&root, ByteRange::new(8, 4))
@@ -618,7 +613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backing_readers_reject_wrong_root_kind() {
+    async fn tree_readers_reject_wrong_root_kind() {
         let runtime = TestRuntime::new().expect("test runtime");
         let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
         let zero_root = RootSnapshot {
@@ -628,7 +623,7 @@ mod tests {
                 size_bytes: 4096,
             },
         };
-        let cow_reader = CowTreeBackingReader {
+        let cow_reader = CowTreeReader {
             blob_store: blob_store.clone(),
         };
 
@@ -657,7 +652,7 @@ mod tests {
         );
 
         assert!(matches!(
-            ZeroBackingReader
+            ZeroTreeReader
                 .read_committed(&cow_root, ByteRange::new(0, 4))
                 .await,
             Err(ServerError::Catalog { .. }),

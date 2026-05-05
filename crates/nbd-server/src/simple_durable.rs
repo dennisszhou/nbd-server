@@ -1,5 +1,6 @@
 use crate::{
     observability::{self, event, target},
+    tree_reader::TreeReader,
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
@@ -30,6 +31,7 @@ pub struct SimpleDurableEngine {
     size_bytes: u64,
     block_size: u64,
     blob_store: LocalBlobStore,
+    tree_reader: Arc<dyn TreeReader<SimpleTreeSnapshot>>,
     tree: SimpleMutableTree,
 }
 
@@ -52,6 +54,11 @@ struct SimpleTreeState {
     chunks: BTreeMap<ChunkIndex, SimpleChunkRef>,
 }
 
+#[derive(Debug)]
+struct SimpleTreeReader {
+    blob_store: LocalBlobStore,
+}
+
 impl SimpleDurableEngine {
     pub async fn load(
         descriptor: &ExportDescriptor,
@@ -71,7 +78,8 @@ impl SimpleDurableEngine {
             name: descriptor.name().clone(),
             size_bytes: tree.size_bytes().await,
             block_size: descriptor.block_size(),
-            blob_store,
+            blob_store: blob_store.clone(),
+            tree_reader: Arc::new(SimpleTreeReader { blob_store }),
             tree,
         })
     }
@@ -100,48 +108,14 @@ impl SimpleDurableEngine {
     }
 
     fn validate_range(&self, operation: &'static str, offset: u64, length: u64) -> Result<()> {
-        let end = offset.checked_add(length).ok_or(ServerError::OutOfBounds {
-            operation,
-            offset,
-            length,
-            size_bytes: self.size_bytes,
-        })?;
-        if end > self.size_bytes {
-            return Err(ServerError::OutOfBounds {
-                operation,
-                offset,
-                length,
-                size_bytes: self.size_bytes,
-            });
-        }
-
-        Ok(())
+        validate_range(operation, offset, length, self.size_bytes)
     }
 
     async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
-        self.validate_range("read", offset, u64::from(len))?;
-        let mut data = vec![0; len as usize];
-        let mut copied = 0;
-
-        while copied < data.len() {
-            let current_offset = offset + copied as u64;
-            let chunk_index = ChunkIndex::new(current_offset / SIMPLE_CHUNK_BYTES);
-            let chunk_offset = current_offset % SIMPLE_CHUNK_BYTES;
-            let chunk_available = SIMPLE_CHUNK_BYTES - chunk_offset;
-            let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
-
-            if let Some(key) = self.tree.lookup_chunk(chunk_index).await? {
-                let chunk_data = self
-                    .blob_store
-                    .read_blob(&key, chunk_offset, copy_len as u64)
-                    .await?;
-                data[copied..copied + copy_len].copy_from_slice(&chunk_data);
-            }
-
-            copied += copy_len;
-        }
-
-        Ok(data)
+        let range = ByteRange::new(offset, len);
+        self.validate_range("read", range.start(), range.len())?;
+        let snapshot = self.tree.snapshot().await?;
+        self.tree_reader.read_committed(&snapshot, range).await
     }
 
     async fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
@@ -191,6 +165,59 @@ impl SimpleDurableEngine {
     fn flush(&self) -> Result<()> {
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+impl TreeReader<SimpleTreeSnapshot> for SimpleTreeReader {
+    async fn read_committed(&self, root: &SimpleTreeSnapshot, range: ByteRange) -> Result<Vec<u8>> {
+        validate_range("read", range.start(), range.len(), root.size_bytes())?;
+        let mut data = vec![0; range.len() as usize];
+        let mut copied = 0;
+
+        while copied < data.len() {
+            let current_offset = range.start() + copied as u64;
+            let chunk_index = ChunkIndex::new(current_offset / SIMPLE_CHUNK_BYTES);
+            let chunk_offset = current_offset % SIMPLE_CHUNK_BYTES;
+            let chunk_available = SIMPLE_CHUNK_BYTES - chunk_offset;
+            let copy_len = chunk_available.min((data.len() - copied) as u64) as usize;
+
+            if let Some(chunk) = root.chunk(chunk_index) {
+                let chunk_data = self
+                    .blob_store
+                    .read_blob(chunk.blob_key(), chunk_offset, copy_len as u64)
+                    .await?;
+                data[copied..copied + copy_len].copy_from_slice(&chunk_data);
+            }
+
+            copied += copy_len;
+        }
+
+        Ok(data)
+    }
+}
+
+fn validate_range(
+    operation: &'static str,
+    offset: u64,
+    length: u64,
+    size_bytes: u64,
+) -> Result<()> {
+    let end = offset.checked_add(length).ok_or(ServerError::OutOfBounds {
+        operation,
+        offset,
+        length,
+        size_bytes,
+    })?;
+    if end > size_bytes {
+        return Err(ServerError::OutOfBounds {
+            operation,
+            offset,
+            length,
+            size_bytes,
+        });
+    }
+
+    Ok(())
 }
 
 impl SimpleDurableAdmissionPolicy {
@@ -634,4 +661,40 @@ fn libc_einval() -> i32 {
 #[cfg(not(unix))]
 fn libc_einval() -> i32 {
     i32::MIN
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nbd_control_plane::ExportId;
+    use nbd_test_support::TestRuntime;
+
+    #[tokio::test]
+    async fn simple_tree_reader_reads_from_snapshot() {
+        let runtime = TestRuntime::new().expect("test runtime");
+        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let mut chunk_data = vec![0; 4096];
+        chunk_data[8..12].copy_from_slice(b"tree");
+        let key = blob_store
+            .create_blob(&chunk_data)
+            .await
+            .expect("create blob");
+        let chunk =
+            SimpleChunkRef::new(ChunkIndex::new(0), key, SIMPLE_CHUNK_BYTES).expect("chunk ref");
+        let snapshot = SimpleTreeSnapshot::new(
+            ExportId::new("simple-tree-reader").expect("export id"),
+            4096,
+            Some(NodeId::new("root-node").expect("node id")),
+            BTreeMap::from([(ChunkIndex::new(0), chunk)]),
+        )
+        .expect("tree snapshot");
+        let reader = SimpleTreeReader { blob_store };
+
+        let data = reader
+            .read_committed(&snapshot, ByteRange::new(8, 4))
+            .await
+            .expect("read committed tree");
+
+        assert_eq!(data, b"tree");
+    }
 }

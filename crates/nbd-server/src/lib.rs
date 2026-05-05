@@ -16,6 +16,7 @@ pub mod registry;
 pub mod runtime;
 pub mod server;
 pub mod simple_durable;
+mod tree_reader;
 pub mod wal;
 pub mod wal_durable;
 
