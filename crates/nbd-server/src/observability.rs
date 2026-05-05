@@ -17,6 +17,7 @@ pub mod target {
     pub const ADMISSION: &str = "nbd_server::admission";
     pub const ENGINE: &str = "nbd_server::engine";
     pub const STORAGE: &str = "nbd_server::storage";
+    pub const WAL: &str = "nbd_server::wal";
     pub const CATALOG: &str = "nbd_server::catalog";
 }
 
@@ -86,6 +87,13 @@ pub mod event {
     pub const COMPACTION_ENQUEUED: &str = "compaction.enqueued";
     pub const COMPACTION_ENQUEUE_FAILED: &str = "compaction.enqueue_failed";
     pub const COMPACTION_FAILED: &str = "compaction.failed";
+
+    pub const WAL_ROOT_LOADED: &str = "wal.root.loaded";
+    pub const WAL_REPLAY_COMPLETED: &str = "wal.replay.completed";
+    pub const WAL_COMPACTION_COMPLETED: &str = "wal.compaction.completed";
+    pub const WAL_COMPACTION_ENQUEUED: &str = "wal.compaction.enqueued";
+    pub const WAL_COMPACTION_ENQUEUE_FAILED: &str = "wal.compaction.enqueue_failed";
+    pub const WAL_COMPACTION_FAILED: &str = "wal.compaction.failed";
 }
 
 // `tracing` event levels are callsite-static, so request failure severity has
