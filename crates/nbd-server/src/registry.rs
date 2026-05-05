@@ -79,10 +79,7 @@ struct ActiveExport {
 }
 
 impl LocalExportRegistry {
-    pub fn new<T>(catalog: Arc<T>, factory: Arc<ExportFactory>) -> Self
-    where
-        T: ExportCatalog + 'static,
-    {
+    pub fn new(catalog: Arc<dyn ExportCatalog>, factory: Arc<ExportFactory>) -> Self {
         Self {
             catalog,
             factory,

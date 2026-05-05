@@ -5,7 +5,7 @@ use crate::{
     LocalWalProvider, Result, ServerError,
 };
 use nbd_config::NbdConfig;
-use nbd_control_plane::{CatalogProvider, CatalogUrl, SQLiteExportCatalog};
+use nbd_control_plane::{open_catalog, CatalogProvider, CatalogUrl};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -35,7 +35,7 @@ impl NbdServer {
             pid = observability::pid(),
             catalog_provider = catalog_provider_name(catalog_url.provider()),
         );
-        let catalog = SQLiteExportCatalog::connect(&catalog_url)
+        let catalog = open_catalog(&catalog_url)
             .await
             .map_err(ServerError::catalog)?;
         tracing::debug!(
@@ -46,23 +46,25 @@ impl NbdServer {
             pid = observability::pid(),
             catalog_provider = catalog_provider_name(catalog_url.provider()),
         );
-        let catalog = Arc::new(catalog);
+        let export_catalog = catalog.export_catalog();
+        let simple_tree_store = catalog.simple_tree_store();
+        let cow_tree_store = catalog.cow_tree_store();
         let wal_provider = Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone()));
         let compaction_manager = CompactionManager::new(
-            catalog.clone(),
+            cow_tree_store.clone(),
             wal_provider.clone(),
             LocalBlobStore::new(config.runtime.blob_dir.clone()),
         );
         let factory = Arc::new(ExportFactory::new(
             config.server.clone(),
             config.runtime.blob_dir.clone(),
-            catalog.clone(),
-            catalog.clone(),
-            catalog.clone(),
+            export_catalog.clone(),
+            simple_tree_store,
+            cow_tree_store,
             wal_provider,
             compaction_manager.clone(),
         ));
-        let registry = Arc::new(LocalExportRegistry::new(catalog, factory));
+        let registry = Arc::new(LocalExportRegistry::new(export_catalog, factory));
         let reply_capacity = config.server.connection.reply_queue_capacity.get();
         let listener = TcpListener::bind(listen)
             .await

@@ -17,6 +17,7 @@ pub use model::{
     SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 pub use sqlite::SQLiteExportCatalog;
+use std::sync::Arc;
 
 /// Runtime metadata boundary for export catalog operations.
 #[async_trait::async_trait]
@@ -66,4 +67,48 @@ pub trait CowTreeMetadataStore: Send + Sync {
         &self,
         request: PublishCompaction,
     ) -> Result<PublishCompactionOutcome>;
+}
+
+/// Opened catalog service handles for runtime consumers.
+#[derive(Clone)]
+pub struct CatalogHandle {
+    export_catalog: Arc<dyn ExportCatalog>,
+    simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+    cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+}
+
+impl CatalogHandle {
+    pub fn export_catalog(&self) -> Arc<dyn ExportCatalog> {
+        Arc::clone(&self.export_catalog)
+    }
+
+    pub fn simple_tree_store(&self) -> Arc<dyn SimpleTreeMetadataStore> {
+        Arc::clone(&self.simple_tree_store)
+    }
+
+    pub fn cow_tree_store(&self) -> Arc<dyn CowTreeMetadataStore> {
+        Arc::clone(&self.cow_tree_store)
+    }
+}
+
+/// Open catalog services from a runtime catalog URL.
+pub async fn open_catalog(url: &CatalogUrl) -> Result<CatalogHandle> {
+    match url.provider() {
+        CatalogProvider::Sqlite => {
+            let catalog = Arc::new(SQLiteExportCatalog::connect(url).await?);
+            let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
+            let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
+            let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog;
+
+            Ok(CatalogHandle {
+                export_catalog,
+                simple_tree_store,
+                cow_tree_store,
+            })
+        }
+        CatalogProvider::Postgres => Err(CatalogError::unsupported_catalog_provider(
+            url.as_str(),
+            "Postgres catalog is not implemented",
+        )),
+    }
 }

@@ -3,8 +3,8 @@
 use clap::{Parser, Subcommand};
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
-    CatalogUrl, CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportMeta,
-    ExportName, InspectExport, ListExports, SQLiteExportCatalog,
+    open_catalog, CatalogUrl, CreateExport, DeleteExport, ExportEngineKind, ExportMeta, ExportName,
+    InspectExport, ListExports,
 };
 use std::error::Error;
 use std::path::PathBuf;
@@ -65,7 +65,7 @@ async fn main() {
 async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let config = load_config(cli.config)?;
     let catalog_url = CatalogUrl::parse(&config.catalog.url)?;
-    let catalog = SQLiteExportCatalog::connect(&catalog_url).await?;
+    let catalog = open_catalog(&catalog_url).await?.export_catalog();
 
     match cli.command {
         Command::Create {
