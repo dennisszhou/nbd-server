@@ -36,7 +36,15 @@ pub type ExportAdmissionPolicyHandle = Arc<dyn ExportAdmissionPolicy>;
 /// Export request bundled with the admission permit that authorizes it.
 #[derive(Debug)]
 pub struct AdmittedExportRequest {
-    request: ExportRequest,
+    request: Option<ExportRequest>,
+    permit: Option<AdmissionPermit>,
+    context: ExportJobContext,
+}
+
+/// Owned admitted request form for engines that must move request payloads.
+#[derive(Debug)]
+pub struct OwnedAdmittedExportRequest {
+    request: Option<ExportRequest>,
     permit: Option<AdmissionPermit>,
     context: ExportJobContext,
 }
@@ -48,7 +56,7 @@ impl AdmittedExportRequest {
         context: ExportJobContext,
     ) -> Self {
         Self {
-            request,
+            request: Some(request),
             permit: Some(permit),
             context,
         }
@@ -56,36 +64,73 @@ impl AdmittedExportRequest {
 
     /// Return the admitted request while keeping its admission permit live.
     pub fn request(&self) -> &ExportRequest {
-        &self.request
+        self.request
+            .as_ref()
+            .expect("admitted export request is present")
+    }
+
+    /// Move into the owned form without releasing the admission permit.
+    pub fn into_owned(mut self) -> OwnedAdmittedExportRequest {
+        OwnedAdmittedExportRequest {
+            request: self.request.take(),
+            permit: self.permit.take(),
+            context: self.context.clone(),
+        }
     }
 }
 
 impl Drop for AdmittedExportRequest {
     fn drop(&mut self) {
-        let Some(permit) = self.permit.take() else {
-            return;
-        };
-        let ticket = permit.ticket();
-        let op = permit.op();
-        // Release admission before logging so observability cannot delay
-        // promotion of later waiters.
-        drop(permit);
-
-        tracing::trace!(
-            target: target::ADMISSION,
-            event = event::ADMISSION_RELEASED,
-            service = observability::SERVICE_NAME,
-            server_instance_id = observability::server_instance_id(),
-            pid = observability::pid(),
-            admission_ticket = ticket.as_u64(),
-            admission_op = op.kind(),
-            range_start = ?op.range().map(crate::ByteRange::start),
-            range_len = ?op.range().map(crate::ByteRange::len),
-            connection_id = self.context.connection_id().raw(),
-            request_sequence = self.context.request_sequence().raw(),
-            cookie = self.context.cookie().raw(),
-        );
+        release_admission_permit(&mut self.permit, &self.context);
     }
+}
+
+impl OwnedAdmittedExportRequest {
+    /// Return the admitted request while keeping its admission permit live.
+    pub fn request(&self) -> &ExportRequest {
+        self.request
+            .as_ref()
+            .expect("owned admitted export request is present")
+    }
+
+    /// Take the request payload while keeping the admission permit live.
+    pub fn take_request(&mut self) -> ExportRequest {
+        self.request
+            .take()
+            .expect("owned admitted export request can be taken once")
+    }
+}
+
+impl Drop for OwnedAdmittedExportRequest {
+    fn drop(&mut self) {
+        release_admission_permit(&mut self.permit, &self.context);
+    }
+}
+
+fn release_admission_permit(permit: &mut Option<AdmissionPermit>, context: &ExportJobContext) {
+    let Some(permit) = permit.take() else {
+        return;
+    };
+    let ticket = permit.ticket();
+    let op = permit.op();
+    // Release admission before logging so observability cannot delay promotion
+    // of later waiters.
+    drop(permit);
+
+    tracing::trace!(
+        target: target::ADMISSION,
+        event = event::ADMISSION_RELEASED,
+        service = observability::SERVICE_NAME,
+        server_instance_id = observability::server_instance_id(),
+        pid = observability::pid(),
+        admission_ticket = ticket.as_u64(),
+        admission_op = op.kind(),
+        range_start = ?op.range().map(crate::ByteRange::start),
+        range_len = ?op.range().map(crate::ByteRange::len),
+        connection_id = context.connection_id().raw(),
+        request_sequence = context.request_sequence().raw(),
+        cookie = context.cookie().raw(),
+    );
 }
 
 /// Data behavior for one active export.
@@ -249,6 +294,7 @@ impl ExportRequest {
 mod tests {
     use super::*;
     use crate::{
+        admission::{AdmissionOp, ByteRange, ExportAdmissionCtl},
         memory::MemoryExportEngine,
         runtime::{ExportRuntime, SerialExportRuntime},
     };
@@ -342,6 +388,56 @@ mod tests {
         let next_slot = waiter.await.expect("reservation task");
         drop(next_slot);
         drop(receiver.recv().await.expect("pending reply"));
+    }
+
+    #[tokio::test]
+    async fn owned_admitted_request_keeps_permit_after_payload_take() {
+        let admission = ExportAdmissionCtl::new(4096);
+        let first_permit = admission
+            .register(AdmissionOp::Write(ByteRange::new(0, 4)))
+            .expect("register first")
+            .wait()
+            .await
+            .expect("first permit");
+        let second_waiter = admission
+            .register(AdmissionOp::Write(ByteRange::new(0, 4)))
+            .expect("register second");
+        let context = ExportJobContext::internal(NbdCookie::new(7), "write");
+        let admitted = AdmittedExportRequest::new(
+            ExportRequest::Write {
+                offset: 0,
+                data: b"test".to_vec(),
+            },
+            first_permit,
+            context,
+        );
+        let mut owned = admitted.into_owned();
+
+        let second_task =
+            tokio::spawn(async move { second_waiter.wait().await.expect("second permit") });
+        tokio::task::yield_now().await;
+        assert!(
+            !second_task.is_finished(),
+            "owned admitted request should still hold admission",
+        );
+
+        let request = owned.take_request();
+        assert_eq!(
+            request,
+            ExportRequest::Write {
+                offset: 0,
+                data: b"test".to_vec(),
+            }
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            !second_task.is_finished(),
+            "taking the payload must not release admission",
+        );
+
+        drop(owned);
+        let second_permit = second_task.await.expect("second task");
+        drop(second_permit);
     }
 
     fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {

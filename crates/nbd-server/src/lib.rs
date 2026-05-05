@@ -24,7 +24,7 @@ pub use error::{Result, ServerError};
 pub use export::{
     AdmittedExportRequest, CompletedExport, ExportAdmissionPolicy, ExportAdmissionPolicyHandle,
     ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob, ExportReply, ExportRequest,
-    ExportResult,
+    ExportResult, OwnedAdmittedExportRequest,
 };
 pub use memory::{MemoryAdmissionPolicy, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
 pub use observability::{ConnectionId, ExportJobContext, RequestSequence};
