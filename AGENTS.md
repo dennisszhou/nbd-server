@@ -129,15 +129,23 @@ make test-protocol
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 make docker-smoke
-KERNEL_SMOKE_ENGINE=memory make docker-smoke
+make docker-smoke KERNEL_SMOKE_SCENARIO=memory-basic \
+  KERNEL_SMOKE_OUTPUT=memory-basic
 ```
 
 - `make test-protocol` runs the userspace TCP protocol integration baseline.
 - `make docker-smoke` runs the privileged kernel NBD smoke path. It defaults
-  to `wal_durable`, verifies reattach and close compaction, and exports logs
-  and inspect snapshots under `./.tmp/docker-smoke`.
-- `KERNEL_SMOKE_ENGINE=memory make docker-smoke` checks the volatile engine
-  path.
+  to the `wal-durable-basic` scenario, verifies reattach and close compaction,
+  and exports logs and inspect snapshots under `./.tmp/docker-smoke`.
+- `KERNEL_SMOKE_SCENARIO=memory-basic make docker-smoke` checks the volatile
+  engine path. Current scenarios are `memory-basic`, `simple-durable-basic`,
+  and `wal-durable-basic`.
+- `make docker-smoke KERNEL_SMOKE_OUTPUT=wal-basic` writes artifacts under
+  `./.tmp/wal-basic`.
+- Set `DOCKER_KERNEL_SMOKE_ARTIFACT_DIR=/path` to override the full host
+  artifact path.
+- `KERNEL_SMOKE_ENGINE=memory make docker-smoke` remains a compatibility
+  shortcut for the matching basic scenario.
 - `make build-tools` builds `nbd-server` and `nbdcli`.
 - `make -C prisma db-migrate` applies Prisma migrations to `DATABASE_URL`.
 - If Docker/kernel smoke cannot run, say exactly why and what was run instead.
