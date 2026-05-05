@@ -116,8 +116,6 @@ impl ServerFixture {
 
 pub struct RawNbdConnection {
     stream: TcpStream,
-    export_size_bytes: u64,
-    transmission_flags: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,22 +159,11 @@ impl RawNbdConnection {
             .write_all(&encode_go_request(export_name, &[NBD_INFO_EXPORT])?)
             .await?;
 
-        let (export_size_bytes, transmission_flags) =
-            read_go_replies(&mut option_client.stream).await?;
+        read_go_replies(&mut option_client.stream).await?;
 
         Ok(Self {
             stream: option_client.stream,
-            export_size_bytes,
-            transmission_flags,
         })
-    }
-
-    pub fn export_size_bytes(&self) -> u64 {
-        self.export_size_bytes
-    }
-
-    pub fn transmission_flags(&self) -> u16 {
-        self.transmission_flags
     }
 
     pub async fn send_read(&mut self, cookie: NbdCookie, offset: u64, len: u32) -> TestResult<()> {

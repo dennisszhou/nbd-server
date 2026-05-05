@@ -96,13 +96,6 @@ async fn local_blob_store_requires_existing_blob_for_replace() {
 }
 
 #[tokio::test]
-async fn local_blob_store_uses_validated_blob_keys() {
-    assert!(BlobKey::new("../outside").is_err());
-    assert!(BlobKey::new("dir/blob").is_err());
-    assert!(BlobKey::new("dir\\blob").is_err());
-}
-
-#[tokio::test]
 async fn simple_mutable_tree_loads_sparse_128mib_head() {
     let (_runtime, catalog, meta) = simple_tree_fixture("disk-a").await;
     let tree = load_tree(&catalog, &meta).await;

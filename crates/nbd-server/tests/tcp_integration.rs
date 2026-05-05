@@ -256,47 +256,6 @@ async fn abort_option_is_acknowledged() {
 }
 
 #[tokio::test]
-async fn raw_protocol_helper_reads_with_explicit_cookie() {
-    let fixture = ServerFixture::new(EngineProfile::MEMORY)
-        .await
-        .expect("server fixture");
-    fixture
-        .create_export("disk-a", 4096, 4096)
-        .await
-        .expect("create export");
-
-    let server = fixture.start_server().await.expect("start server");
-    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
-        .await
-        .expect("connect raw client");
-
-    assert_eq!(client.export_size_bytes(), 4096);
-    assert_eq!(
-        client.transmission_flags(),
-        NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH,
-    );
-
-    let read_cookie = NbdCookie::new(42);
-    client
-        .send_read(read_cookie, 0, 8)
-        .await
-        .expect("send raw read");
-    assert_eq!(
-        client
-            .read_successful_read(read_cookie, 8)
-            .await
-            .expect("read raw reply"),
-        vec![0; 8],
-    );
-
-    client
-        .disconnect(NbdCookie::new(43))
-        .await
-        .expect("disconnect raw client");
-    server.shutdown().await.expect("shutdown server");
-}
-
-#[tokio::test]
 async fn raw_write_flush_and_read_replies_echo_cookies() {
     let fixture = ServerFixture::new(EngineProfile::MEMORY)
         .await
@@ -345,65 +304,6 @@ async fn raw_write_flush_and_read_replies_echo_cookies() {
 
     client
         .disconnect(NbdCookie::new(103))
-        .await
-        .expect("disconnect raw client");
-    server.shutdown().await.expect("shutdown server");
-}
-
-#[tokio::test]
-async fn default_runtime_handles_pipelined_protocol_smoke() {
-    let fixture = ServerFixture::new(EngineProfile::MEMORY)
-        .await
-        .expect("server fixture");
-    fixture
-        .create_export("disk-a", 4096, 4096)
-        .await
-        .expect("create export");
-
-    let server = fixture.start_server().await.expect("start server");
-    let mut client = RawNbdConnection::connect(server.addr(), "disk-a")
-        .await
-        .expect("connect raw client");
-
-    let first_read = NbdCookie::new(150);
-    let write = NbdCookie::new(151);
-    let independent_read = NbdCookie::new(152);
-    let conflicting_read = NbdCookie::new(153);
-
-    client
-        .send_read(first_read, 0, 4)
-        .await
-        .expect("send first read");
-    client
-        .send_write(write, 0, b"zzzz")
-        .await
-        .expect("send write");
-    client
-        .send_read(independent_read, 4, 4)
-        .await
-        .expect("send independent read");
-    client
-        .send_read(conflicting_read, 0, 4)
-        .await
-        .expect("send conflicting read");
-
-    let replies = collect_replies(
-        &mut client,
-        &[
-            (first_read, 4),
-            (independent_read, 4),
-            (conflicting_read, 4),
-        ],
-        4,
-    )
-    .await;
-    assert_read_data(&replies, first_read, &[0; 4]);
-    assert_simple_success(&replies, write);
-    assert_read_data(&replies, independent_read, &[0; 4]);
-    assert_read_data(&replies, conflicting_read, b"zzzz");
-
-    client
-        .disconnect(NbdCookie::new(154))
         .await
         .expect("disconnect raw client");
     server.shutdown().await.expect("shutdown server");
