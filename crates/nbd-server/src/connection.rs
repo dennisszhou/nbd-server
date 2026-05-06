@@ -18,14 +18,20 @@ use nbd_protocol::transmission::{
     encode_simple_reply, parse_request, parse_request_header,
 };
 use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
+use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 const SUPPORTED_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
+
+#[derive(Clone)]
+pub(crate) struct ConnectionShutdown {
+    rx: Option<watch::Receiver<bool>>,
+}
 
 struct ConnectionExport {
     name: ExportName,
@@ -41,7 +47,13 @@ struct ConnectionRuntime {
 
 struct RequestReaderExit {
     result: Result<()>,
-    drain_replies: bool,
+    reply_drain: ConnectionReplyDrain,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionReplyDrain {
+    DropPending,
+    DrainQueued,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +138,37 @@ impl ExportCompletionSink for ConnectionExportCompletion {
     }
 }
 
+impl ConnectionShutdown {
+    fn not_cancelled() -> Self {
+        Self { rx: None }
+    }
+
+    #[cfg(test)]
+    fn from_receiver(rx: watch::Receiver<bool>) -> Self {
+        Self { rx: Some(rx) }
+    }
+
+    async fn cancelled(&mut self) {
+        let Some(rx) = &mut self.rx else {
+            future::pending::<()>().await;
+            return;
+        };
+
+        loop {
+            if *rx.borrow() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                future::pending::<()>().await;
+            }
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.rx.as_ref().is_some_and(|rx| *rx.borrow())
+    }
+}
+
 impl ConnectionRuntime {
     fn new(
         connection_id: ConnectionId,
@@ -139,37 +182,64 @@ impl ConnectionRuntime {
         }
     }
 
-    async fn run(self, stream: TcpStream) -> Result<()> {
+    async fn run_with_shutdown(
+        self,
+        stream: TcpStream,
+        shutdown: ConnectionShutdown,
+    ) -> Result<()> {
         let (reader, writer) = stream.into_split();
-        self.run_io(reader, writer).await
+        self.run_io(reader, writer, shutdown).await
     }
 
-    async fn run_io<R, W>(self, reader: R, writer: W) -> Result<()>
+    async fn run_io<R, W>(self, reader: R, writer: W, shutdown: ConnectionShutdown) -> Result<()>
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (reply_sender, reply_receiver) = mpsc::channel(self.reply_capacity);
+        let writer_shutdown = shutdown.clone();
         let reader_task = tokio::spawn(read_requests(
             reader,
             self.connection_id,
             self.runtime,
             reply_sender,
+            shutdown,
         ));
-        let writer_task = tokio::spawn(write_replies(writer, reply_receiver));
+        let writer_task = tokio::spawn(write_replies(writer, reply_receiver, writer_shutdown));
 
         run_connection_tasks(reader_task, writer_task).await
     }
 }
 
 pub async fn serve(
-    mut stream: TcpStream,
+    stream: TcpStream,
     registry: Arc<LocalExportRegistry>,
     reply_capacity: usize,
     connection_id: ConnectionId,
     peer_addr: SocketAddr,
 ) -> Result<()> {
-    write_handshake(&mut stream).await?;
+    serve_with_shutdown(
+        stream,
+        registry,
+        reply_capacity,
+        connection_id,
+        peer_addr,
+        ConnectionShutdown::not_cancelled(),
+    )
+    .await
+}
+
+pub(crate) async fn serve_with_shutdown(
+    mut stream: TcpStream,
+    registry: Arc<LocalExportRegistry>,
+    reply_capacity: usize,
+    connection_id: ConnectionId,
+    peer_addr: SocketAddr,
+    mut shutdown: ConnectionShutdown,
+) -> Result<()> {
+    if !write_handshake(&mut stream, &mut shutdown).await? {
+        return Ok(());
+    }
     tracing::debug!(
         target: target::CONNECTION,
         event = event::CONNECTION_HANDSHAKE_COMPLETED,
@@ -179,8 +249,14 @@ pub async fn serve(
         connection_id = connection_id.raw(),
         peer_addr = %peer_addr,
     );
-    let Some(export) =
-        negotiate_options(&mut stream, registry.clone(), connection_id, peer_addr).await?
+    let Some(export) = negotiate_options(
+        &mut stream,
+        registry.clone(),
+        connection_id,
+        peer_addr,
+        &mut shutdown,
+    )
+    .await?
     else {
         tracing::info!(
             target: target::CONNECTION,
@@ -195,7 +271,7 @@ pub async fn serve(
         return Ok(());
     };
     let result = ConnectionRuntime::new(connection_id, export.runtime.clone(), reply_capacity)
-        .run(stream)
+        .run_with_shutdown(stream, shutdown)
         .await;
     let close_result = registry.close(&export.name, &export.owner).await;
 
@@ -220,19 +296,28 @@ pub async fn serve(
     }
 }
 
-async fn write_handshake(stream: &mut TcpStream) -> Result<()> {
-    stream
-        .write_all(&encode_server_handshake())
-        .await
-        .map_err(|source| ServerError::io("write NBD server handshake", source))?;
+async fn write_handshake(
+    stream: &mut TcpStream,
+    shutdown: &mut ConnectionShutdown,
+) -> Result<bool> {
+    if !write_all_or_shutdown(
+        stream,
+        &encode_server_handshake(),
+        shutdown,
+        "write NBD server handshake",
+    )
+    .await?
+    {
+        return Ok(false);
+    }
 
     let mut client_flags = [0; 4];
-    stream
-        .read_exact(&mut client_flags)
-        .await
-        .map_err(|source| ServerError::io("read NBD client flags", source))?;
+    if !read_exact_or_shutdown(stream, &mut client_flags, shutdown, "read NBD client flags").await?
+    {
+        return Ok(false);
+    }
     decode_client_flags(&client_flags)?;
-    Ok(())
+    Ok(true)
 }
 
 async fn negotiate_options(
@@ -240,6 +325,7 @@ async fn negotiate_options(
     registry: Arc<LocalExportRegistry>,
     connection_id: ConnectionId,
     peer_addr: SocketAddr,
+    shutdown: &mut ConnectionShutdown,
 ) -> Result<Option<ConnectionExport>> {
     tracing::debug!(
         target: target::CONNECTION,
@@ -251,7 +337,9 @@ async fn negotiate_options(
         peer_addr = %peer_addr,
     );
     loop {
-        let request = read_option_request(stream).await?;
+        let Some(request) = read_option_request(stream, shutdown).await? else {
+            return Ok(None);
+        };
         match request {
             OptionRequest::Go(go) => {
                 let option = NbdOptionCode::new(nbd_protocol::constants::NBD_OPT_GO);
@@ -284,7 +372,9 @@ async fn negotiate_options(
                             owner_id = owner.id().raw(),
                             error = %error,
                         );
-                        write_go_error(stream, option, &error).await?;
+                        if !write_go_error(stream, option, &error, shutdown).await? {
+                            return Ok(None);
+                        }
                         return Ok(None);
                     }
                 };
@@ -304,26 +394,39 @@ async fn negotiate_options(
                     engine_kind = %meta.engine_kind(),
                     size_bytes = meta.size_bytes(),
                 );
-                let result = stream
-                    .write_all(&encode_export_info_reply(
-                        option,
-                        meta.size_bytes(),
-                        SUPPORTED_TRANSMISSION_FLAGS,
-                    )?)
-                    .await
-                    .map_err(|source| ServerError::io("write NBD export info", source));
-                if let Err(error) = result {
-                    let _ = registry.close(&export_name, &owner).await;
-                    return Err(error);
+                let export_info = encode_export_info_reply(
+                    option,
+                    meta.size_bytes(),
+                    SUPPORTED_TRANSMISSION_FLAGS,
+                )?;
+                let result =
+                    write_all_or_shutdown(stream, &export_info, shutdown, "write NBD export info")
+                        .await;
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = registry.close(&export_name, &owner).await;
+                        return Ok(None);
+                    }
+                    Err(error) => {
+                        let _ = registry.close(&export_name, &owner).await;
+                        return Err(error);
+                    }
                 }
 
-                let result = stream
-                    .write_all(&encode_ack_reply(option)?)
-                    .await
-                    .map_err(|source| ServerError::io("write NBD_OPT_GO ack", source));
-                if let Err(error) = result {
-                    let _ = registry.close(&export_name, &owner).await;
-                    return Err(error);
+                let ack = encode_ack_reply(option)?;
+                let result =
+                    write_all_or_shutdown(stream, &ack, shutdown, "write NBD_OPT_GO ack").await;
+                match result {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let _ = registry.close(&export_name, &owner).await;
+                        return Ok(None);
+                    }
+                    Err(error) => {
+                        let _ = registry.close(&export_name, &owner).await;
+                        return Err(error);
+                    }
                 }
 
                 tracing::debug!(
@@ -345,20 +448,20 @@ async fn negotiate_options(
             }
             OptionRequest::Abort { .. } => {
                 let option = NbdOptionCode::new(nbd_protocol::constants::NBD_OPT_ABORT);
-                stream
-                    .write_all(&encode_ack_reply(option)?)
-                    .await
-                    .map_err(|source| ServerError::io("write NBD_OPT_ABORT ack", source))?;
+                let ack = encode_ack_reply(option)?;
+                if !write_all_or_shutdown(stream, &ack, shutdown, "write NBD_OPT_ABORT ack").await?
+                {
+                    return Ok(None);
+                }
                 return Ok(None);
             }
             OptionRequest::Unknown { code, .. } => {
-                stream
-                    .write_all(&encode_unsupported_option_reply(
-                        code,
-                        b"unsupported option",
-                    )?)
-                    .await
-                    .map_err(|source| ServerError::io("write unsupported option", source))?;
+                let reply = encode_unsupported_option_reply(code, b"unsupported option")?;
+                if !write_all_or_shutdown(stream, &reply, shutdown, "write unsupported option")
+                    .await?
+                {
+                    return Ok(None);
+                }
             }
         }
     }
@@ -368,7 +471,8 @@ async fn write_go_error(
     stream: &mut TcpStream,
     option: NbdOptionCode,
     error: &ServerError,
-) -> Result<()> {
+    shutdown: &mut ConnectionShutdown,
+) -> Result<bool> {
     let message = error.to_string();
     let reply = match error {
         ServerError::ExportBusy { .. } | ServerError::ExportTooLarge { .. } => {
@@ -376,28 +480,40 @@ async fn write_go_error(
         }
         _ => encode_unknown_export_reply(option, message.as_bytes())?,
     };
-    stream
-        .write_all(&reply)
-        .await
-        .map_err(|source| ServerError::io("write NBD_OPT_GO error", source))
+    write_all_or_shutdown(stream, &reply, shutdown, "write NBD_OPT_GO error").await
 }
 
-async fn read_option_request(stream: &mut TcpStream) -> Result<OptionRequest> {
+async fn read_option_request(
+    stream: &mut TcpStream,
+    shutdown: &mut ConnectionShutdown,
+) -> Result<Option<OptionRequest>> {
     let mut bytes = vec![0; OPTION_REQUEST_HEADER_BYTES];
-    stream
-        .read_exact(&mut bytes)
-        .await
-        .map_err(|source| ServerError::io("read NBD option request header", source))?;
+    if !read_exact_or_shutdown(
+        stream,
+        &mut bytes,
+        shutdown,
+        "read NBD option request header",
+    )
+    .await?
+    {
+        return Ok(None);
+    }
 
     let header = parse_option_request_header(&bytes)?;
     let mut payload = vec![0; header.bounded_payload_len()?];
-    stream
-        .read_exact(&mut payload)
-        .await
-        .map_err(|source| ServerError::io("read NBD option request payload", source))?;
+    if !read_exact_or_shutdown(
+        stream,
+        &mut payload,
+        shutdown,
+        "read NBD option request payload",
+    )
+    .await?
+    {
+        return Ok(None);
+    }
     bytes.extend_from_slice(&payload);
 
-    Ok(parse_option_request(&bytes)?)
+    Ok(Some(parse_option_request(&bytes)?))
 }
 
 async fn read_requests<R>(
@@ -405,6 +521,7 @@ async fn read_requests<R>(
     connection_id: ConnectionId,
     runtime: ExportRuntimeHandle,
     replies: mpsc::Sender<ConnectionReply>,
+    mut shutdown: ConnectionShutdown,
 ) -> RequestReaderExit
 where
     R: AsyncRead + Unpin,
@@ -412,7 +529,11 @@ where
     let mut request_sequences = RequestSequenceGenerator::new();
     loop {
         let mut bytes = vec![0; REQUEST_HEADER_BYTES];
-        match reader.read_exact(&mut bytes).await {
+        let read_header = tokio::select! {
+            result = reader.read_exact(&mut bytes) => result,
+            () = shutdown.cancelled() => return RequestReaderExit::close(Ok(())),
+        };
+        match read_header {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return RequestReaderExit::close(Ok(()));
@@ -469,7 +590,11 @@ where
             offset = header.offset,
             length = header.length,
         );
-        let queue_slot = match runtime.reserve().await {
+        let reserve_result = tokio::select! {
+            result = runtime.reserve() => result,
+            () = shutdown.cancelled() => return RequestReaderExit::close(Ok(())),
+        };
+        let queue_slot = match reserve_result {
             Ok(queue_slot) => {
                 tracing::trace!(
                     target: target::RUNTIME,
@@ -496,7 +621,14 @@ where
         };
 
         let mut payload = vec![0; payload_len];
-        if let Err(source) = reader.read_exact(&mut payload).await {
+        let read_payload = tokio::select! {
+            result = reader.read_exact(&mut payload) => result,
+            () = shutdown.cancelled() => {
+                drop(queue_slot);
+                return RequestReaderExit::close(Ok(()));
+            }
+        };
+        if let Err(source) = read_payload {
             drop(queue_slot);
             return RequestReaderExit::close(Err(ServerError::io(
                 "read NBD transmission payload",
@@ -604,14 +736,26 @@ where
     }
 }
 
-async fn write_replies<W>(mut writer: W, mut replies: mpsc::Receiver<ConnectionReply>) -> Result<()>
+async fn write_replies<W>(
+    mut writer: W,
+    mut replies: mpsc::Receiver<ConnectionReply>,
+    mut shutdown: ConnectionShutdown,
+) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    while let Some(reply) = replies.recv().await {
-        write_connection_reply(&mut writer, reply).await?;
+    loop {
+        let reply = tokio::select! {
+            reply = replies.recv() => reply,
+            () = shutdown.cancelled() => return Ok(()),
+        };
+        let Some(reply) = reply else {
+            return Ok(());
+        };
+        if !write_connection_reply_or_shutdown(&mut writer, reply, &mut shutdown).await? {
+            return Ok(());
+        }
     }
-    Ok(())
 }
 
 async fn run_connection_tasks(
@@ -633,7 +777,7 @@ async fn run_connection_tasks(
                 }
             };
 
-            if reader_exit.drain_replies {
+            if reader_exit.reply_drain == ConnectionReplyDrain::DrainQueued {
                 match writer_task.await {
                     Ok(Ok(())) => reader_exit.result,
                     Ok(Err(error)) => Err(error),
@@ -664,15 +808,79 @@ impl RequestReaderExit {
     fn close(result: Result<()>) -> Self {
         Self {
             result,
-            drain_replies: false,
+            reply_drain: ConnectionReplyDrain::DropPending,
         }
     }
 
     fn drain(result: Result<()>) -> Self {
         Self {
             result,
-            drain_replies: true,
+            reply_drain: ConnectionReplyDrain::DrainQueued,
         }
+    }
+}
+
+async fn read_exact_or_shutdown<R>(
+    reader: &mut R,
+    bytes: &mut [u8],
+    shutdown: &mut ConnectionShutdown,
+    context: &'static str,
+) -> Result<bool>
+where
+    R: AsyncRead + Unpin,
+{
+    if shutdown.is_cancelled() {
+        return Ok(false);
+    }
+
+    tokio::select! {
+        result = reader.read_exact(bytes) => {
+            result
+                .map_err(|source| ServerError::io(context, source))
+                .map(|_| true)
+        }
+        () = shutdown.cancelled() => Ok(false),
+    }
+}
+
+async fn write_all_or_shutdown<W>(
+    writer: &mut W,
+    bytes: &[u8],
+    shutdown: &mut ConnectionShutdown,
+    context: &'static str,
+) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+{
+    if shutdown.is_cancelled() {
+        return Ok(false);
+    }
+
+    tokio::select! {
+        result = writer.write_all(bytes) => {
+            result
+                .map_err(|source| ServerError::io(context, source))
+                .map(|()| true)
+        }
+        () = shutdown.cancelled() => Ok(false),
+    }
+}
+
+async fn write_connection_reply_or_shutdown<W>(
+    writer: &mut W,
+    reply: ConnectionReply,
+    shutdown: &mut ConnectionShutdown,
+) -> Result<bool>
+where
+    W: AsyncWrite + Unpin,
+{
+    if shutdown.is_cancelled() {
+        return Ok(false);
+    }
+
+    tokio::select! {
+        result = write_connection_reply(writer, reply) => result.map(|()| true),
+        () = shutdown.cancelled() => Ok(false),
     }
 }
 
@@ -1047,6 +1255,29 @@ mod tests {
         drop(next_slot);
     }
 
+    #[tokio::test]
+    async fn connection_shutdown_stops_blocked_request_reader() {
+        let (runtime, _submitted, _reserve_started, _reserve_acquired) = controllable_runtime(1);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (client, server) = duplex(64 * 1024);
+        let (reader, _server_writer) = split(server);
+        let (reply_sender, _reply_receiver) = mpsc::channel(1);
+        let task = tokio::spawn(read_requests(
+            reader,
+            ConnectionId::next(),
+            runtime,
+            reply_sender,
+            ConnectionShutdown::from_receiver(shutdown_rx),
+        ));
+
+        shutdown_tx.send(true).expect("signal shutdown");
+
+        let exit = task.await.expect("request reader task");
+        assert_eq!(exit.reply_drain, ConnectionReplyDrain::DropPending);
+        exit.result.expect("reader shutdown");
+        drop(client);
+    }
+
     async fn complete_job(job: ExportJob, expected: ExportRequest, result: ExportResult) {
         let (_context, request, completion, queue_slot) = job.into_parts();
         assert_eq!(request, expected);
@@ -1107,12 +1338,11 @@ mod tests {
         let (client, server) = duplex(64 * 1024);
         let (reader, writer) = split(server);
         let task = tokio::spawn(
-            ConnectionRuntime {
-                connection_id: ConnectionId::next(),
-                runtime,
-                reply_capacity,
-            }
-            .run_io(reader, writer),
+            ConnectionRuntime::new(ConnectionId::next(), runtime, reply_capacity).run_io(
+                reader,
+                writer,
+                ConnectionShutdown::not_cancelled(),
+            ),
         );
         (client, task)
     }
