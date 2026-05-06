@@ -5,9 +5,10 @@ use crate::{
     ExportRequest, ExportResult, Result, ServerError,
 };
 use nbd_control_plane::ExportRecord;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument;
 
 pub const DEFAULT_EXPORT_QUEUE_CAPACITY: usize = 128;
@@ -38,6 +39,7 @@ pub struct SerialExportRuntime {
     meta: ExportRecord,
     queue_depth: Arc<Semaphore>,
     lifecycle: Arc<SerialRuntimeLifecycle>,
+    engine_close: Arc<RuntimeEngineClose>,
     sender: mpsc::Sender<ExportJob>,
 }
 
@@ -50,6 +52,7 @@ pub struct ConcurrentExportRuntime {
     admission_policy: ExportAdmissionPolicyHandle,
     queue_depth: Arc<Semaphore>,
     lifecycle: Arc<ConcurrentRuntimeLifecycle>,
+    engine_close: Arc<RuntimeEngineClose>,
 }
 
 #[derive(Debug)]
@@ -74,6 +77,11 @@ struct ConcurrentRuntimeLifecycle {
 struct ConcurrentRuntimeState {
     closed: bool,
     active_jobs: usize,
+}
+
+struct RuntimeEngineClose {
+    engine: ExportEngineHandle,
+    result: OnceCell<Result<()>>,
 }
 
 struct ConcurrentActiveJob {
@@ -110,6 +118,7 @@ impl SerialExportRuntime {
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
         let admission_policy = engine.admission_policy();
         let queue_depth = Arc::new(Semaphore::new(capacity));
+        let engine_close = Arc::new(RuntimeEngineClose::new(engine.clone()));
         let lifecycle = Arc::new(SerialRuntimeLifecycle {
             state: Mutex::new(SerialRuntimeState {
                 closed: false,
@@ -120,6 +129,7 @@ impl SerialExportRuntime {
         let (sender, mut receiver) = mpsc::channel::<ExportJob>(capacity);
         let worker_lifecycle = lifecycle.clone();
         let worker_meta = meta.clone();
+        let worker_engine = engine;
 
         tokio::spawn(async move {
             while let Some(job) = receiver.recv().await {
@@ -127,7 +137,7 @@ impl SerialExportRuntime {
                 execute_admitted_job(
                     worker_meta.clone(),
                     "serial",
-                    engine.clone(),
+                    worker_engine.clone(),
                     admission_policy.clone(),
                     admission.clone(),
                     job,
@@ -142,6 +152,7 @@ impl SerialExportRuntime {
             meta,
             queue_depth,
             lifecycle,
+            engine_close,
             sender,
         }
     }
@@ -155,6 +166,7 @@ impl ConcurrentExportRuntime {
     pub fn with_capacity(meta: ExportRecord, engine: ExportEngineHandle, capacity: usize) -> Self {
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
         let admission_policy = engine.admission_policy();
+        let engine_close = Arc::new(RuntimeEngineClose::new(engine.clone()));
         Self {
             meta,
             engine,
@@ -168,7 +180,30 @@ impl ConcurrentExportRuntime {
                 }),
                 empty: Notify::new(),
             }),
+            engine_close,
         }
+    }
+}
+
+impl RuntimeEngineClose {
+    fn new(engine: ExportEngineHandle) -> Self {
+        Self {
+            engine,
+            result: OnceCell::new(),
+        }
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.result
+            .get_or_init(|| async { self.engine.close().await })
+            .await
+            .clone()
+    }
+}
+
+impl fmt::Debug for RuntimeEngineClose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeEngineClose").finish_non_exhaustive()
     }
 }
 
@@ -654,7 +689,8 @@ impl ExportRuntime for SerialExportRuntime {
     async fn close(&self) -> Result<()> {
         self.lifecycle.close()?;
         self.queue_depth.close();
-        self.lifecycle.wait_empty().await
+        self.lifecycle.wait_empty().await?;
+        self.engine_close.close().await
     }
 }
 
@@ -712,6 +748,7 @@ impl ExportRuntime for ConcurrentExportRuntime {
     async fn close(&self) -> Result<()> {
         self.lifecycle.close()?;
         self.queue_depth.close();
-        self.lifecycle.wait_empty().await
+        self.lifecycle.wait_empty().await?;
+        self.engine_close.close().await
     }
 }

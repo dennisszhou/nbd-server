@@ -139,6 +139,10 @@ pub trait ExportEngine: Send + Sync {
     fn admission_policy(&self) -> ExportAdmissionPolicyHandle;
 
     async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult;
+
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub type ExportEngineHandle = Arc<dyn ExportEngine>;

@@ -7,6 +7,7 @@ use nbd_server::{
     MemoryExportEngine, SerialExportRuntime, ServerError,
 };
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -71,16 +72,14 @@ async fn serial_runtime_queue_slot_reservation_releases_on_drop() {
 #[tokio::test]
 async fn serial_runtime_close_rejects_new_work_and_waits_for_active_job() {
     let meta = export_record("disk-a", 4096);
-    let (entered_tx, entered_rx) = oneshot::channel();
-    let (release_tx, release_rx) = oneshot::channel();
-    let engine = Arc::new(BlockingEngine::new(entered_tx, release_rx));
-    let runtime = SerialExportRuntime::with_capacity(meta, engine, 2);
+    let (engine, mut releases) = GatedEngine::new(1);
+    let runtime = SerialExportRuntime::with_capacity(meta, engine.clone(), 2);
 
     let first_slot = runtime.reserve().await.expect("reserve first slot");
     let second_slot = runtime.reserve().await.expect("reserve second slot");
     let (job, receiver) = ExportJob::oneshot(ExportRequest::Flush, first_slot);
     runtime.submit(job).await.expect("submit active job");
-    entered_rx.await.expect("engine starts active job");
+    wait_for_started(&engine, 1).await;
 
     let close_runtime = runtime.clone();
     let close_task = tokio::spawn(async move {
@@ -91,6 +90,7 @@ async fn serial_runtime_close_rejects_new_work_and_waits_for_active_job() {
         !close_task.is_finished(),
         "close should wait for accepted jobs to hand off completion",
     );
+    assert_eq!(engine.close_count(), 0);
 
     assert!(matches!(
         runtime.reserve().await,
@@ -103,11 +103,15 @@ async fn serial_runtime_close_rejects_new_work_and_waits_for_active_job() {
         Err(ServerError::RuntimeClosed { resource }) if resource == "serial export runtime",
     ));
 
-    release_tx.send(()).expect("release active job");
+    releases.remove(0).send(()).expect("release active job");
     close_task.await.expect("close task");
     let completed = receiver.await.expect("runtime completion");
     let (result, _queue_slot) = completed.into_parts();
     assert_eq!(result.expect("export reply"), ExportReply::Done);
+    assert_eq!(engine.close_count(), 1);
+
+    runtime.close().await.expect("second close is idempotent");
+    assert_eq!(engine.close_count(), 1);
 
     assert!(matches!(
         runtime.reserve().await,
@@ -242,6 +246,7 @@ async fn concurrent_runtime_close_waits_for_accepted_jobs() {
         !close_task.is_finished(),
         "close should wait for accepted concurrent jobs",
     );
+    assert_eq!(engine.close_count(), 0);
     assert!(matches!(
         runtime.reserve().await,
         Err(ServerError::RuntimeClosed { resource }) if resource == "concurrent export runtime",
@@ -250,6 +255,10 @@ async fn concurrent_runtime_close_waits_for_accepted_jobs() {
     releases.remove(0).send(()).expect("release flush");
     assert_done(reply).await;
     close_task.await.expect("close task");
+    assert_eq!(engine.close_count(), 1);
+
+    runtime.close().await.expect("second close is idempotent");
+    assert_eq!(engine.close_count(), 1);
 }
 
 #[tokio::test]
@@ -318,42 +327,11 @@ fn release_all(releases: Vec<oneshot::Sender<()>>) {
     }
 }
 
-struct BlockingEngine {
-    entered: Mutex<Option<oneshot::Sender<()>>>,
-    release: Mutex<Option<oneshot::Receiver<()>>>,
-}
-
-impl BlockingEngine {
-    fn new(entered: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
-        Self {
-            entered: Mutex::new(Some(entered)),
-            release: Mutex::new(Some(release)),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ExportEngine for BlockingEngine {
-    fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
-        Arc::new(MemoryAdmissionPolicy::new(4096))
-    }
-
-    async fn execute_admitted(&self, _request: AdmittedExportRequest) -> ExportResult {
-        if let Some(entered) = self.entered.lock().expect("entered lock").take() {
-            let _ = entered.send(());
-        }
-        let release = self.release.lock().expect("release lock").take();
-        if let Some(release) = release {
-            let _ = release.await;
-        }
-        Ok(ExportReply::Done)
-    }
-}
-
 struct GatedEngine {
     extent_bytes: u64,
     started: Mutex<usize>,
     releases: Mutex<VecDeque<oneshot::Receiver<()>>>,
+    close_calls: AtomicUsize,
 }
 
 impl GatedEngine {
@@ -375,9 +353,14 @@ impl GatedEngine {
                 extent_bytes,
                 started: Mutex::new(0),
                 releases: Mutex::new(releases),
+                close_calls: AtomicUsize::new(0),
             }),
             senders,
         )
+    }
+
+    fn close_count(&self) -> usize {
+        self.close_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -394,6 +377,11 @@ impl ExportEngine for GatedEngine {
             let _ = release.await;
         }
         Ok(ExportReply::Done)
+    }
+
+    async fn close(&self) -> nbd_server::Result<()> {
+        self.close_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
