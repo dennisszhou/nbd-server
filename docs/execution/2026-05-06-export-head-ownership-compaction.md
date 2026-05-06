@@ -3,7 +3,7 @@ Date: 2026-05-06
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 3 and Series 4 approved; Series 3 is current
+- current state: Series 3 finished; Series 4 is approved and current
 Completion:
 - execution complete: no
 
@@ -383,7 +383,7 @@ any retained compaction code is a direct async helper owned by
 success, already-covered/stale outcomes, failure recovery, and reopen replay
 after failure.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
@@ -398,6 +398,27 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Not included: write-pressure threshold compaction and generational/backoff
 policy.
+
+Completed commits:
+
+- `95135cd compaction: extract direct COW compactor`
+- `3d55784 wal_durable: compact on engine close`
+- `17ee74f compaction: remove global queue manager`
+
+Completed verification:
+
+```text
+cargo test -p nbd-server --test compaction --test local_export_registry
+cargo test -p nbd-server --test wal_durable
+make test-protocol
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Review: `$review-series` found no correctness findings. The remaining
+compaction risk is intentionally deferred to Series 4: write-pressure
+compaction has not been added yet and needs its own debt-accounting and
+threshold tests.
 
 ### Series 3 Commit Plan
 
