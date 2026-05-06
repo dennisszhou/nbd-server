@@ -1,8 +1,7 @@
 use crate::{
     connection,
     observability::{self, event, target},
-    CompactionManager, ConnectionId, ExportFactory, LocalBlobStore, LocalExportRegistry,
-    LocalWalProvider, Result, ServerError,
+    ConnectionId, ExportFactory, LocalExportRegistry, LocalWalProvider, Result, ServerError,
 };
 use nbd_config::NbdConfig;
 use nbd_control_plane::{open_catalog, CatalogProvider, CatalogUrl};
@@ -17,7 +16,6 @@ pub struct NbdServer {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
-    compaction_manager: Option<CompactionManager>,
 }
 
 impl NbdServer {
@@ -50,11 +48,6 @@ impl NbdServer {
         let simple_tree_store = catalog.simple_tree_store();
         let cow_tree_store = catalog.cow_tree_store();
         let wal_provider = Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone()));
-        let compaction_manager = CompactionManager::new(
-            cow_tree_store.clone(),
-            wal_provider.clone(),
-            LocalBlobStore::new(config.runtime.blob_dir.clone()),
-        );
         let factory = Arc::new(ExportFactory::new(
             config.server.clone(),
             config.runtime.blob_dir.clone(),
@@ -62,7 +55,6 @@ impl NbdServer {
             simple_tree_store,
             cow_tree_store,
             wal_provider,
-            compaction_manager.clone(),
         ));
         let registry = Arc::new(LocalExportRegistry::new(export_catalog, factory));
         let reply_capacity = config.server.connection.reply_queue_capacity.get();
@@ -133,7 +125,6 @@ impl NbdServer {
             addr,
             shutdown: Some(shutdown_tx),
             task: Some(task),
-            compaction_manager: Some(compaction_manager),
         })
     }
 
@@ -161,9 +152,6 @@ impl NbdServer {
                 )
             })?;
         }
-        if let Some(compaction_manager) = self.compaction_manager.take() {
-            compaction_manager.shutdown().await?;
-        }
         tracing::info!(
             target: target::OPS,
             event = event::SERVER_SHUTDOWN_COMPLETED,
@@ -190,9 +178,6 @@ impl Drop for NbdServer {
         }
         if let Some(task) = &self.task {
             task.abort();
-        }
-        if let Some(compaction_manager) = &self.compaction_manager {
-            compaction_manager.request_shutdown();
         }
     }
 }

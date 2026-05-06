@@ -1,8 +1,8 @@
 use crate::{
     observability::{self, event, target},
-    CompactionManager, ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle,
-    ExportWalHandle, LocalBlobStore, MemoryExportEngine, OpenWal, Result, SerialExportRuntime,
-    ServerError, SimpleDurableEngine, WalDomain, WalDurableEngine, WalProvider,
+    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, ExportWalHandle,
+    LocalBlobStore, MemoryExportEngine, OpenWal, Result, SerialExportRuntime, ServerError,
+    SimpleDurableEngine, WalDomain, WalDurableEngine, WalProvider,
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
@@ -57,7 +57,6 @@ pub struct ExportFactory {
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
-    _compaction_manager: CompactionManager,
 }
 
 struct OpenedEngine {
@@ -256,7 +255,6 @@ impl ExportFactory {
         simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
-        compaction_manager: CompactionManager,
     ) -> Self {
         Self {
             config,
@@ -265,7 +263,6 @@ impl ExportFactory {
             simple_tree_store,
             cow_tree_store,
             wal_provider,
-            _compaction_manager: compaction_manager,
         }
     }
 

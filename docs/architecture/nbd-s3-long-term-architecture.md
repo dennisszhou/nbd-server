@@ -224,13 +224,13 @@ exclusion truth used by open/delete orchestration and future routing/fencing
 behavior. If an active export observes that its lease expired, it must halt;
 recovery from lease loss is out of scope.
 
-## CompactionManager
+## Compaction
 
-Turns WAL records into committed tree state, publishes new roots through
-`ExportCatalog`, and lets active exports catch up to advanced checkpoints by
-notification or refresh. Close-time compaction is an intended feature to reduce
-future WAL replay, but close remains correct if compaction fails and
-acknowledged writes remain durable in WAL.
+Turns WAL records into committed tree state and publishes new roots through
+`ExportCatalog`. Serving engines own the read view that decides which base they
+serve, so close-time and write-pressure compaction are coordinated by the
+active engine instead of a global queue manager. Close remains correct if
+compaction fails because acknowledged writes remain durable in WAL.
 
 ## nbdcli
 

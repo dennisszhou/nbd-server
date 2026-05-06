@@ -5,8 +5,8 @@ use nbd_control_plane::{
     SimpleTreeMetadataStore, WalSeq,
 };
 use nbd_server::{
-    CompactionManager, ExportFactory, ExportOwner, ExportReply, LocalBlobStore,
-    LocalExportRegistry, LocalWalProvider, ServerError, MAX_MEMORY_EXPORT_BYTES,
+    ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider, ServerError,
+    MAX_MEMORY_EXPORT_BYTES,
 };
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
@@ -472,12 +472,6 @@ fn local_registry_with_compaction_store(
     let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
     let cow_tree_store = compaction_store.clone();
     let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
-    let compaction_manager = CompactionManager::with_queue_capacity(
-        compaction_store,
-        wal_provider.clone(),
-        LocalBlobStore::new(blob_dir(runtime)),
-        4,
-    );
     let factory = Arc::new(ExportFactory::new(
         config,
         blob_dir(runtime),
@@ -485,7 +479,6 @@ fn local_registry_with_compaction_store(
         simple_tree_store,
         cow_tree_store,
         wal_provider,
-        compaction_manager,
     ));
     LocalExportRegistry::new(catalog, factory)
 }

@@ -1,18 +1,13 @@
 use nbd_control_plane::{
-    CatalogUrl, ChunkIndex, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, ExportCatalog,
-    ExportEngineKind, ExportId, ExportName, PublishCompaction, PublishCompactionOutcome,
-    SQLiteExportCatalog, WalSeq, TREE_CHUNK_BYTES,
+    CatalogUrl, ChunkIndex, CowTreeMetadataStore, CreateExport, ExportCatalog, ExportEngineKind,
+    ExportId, ExportName, SQLiteExportCatalog, WalSeq, TREE_CHUNK_BYTES,
 };
 use nbd_server::{
-    ByteRange, CompactionEnqueueOutcome, CompactionJob, CompactionManager, CompactionOutcome,
-    ExportWalHandle, LocalBlobStore, LocalWalProvider, OpenWal, WalDomain, WalProvider, WalRequest,
+    ByteRange, CompactionOutcome, CowCompactor, ExportWalHandle, LocalBlobStore, LocalWalProvider,
+    OpenWal, WalDomain, WalProvider, WalRequest,
 };
 use nbd_test_support::TestRuntime;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::time::timeout;
 
 const MIGRATIONS: &[&str] = &[include_str!(
     "../../../prisma/migrations/20260506000000_baseline/migration.sql"
@@ -27,8 +22,8 @@ async fn compaction_publishes_checkpoint_from_wal_records() {
     append(&wal, 2, b"ZZ").await;
 
     let result = fixture
-        .manager
-        .compact_export(CompactionJob::new(created.id().clone(), WalSeq::new(2)))
+        .compactor
+        .compact_export(created.id(), &wal, WalSeq::new(2))
         .await
         .expect("compact export");
 
@@ -63,8 +58,8 @@ async fn compaction_preserves_unaffected_committed_chunks() {
     let wal = fixture.open_wal(created.id()).await;
     append(&wal, 0, b"keep").await;
     fixture
-        .manager
-        .compact_export(CompactionJob::new(created.id().clone(), WalSeq::new(1)))
+        .compactor
+        .compact_export(created.id(), &wal, WalSeq::new(1))
         .await
         .expect("compact first chunk");
     let base = fixture
@@ -76,8 +71,8 @@ async fn compaction_preserves_unaffected_committed_chunks() {
 
     append(&wal, TREE_CHUNK_BYTES + 4, b"next").await;
     fixture
-        .manager
-        .compact_export(CompactionJob::new(created.id().clone(), WalSeq::new(2)))
+        .compactor
+        .compact_export(created.id(), &wal, WalSeq::new(2))
         .await
         .expect("compact second chunk");
 
@@ -98,14 +93,14 @@ async fn compaction_is_idempotent_for_covered_jobs() {
     let wal = fixture.open_wal(created.id()).await;
     append(&wal, 0, b"done").await;
     fixture
-        .manager
-        .compact_export(CompactionJob::new(created.id().clone(), WalSeq::new(1)))
+        .compactor
+        .compact_export(created.id(), &wal, WalSeq::new(1))
         .await
         .expect("compact first job");
 
     let result = fixture
-        .manager
-        .compact_export(CompactionJob::new(created.id().clone(), WalSeq::new(1)))
+        .compactor
+        .compact_export(created.id(), &wal, WalSeq::new(1))
         .await
         .expect("compact duplicate");
 
@@ -122,8 +117,8 @@ async fn compaction_clamps_target_to_durable_wal_bounds() {
     append(&wal, 0, b"only").await;
 
     let result = fixture
-        .manager
-        .compact_export(CompactionJob::new(created.id().clone(), WalSeq::new(99)))
+        .compactor
+        .compact_export(created.id(), &wal, WalSeq::new(99))
         .await
         .expect("compact clamped job");
 
@@ -137,132 +132,12 @@ async fn compaction_clamps_target_to_durable_wal_bounds() {
     assert_eq!(snapshot.base_wal_seq(), WalSeq::new(1));
 }
 
-#[tokio::test]
-async fn shutdown_finishes_current_job_and_drops_pending_jobs() {
-    let runtime = TestRuntime::new().expect("test runtime");
-    let catalog = migrated_catalog(&runtime).await;
-    let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
-    let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
-    let blocking_store = Arc::new(BlockingCowTreeStore::new(catalog.clone()));
-    let manager = CompactionManager::with_queue_capacity(
-        blocking_store.clone() as Arc<dyn CowTreeMetadataStore>,
-        wal_provider.clone(),
-        blob_store,
-        4,
-    );
-    let created = catalog
-        .create_export(
-            CreateExport::new(
-                ExportName::new("disk-a").expect("export name"),
-                TREE_CHUNK_BYTES,
-                4096,
-                ExportEngineKind::WalDurable,
-            )
-            .expect("create export"),
-        )
-        .await
-        .expect("create wal export");
-    let wal = wal_provider
-        .open_export(OpenWal::new(WalDomain::for_export_id(created.id().clone())))
-        .await
-        .expect("open wal");
-    append(&wal, 0, b"first").await;
-    append(&wal, 8, b"second").await;
-
-    assert_eq!(
-        manager.enqueue(CompactionJob::new(created.id().clone(), WalSeq::new(1))),
-        CompactionEnqueueOutcome::Queued,
-    );
-    blocking_store.wait_for_publish_count(1).await;
-    assert_eq!(
-        manager.enqueue(CompactionJob::new(created.id().clone(), WalSeq::new(2))),
-        CompactionEnqueueOutcome::Queued,
-    );
-
-    manager.request_shutdown();
-    assert_eq!(
-        manager.enqueue(CompactionJob::new(created.id().clone(), WalSeq::new(2))),
-        CompactionEnqueueOutcome::ShuttingDown,
-    );
-    blocking_store.release_first_publish();
-    let shutdown = manager.shutdown().await.expect("shutdown compaction");
-
-    assert_eq!(shutdown.dropped_pending_jobs(), 1);
-    assert_eq!(blocking_store.publish_count(), 1);
-    let snapshot = catalog
-        .load_cow_tree(created.id())
-        .await
-        .expect("load cow tree");
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(1));
-}
-
 struct CompactionFixture {
     _runtime: TestRuntime,
     catalog: SQLiteExportCatalog,
     blob_store: LocalBlobStore,
     wal_provider: Arc<LocalWalProvider>,
-    manager: CompactionManager,
-}
-
-struct BlockingCowTreeStore {
-    inner: SQLiteExportCatalog,
-    publish_count: AtomicUsize,
-    publish_started: Notify,
-    release_publish: Notify,
-}
-
-impl BlockingCowTreeStore {
-    fn new(inner: SQLiteExportCatalog) -> Self {
-        Self {
-            inner,
-            publish_count: AtomicUsize::new(0),
-            publish_started: Notify::new(),
-            release_publish: Notify::new(),
-        }
-    }
-
-    async fn wait_for_publish_count(&self, expected: usize) {
-        timeout(Duration::from_secs(5), async {
-            loop {
-                if self.publish_count.load(Ordering::SeqCst) >= expected {
-                    return;
-                }
-                self.publish_started.notified().await;
-            }
-        })
-        .await
-        .expect("wait for blocked compaction publish");
-    }
-
-    fn release_first_publish(&self) {
-        self.release_publish.notify_waiters();
-    }
-
-    fn publish_count(&self) -> usize {
-        self.publish_count.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait::async_trait]
-impl CowTreeMetadataStore for BlockingCowTreeStore {
-    async fn load_cow_tree(
-        &self,
-        export_id: &ExportId,
-    ) -> nbd_control_plane::Result<CowTreeSnapshot> {
-        self.inner.load_cow_tree(export_id).await
-    }
-
-    async fn publish_compaction(
-        &self,
-        request: PublishCompaction,
-    ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
-        let count = self.publish_count.fetch_add(1, Ordering::SeqCst) + 1;
-        self.publish_started.notify_waiters();
-        if count == 1 {
-            self.release_publish.notified().await;
-        }
-        self.inner.publish_compaction(request).await
-    }
+    compactor: CowCompactor,
 }
 
 impl CompactionFixture {
@@ -271,11 +146,9 @@ impl CompactionFixture {
         let catalog = migrated_catalog(&runtime).await;
         let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
         let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
-        let manager = CompactionManager::with_queue_capacity(
+        let compactor = CowCompactor::new(
             Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
-            wal_provider.clone(),
             blob_store.clone(),
-            4,
         );
 
         Self {
@@ -283,7 +156,7 @@ impl CompactionFixture {
             catalog,
             blob_store,
             wal_provider,
-            manager,
+            compactor,
         }
     }
 

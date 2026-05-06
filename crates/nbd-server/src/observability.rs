@@ -86,8 +86,6 @@ pub mod event {
     pub const WAL_ROOT_LOADED: &str = "wal.root.loaded";
     pub const WAL_REPLAY_COMPLETED: &str = "wal.replay.completed";
     pub const WAL_COMPACTION_COMPLETED: &str = "wal.compaction.completed";
-    pub const WAL_COMPACTION_ENQUEUED: &str = "wal.compaction.enqueued";
-    pub const WAL_COMPACTION_ENQUEUE_FAILED: &str = "wal.compaction.enqueue_failed";
     pub const WAL_COMPACTION_FAILED: &str = "wal.compaction.failed";
 }
 

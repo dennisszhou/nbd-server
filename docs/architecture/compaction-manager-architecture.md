@@ -1,6 +1,12 @@
 Title: Compaction Manager Architecture
 Date: 2026-05-01
-Status: draft
+Status: superseded
+
+Superseded by `docs/plans/2026-05-06-export-head-ownership-compaction.md`.
+The live implementation uses an engine-owned compaction coordinator over a
+direct `CowCompactor`; it no longer has a global `CompactionManager` queue or
+background worker shutdown lifecycle. This document is retained only as
+historical context for the earlier queue-based design.
 
 # Problem
 

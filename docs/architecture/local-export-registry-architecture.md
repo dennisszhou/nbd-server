@@ -203,7 +203,7 @@ local record and release the lease before returning failure.
 The active descriptor loaded during `begin_open` is stable export identity and
 configuration from `exports`; it is not the current serving head. Engines that
 depend on durable state load the latest head/tree snapshot while constructing
-their serving state. This keeps background compaction or future resize work
+their serving state. This keeps compaction or future resize work
 from making a previously loaded head stale during open.
 
 The long-term system may support multiple connections for the same active
@@ -225,21 +225,21 @@ the registry has a real client identity to compare.
 connection close or NBD_CMD_DISC
   -> stop accepting new requests on the connection
   -> finish/cancel outstanding work according to shutdown policy
-  -> enqueue close-time compaction on clean close
+  -> runtime drains accepted work and calls engine.close()
+  -> engine performs any close-time storage cleanup
   -> unregister export from LocalExportRegistry
   -> release or stop renewing the serving lease
 ```
 
-Close-time compaction is intended but not required for correctness. The close
-path submits a background compaction job after acknowledged writes remain
-durable in WAL, then lets the export close without waiting for that job. If the
-job fails, the next open replays retained WAL after the last catalog
-checkpoint.
+Close-time compaction is engine-owned and is not required for correctness. A
+WAL durable engine may compact synchronously from `engine.close()` after
+accepted work drains. If compaction fails, close still succeeds and the next
+open replays retained WAL after the last catalog checkpoint.
 
-Background compaction must reread catalog state when it runs. If delete races
-after close and marks the export deleted, compaction publication should observe
-that durable state and no-op or fail without advancing the head. Delete does
-not need to wait for best-effort compaction.
+Compaction must reread catalog state when it runs. If delete races after close
+and marks the export deleted, compaction publication should observe that
+durable state and no-op or fail without advancing the head. Delete does not
+need to wait for best-effort compaction.
 
 # Delete Interaction
 

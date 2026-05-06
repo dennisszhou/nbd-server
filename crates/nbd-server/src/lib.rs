@@ -25,10 +25,7 @@ pub mod wal_durable;
 pub use admission::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
 };
-pub use compaction::{
-    CompactionEnqueueOutcome, CompactionJob, CompactionManager, CompactionOutcome,
-    CompactionResult, CompactionShutdown,
-};
+pub use compaction::{CompactionOutcome, CompactionResult, CowCompactor};
 pub use error::{Result, ServerError};
 pub use export::{
     AdmittedExportRequest, CompletedExport, ExportAdmissionPolicy, ExportAdmissionPolicyHandle,

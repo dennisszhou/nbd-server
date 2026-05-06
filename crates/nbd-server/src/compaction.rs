@@ -1,56 +1,11 @@
-use crate::{
-    observability::{self, event, target},
-    ExportWalHandle, LocalBlobStore, OpenWal, Result, ServerError, WalDomain, WalProvider,
-};
+use crate::{ExportWalHandle, LocalBlobStore, Result, ServerError};
 use nbd_control_plane::{
     ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportId,
     ExportLayoutKind, PublishCompaction, PublishCompactionOutcome, WalSeq, TREE_CHUNK_BYTES,
 };
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-
-const DEFAULT_COMPACTION_QUEUE_CAPACITY: usize = 16;
-
-#[derive(Clone)]
-pub struct CompactionManager {
-    worker: Arc<CompactionWorker>,
-    queue: CompactionQueue,
-    shutdown: Arc<CompactionShutdownState>,
-}
-
-#[derive(Clone)]
-struct CompactionQueue {
-    sender: mpsc::Sender<CompactionJob>,
-    accepting: Arc<AtomicBool>,
-}
-
-#[derive(Debug)]
-struct CompactionShutdownState {
-    signal: Mutex<Option<oneshot::Sender<()>>>,
-    worker: Mutex<Option<JoinHandle<CompactionWorkerExit>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactionJob {
-    export_id: ExportId,
-    through_wal_seq: WalSeq,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactionEnqueueOutcome {
-    Queued,
-    DroppedFull,
-    ShuttingDown,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CompactionShutdown {
-    dropped_pending_jobs: usize,
-}
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
@@ -71,142 +26,9 @@ pub enum CompactionOutcome {
 }
 
 #[derive(Clone)]
-struct CompactionWorker {
-    compactor: CowCompactor,
-    wal_provider: Arc<dyn WalProvider>,
-}
-
-#[derive(Clone)]
-pub(crate) struct CowCompactor {
+pub struct CowCompactor {
     catalog: Arc<dyn CowTreeMetadataStore>,
     blob_store: LocalBlobStore,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CompactionWorkerExit {
-    dropped_pending_jobs: usize,
-}
-
-impl CompactionManager {
-    pub fn new(
-        catalog: Arc<dyn CowTreeMetadataStore>,
-        wal_provider: Arc<dyn WalProvider>,
-        blob_store: LocalBlobStore,
-    ) -> Self {
-        Self::with_queue_capacity(
-            catalog,
-            wal_provider,
-            blob_store,
-            DEFAULT_COMPACTION_QUEUE_CAPACITY,
-        )
-    }
-
-    pub fn with_queue_capacity(
-        catalog: Arc<dyn CowTreeMetadataStore>,
-        wal_provider: Arc<dyn WalProvider>,
-        blob_store: LocalBlobStore,
-        queue_capacity: usize,
-    ) -> Self {
-        let compactor = CowCompactor::new(catalog, blob_store);
-        let worker = Arc::new(CompactionWorker {
-            compactor,
-            wal_provider,
-        });
-        let accepting = Arc::new(AtomicBool::new(true));
-        let (sender, receiver) = mpsc::channel(queue_capacity);
-        let queue = CompactionQueue {
-            sender,
-            accepting: accepting.clone(),
-        };
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let worker_task = spawn_worker(worker.clone(), receiver, shutdown_rx, accepting);
-        let shutdown = Arc::new(CompactionShutdownState {
-            signal: Mutex::new(Some(shutdown_tx)),
-            worker: Mutex::new(Some(worker_task)),
-        });
-
-        Self {
-            worker,
-            queue,
-            shutdown,
-        }
-    }
-
-    pub fn enqueue(&self, job: CompactionJob) -> CompactionEnqueueOutcome {
-        if !self.queue.accepting.load(Ordering::Acquire) {
-            return CompactionEnqueueOutcome::ShuttingDown;
-        }
-
-        match self.queue.sender.try_send(job) {
-            Ok(()) => CompactionEnqueueOutcome::Queued,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                if self.queue.accepting.load(Ordering::Acquire) {
-                    CompactionEnqueueOutcome::DroppedFull
-                } else {
-                    CompactionEnqueueOutcome::ShuttingDown
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => CompactionEnqueueOutcome::ShuttingDown,
-        }
-    }
-
-    pub async fn compact_export(&self, job: CompactionJob) -> Result<CompactionResult> {
-        self.worker.compact_export(job).await
-    }
-
-    pub fn request_shutdown(&self) {
-        self.queue.accepting.store(false, Ordering::Release);
-        let Ok(mut signal) = self.shutdown.signal.lock() else {
-            return;
-        };
-        if let Some(signal) = signal.take() {
-            let _ = signal.send(());
-        }
-    }
-
-    pub async fn shutdown(&self) -> Result<CompactionShutdown> {
-        self.request_shutdown();
-        let worker = {
-            let mut worker =
-                self.shutdown
-                    .worker
-                    .lock()
-                    .map_err(|_| ServerError::LockPoisoned {
-                        resource: "compaction worker shutdown",
-                    })?;
-            worker.take()
-        };
-
-        let Some(worker) = worker else {
-            return Ok(CompactionShutdown::default());
-        };
-        let worker_exit = worker.await.map_err(|source| {
-            ServerError::io(
-                "join compaction worker",
-                std::io::Error::other(source.to_string()),
-            )
-        })?;
-        Ok(CompactionShutdown {
-            dropped_pending_jobs: worker_exit.dropped_pending_jobs,
-        })
-    }
-}
-
-impl CompactionJob {
-    pub fn new(export_id: ExportId, through_wal_seq: WalSeq) -> Self {
-        Self {
-            export_id,
-            through_wal_seq,
-        }
-    }
-
-    pub fn export_id(&self) -> &ExportId {
-        &self.export_id
-    }
-
-    pub fn through_wal_seq(&self) -> WalSeq {
-        self.through_wal_seq
-    }
 }
 
 impl CompactionResult {
@@ -235,36 +57,15 @@ impl CompactionResult {
     }
 }
 
-impl CompactionShutdown {
-    pub fn dropped_pending_jobs(&self) -> usize {
-        self.dropped_pending_jobs
-    }
-}
-
-impl CompactionWorker {
-    async fn compact_export(&self, job: CompactionJob) -> Result<CompactionResult> {
-        let wal = self.open_wal(job.export_id()).await?;
-        self.compactor
-            .compact_export(job.export_id(), &wal, job.through_wal_seq())
-            .await
-    }
-
-    async fn open_wal(&self, export_id: &ExportId) -> Result<ExportWalHandle> {
-        self.wal_provider
-            .open_export(OpenWal::new(WalDomain::for_export_id(export_id.clone())))
-            .await
-    }
-}
-
 impl CowCompactor {
-    pub(crate) fn new(catalog: Arc<dyn CowTreeMetadataStore>, blob_store: LocalBlobStore) -> Self {
+    pub fn new(catalog: Arc<dyn CowTreeMetadataStore>, blob_store: LocalBlobStore) -> Self {
         Self {
             catalog,
             blob_store,
         }
     }
 
-    pub(crate) async fn compact_export(
+    pub async fn compact_export(
         &self,
         export_id: &ExportId,
         wal: &ExportWalHandle,
@@ -425,85 +226,4 @@ fn snapshot_to_export_head(snapshot: &CowTreeSnapshot) -> Result<ExportHead> {
         snapshot.base_wal_seq(),
     )
     .map_err(ServerError::catalog)
-}
-
-fn spawn_worker(
-    worker: Arc<CompactionWorker>,
-    mut receiver: mpsc::Receiver<CompactionJob>,
-    mut shutdown: oneshot::Receiver<()>,
-    accepting: Arc<AtomicBool>,
-) -> JoinHandle<CompactionWorkerExit> {
-    tokio::spawn(async move {
-        let mut dropped_pending_jobs = 0usize;
-        loop {
-            if !accepting.load(Ordering::Acquire) {
-                receiver.close();
-                dropped_pending_jobs += drain_pending_jobs(&mut receiver);
-                break;
-            }
-
-            tokio::select! {
-                biased;
-
-                _ = &mut shutdown => {
-                    accepting.store(false, Ordering::Release);
-                    receiver.close();
-                    dropped_pending_jobs += drain_pending_jobs(&mut receiver);
-                    break;
-                }
-                job = receiver.recv() => {
-                    let Some(job) = job else {
-                        break;
-                    };
-                    process_job(&worker, job).await;
-                }
-            }
-        }
-
-        CompactionWorkerExit {
-            dropped_pending_jobs,
-        }
-    })
-}
-
-async fn process_job(worker: &Arc<CompactionWorker>, job: CompactionJob) {
-    let export_id = job.export_id().clone();
-    let through_wal_seq = job.through_wal_seq();
-    match worker.compact_export(job).await {
-        Ok(result) => {
-            tracing::info!(
-                target: target::WAL,
-                event = event::WAL_COMPACTION_COMPLETED,
-                service = observability::SERVICE_NAME,
-                server_instance_id = observability::server_instance_id(),
-                pid = observability::pid(),
-                export_id = %result.export_id(),
-                base_wal_seq = result.base_wal_seq().get(),
-                target_wal_seq = result.target_wal_seq().get(),
-                compacted_records = result.compacted_records(),
-                written_leaf_blobs = result.written_leaf_blobs(),
-                outcome = ?result.outcome(),
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: target::WAL,
-                event = event::WAL_COMPACTION_FAILED,
-                service = observability::SERVICE_NAME,
-                server_instance_id = observability::server_instance_id(),
-                pid = observability::pid(),
-                export_id = %export_id,
-                target_wal_seq = through_wal_seq.get(),
-                error = %error,
-            );
-        }
-    }
-}
-
-fn drain_pending_jobs(receiver: &mut mpsc::Receiver<CompactionJob>) -> usize {
-    let mut dropped = 0usize;
-    while receiver.try_recv().is_ok() {
-        dropped += 1;
-    }
-    dropped
 }
