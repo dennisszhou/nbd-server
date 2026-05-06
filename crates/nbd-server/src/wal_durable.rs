@@ -59,6 +59,7 @@ pub struct ExportReadView {
 struct ExportReadViewState {
     root: RootSnapshot,
     last_applied_seq: WalSeq,
+    wal_debt_bytes: u64,
     overlay: OverlayExtentMap,
     cache: ReadCache,
 }
@@ -217,6 +218,10 @@ impl WalDurableEngine {
 
     pub async fn export_head(&self) -> Result<ExportHead> {
         self.read_view.export_head().await
+    }
+
+    pub async fn wal_debt_bytes(&self) -> u64 {
+        self.read_view.wal_debt_bytes().await
     }
 
     async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
@@ -661,6 +666,7 @@ impl ExportReadView {
             state: RwLock::new(ExportReadViewState {
                 root,
                 last_applied_seq,
+                wal_debt_bytes: 0,
                 overlay: OverlayExtentMap::new(),
                 cache: ReadCache::new(cache_bytes),
             }),
@@ -674,6 +680,10 @@ impl ExportReadView {
 
     async fn last_applied_seq(&self) -> WalSeq {
         self.state.read().await.last_applied_seq
+    }
+
+    async fn wal_debt_bytes(&self) -> u64 {
+        self.state.read().await.wal_debt_bytes
     }
 
     pub async fn read(&self, range: ByteRange) -> Result<Vec<u8>> {
@@ -772,10 +782,15 @@ impl ExportReadView {
             ));
         }
         let record_range = record.range();
+        let debt_bytes = record.data().len() as u64;
         let record = Arc::new(record);
         state.overlay.insert_record(record)?;
         state.cache.trim_range(record_range)?;
         state.last_applied_seq = expected_seq;
+        state.wal_debt_bytes = state
+            .wal_debt_bytes
+            .checked_add(debt_bytes)
+            .ok_or_else(|| ServerError::wal("apply WAL record", "WAL debt bytes overflowed"))?;
         Ok(())
     }
 
@@ -827,6 +842,9 @@ impl ExportReadView {
         }
         state.overlay.remove_retired(&retired)?;
         state.root = new_root;
+        if new_checkpoint == state.last_applied_seq {
+            state.wal_debt_bytes = 0;
+        }
         Ok(())
     }
 }

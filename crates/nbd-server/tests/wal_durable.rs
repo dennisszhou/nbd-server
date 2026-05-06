@@ -144,6 +144,48 @@ async fn wal_durable_engine_reopen_recovers_runtime_write() {
 }
 
 #[tokio::test]
+async fn wal_durable_engine_tracks_wal_debt_for_replay_and_writes() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let meta = export_record("disk-debt", "export-debt", 4096);
+    let wal = open_wal(&runtime, "export-debt").await;
+    wal.append(
+        WalRequest::new(nbd_server::ByteRange::new(1, 3), b"abc".to_vec())
+            .expect("first WAL request"),
+    )
+    .await
+    .expect("append first");
+    wal.append(
+        WalRequest::new(nbd_server::ByteRange::new(8, 2), b"de".to_vec())
+            .expect("second WAL request"),
+    )
+    .await
+    .expect("append second");
+    let engine = Arc::new(
+        WalDurableEngine::open(&meta, wal)
+            .await
+            .expect("wal durable engine"),
+    );
+    assert_eq!(engine.wal_debt_bytes().await, 5);
+
+    let export_runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 4);
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 16,
+                data: b"more".to_vec(),
+            },
+        )
+        .await
+        .expect("write"),
+        ExportReply::Done,
+    );
+    assert_eq!(engine.wal_debt_bytes().await, 9);
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
 async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
     let runtime = TestRuntime::new().expect("test runtime");
     let catalog = migrated_catalog(&runtime).await;
@@ -302,6 +344,7 @@ async fn wal_durable_engine_close_compacts_applied_writes_and_advances_read_view
             .base_wal_seq(),
         WalSeq::new(2),
     );
+    assert_eq!(engine.wal_debt_bytes().await, 0);
     assert_eq!(
         wal.bounds().await.expect("WAL bounds").pruned_through,
         WalSeq::new(2),
