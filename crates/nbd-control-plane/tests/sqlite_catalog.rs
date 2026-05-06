@@ -7,10 +7,26 @@ use nbd_control_plane::{
 };
 use nbd_test_support::TestRuntime;
 use sqlx::Row;
+use std::error::Error as _;
 
 const MIGRATIONS: &[&str] = &[include_str!(
     "../../../prisma/migrations/20260506000000_baseline/migration.sql"
 )];
+
+#[tokio::test]
+async fn sqlite_errors_preserve_database_source() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    catalog.pool().close().await;
+
+    let error = catalog
+        .list_exports(ListExports::active_only())
+        .await
+        .expect_err("closed pool should fail");
+
+    assert!(matches!(error, CatalogError::Database { .. }));
+    assert!(error.source().is_some());
+    assert!(error.to_string().contains("database error:"));
+}
 
 #[tokio::test]
 async fn create_export_initializes_memory_head() {

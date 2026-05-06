@@ -1467,5 +1467,5 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 fn map_sqlx_error(error: sqlx::Error) -> CatalogError {
-    CatalogError::database(format!("database error: {error}"))
+    CatalogError::database_source(format!("database error: {error}"), error)
 }
