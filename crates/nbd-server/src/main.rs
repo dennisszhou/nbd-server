@@ -69,7 +69,8 @@ async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
         listen_addr = %server.addr(),
     );
 
-    std::future::pending::<()>().await;
+    tokio::signal::ctrl_c().await?;
+    server.shutdown().await?;
     Ok(())
 }
 
