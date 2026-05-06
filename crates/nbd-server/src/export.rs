@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_completion_waits_for_reply_queue_capacity() {
+    async fn connection_completion_waits_for_reply_queue_space() {
         let meta = export_record("disk-a", 4096);
         let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory engine"));
         let runtime = SerialExportRuntime::with_capacity(meta, engine, 2);

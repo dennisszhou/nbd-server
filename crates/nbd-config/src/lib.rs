@@ -82,16 +82,6 @@ pub struct ServerConfig {
     pub export_runtime: ExportRuntimeKind,
     #[serde(default = "default_export_queue_depth")]
     pub export_queue_depth: NonZeroUsize,
-    #[serde(default)]
-    pub connection: ServerConnectionConfig,
-}
-
-/// NBD server per-connection runtime policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerConnectionConfig {
-    #[serde(default = "default_reply_queue_capacity")]
-    pub reply_queue_capacity: NonZeroUsize,
 }
 
 /// Process logging configuration.
@@ -131,15 +121,6 @@ impl Default for ServerConfig {
         Self {
             export_runtime: ExportRuntimeKind::default(),
             export_queue_depth: default_export_queue_depth(),
-            connection: ServerConnectionConfig::default(),
-        }
-    }
-}
-
-impl Default for ServerConnectionConfig {
-    fn default() -> Self {
-        Self {
-            reply_queue_capacity: default_reply_queue_capacity(),
         }
     }
 }
@@ -154,10 +135,6 @@ impl Default for LoggingConfig {
 
 fn default_export_queue_depth() -> NonZeroUsize {
     template_config().server.export_queue_depth
-}
-
-fn default_reply_queue_capacity() -> NonZeroUsize {
-    template_config().server.connection.reply_queue_capacity
 }
 
 pub fn default_log_file_path() -> PathBuf {
@@ -203,7 +180,6 @@ pub enum ConfigKey {
     RuntimeWalDir,
     ServerExportRuntime,
     ServerExportQueueDepth,
-    ServerConnectionReplyQueueCapacity,
     LoggingFilePath,
 }
 
@@ -416,7 +392,7 @@ impl LoadedConfig {
 }
 
 impl ConfigKey {
-    pub const SUPPORTED_KEYS: &'static str = "catalog.url, runtime.state_dir, runtime.blob_dir, runtime.wal_dir, server.export_runtime, server.export_queue_depth, server.connection.reply_queue_capacity, logging.file_path";
+    pub const SUPPORTED_KEYS: &'static str = "catalog.url, runtime.state_dir, runtime.blob_dir, runtime.wal_dir, server.export_runtime, server.export_queue_depth, logging.file_path";
 
     pub fn value(self, config: &NbdConfig) -> String {
         match self {
@@ -426,12 +402,6 @@ impl ConfigKey {
             Self::RuntimeWalDir => config.runtime.wal_dir.display().to_string(),
             Self::ServerExportRuntime => config.server.export_runtime.to_string(),
             Self::ServerExportQueueDepth => config.server.export_queue_depth.get().to_string(),
-            Self::ServerConnectionReplyQueueCapacity => config
-                .server
-                .connection
-                .reply_queue_capacity
-                .get()
-                .to_string(),
             Self::LoggingFilePath => config.logging.file_path.display().to_string(),
         }
     }
@@ -448,9 +418,6 @@ impl FromStr for ConfigKey {
             "runtime.wal_dir" => Ok(Self::RuntimeWalDir),
             "server.export_runtime" => Ok(Self::ServerExportRuntime),
             "server.export_queue_depth" => Ok(Self::ServerExportQueueDepth),
-            "server.connection.reply_queue_capacity" => {
-                Ok(Self::ServerConnectionReplyQueueCapacity)
-            }
             "logging.file_path" => Ok(Self::LoggingFilePath),
             _ => Err(ConfigError::InvalidConfigKey {
                 key: value.to_owned(),

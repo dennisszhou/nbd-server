@@ -31,8 +31,7 @@ fn explicit_config_loads_from_requested_path() {
         catalog_file_url_for_path(catalog_path).unwrap()
     );
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
-    assert_eq!(config.server.export_queue_depth.get(), 128);
-    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
+    assert_eq!(config.server.export_queue_depth.get(), 64);
     assert_eq!(config.logging.file_path, default_log_file_path());
 }
 
@@ -72,8 +71,7 @@ fn default_config_for_home_uses_absolute_home_paths() {
     );
     assert!(config.catalog.url.starts_with("file:"));
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
-    assert_eq!(config.server.export_queue_depth.get(), 128);
-    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
+    assert_eq!(config.server.export_queue_depth.get(), 64);
     assert_eq!(config.logging.file_path, default_log_file_path());
 }
 
@@ -168,13 +166,7 @@ fn config_keys_read_typed_values() {
         ConfigKey::from_str("server.export_queue_depth")
             .unwrap()
             .value(&config),
-        "128"
-    );
-    assert_eq!(
-        ConfigKey::from_str("server.connection.reply_queue_capacity")
-            .unwrap()
-            .value(&config),
-        "128"
+        "64"
     );
 }
 
@@ -284,8 +276,7 @@ fn explicit_server_config_loads_runtime_choice() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
-    assert_eq!(config.server.export_queue_depth.get(), 128);
-    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
+    assert_eq!(config.server.export_queue_depth.get(), 64);
 }
 
 #[test]
@@ -306,8 +297,7 @@ fn explicit_server_config_loads_concurrent_runtime_choice() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
-    assert_eq!(config.server.export_queue_depth.get(), 128);
-    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
+    assert_eq!(config.server.export_queue_depth.get(), 64);
 }
 
 #[test]
@@ -339,7 +329,7 @@ fn explicit_server_config_loads_queue_sizing() {
     let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\nexport_queue_depth = 7\n\n[server.connection]\nreply_queue_capacity = 3\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_runtime = \"serial\"\nexport_queue_depth = 7\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
         state_dir,
         wal_dir,
@@ -350,7 +340,6 @@ fn explicit_server_config_loads_queue_sizing() {
 
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
     assert_eq!(config.server.export_queue_depth.get(), 7);
-    assert_eq!(config.server.connection.reply_queue_capacity.get(), 3);
 }
 
 #[test]
@@ -361,7 +350,7 @@ fn zero_queue_sizing_is_rejected() {
     let wal_dir = state_dir.join("wal");
     let config_path = temp.path().join("config.toml");
     let contents = format!(
-        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_queue_depth = 0\n\n[server.connection]\nreply_queue_capacity = 1\n",
+        "[catalog]\nurl = {:?}\n\n[runtime]\nstate_dir = {:?}\nwal_dir = {:?}\n\n[server]\nexport_queue_depth = 0\n",
         catalog_file_url_for_path(catalog_path).unwrap(),
         state_dir,
         wal_dir,

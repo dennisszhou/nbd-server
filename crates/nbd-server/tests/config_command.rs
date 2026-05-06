@@ -67,7 +67,7 @@ fn config_command_get_prints_existing_explicit_value() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("config stdout is UTF-8"),
-        "128\n"
+        "64\n"
     );
 }
 

@@ -322,7 +322,6 @@ async fn serial_runtime_handles_pipelined_protocol_smoke() {
         .configure_server(ServerConfig {
             export_runtime: ExportRuntimeKind::Serial,
             export_queue_depth: NonZeroUsize::new(4).expect("nonzero queue depth"),
-            ..ServerConfig::default()
         })
         .expect("configure serial runtime");
     fixture

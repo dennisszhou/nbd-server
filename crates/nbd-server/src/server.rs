@@ -57,7 +57,7 @@ impl NbdServer {
             wal_provider,
         ));
         let registry = Arc::new(LocalExportRegistry::new(export_catalog, factory));
-        let reply_capacity = config.server.connection.reply_queue_capacity.get();
+        let reply_capacity = config.server.export_queue_depth.get();
         let listener = TcpListener::bind(listen)
             .await
             .map_err(|source| ServerError::io("bind NBD server", source))?;

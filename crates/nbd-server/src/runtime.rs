@@ -4,14 +4,13 @@ use crate::{
     ExportRequest, ExportResult, Result, ServerError,
     observability::{self, event, target},
 };
+use nbd_config::ServerConfig;
 use nbd_control_plane::ExportRecord;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::Instrument;
-
-pub const DEFAULT_EXPORT_QUEUE_CAPACITY: usize = 128;
 
 /// Export-owned request execution boundary.
 #[async_trait::async_trait]
@@ -111,7 +110,7 @@ enum PreparedExportJob {
 
 impl SerialExportRuntime {
     pub fn new(meta: ExportRecord, engine: ExportEngineHandle) -> Self {
-        Self::with_capacity(meta, engine, DEFAULT_EXPORT_QUEUE_CAPACITY)
+        Self::with_capacity(meta, engine, default_export_queue_capacity())
     }
 
     pub fn with_capacity(meta: ExportRecord, engine: ExportEngineHandle, capacity: usize) -> Self {
@@ -160,7 +159,7 @@ impl SerialExportRuntime {
 
 impl ConcurrentExportRuntime {
     pub fn new(meta: ExportRecord, engine: ExportEngineHandle) -> Self {
-        Self::with_capacity(meta, engine, DEFAULT_EXPORT_QUEUE_CAPACITY)
+        Self::with_capacity(meta, engine, default_export_queue_capacity())
     }
 
     pub fn with_capacity(meta: ExportRecord, engine: ExportEngineHandle, capacity: usize) -> Self {
@@ -183,6 +182,10 @@ impl ConcurrentExportRuntime {
             engine_close,
         }
     }
+}
+
+fn default_export_queue_capacity() -> usize {
+    ServerConfig::default().export_queue_depth.get()
 }
 
 impl RuntimeEngineClose {
