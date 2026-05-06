@@ -72,8 +72,13 @@ pub enum CompactionOutcome {
 
 #[derive(Clone)]
 struct CompactionWorker {
-    catalog: Arc<dyn CowTreeMetadataStore>,
+    compactor: CowCompactor,
     wal_provider: Arc<dyn WalProvider>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CowCompactor {
+    catalog: Arc<dyn CowTreeMetadataStore>,
     blob_store: LocalBlobStore,
 }
 
@@ -102,10 +107,10 @@ impl CompactionManager {
         blob_store: LocalBlobStore,
         queue_capacity: usize,
     ) -> Self {
+        let compactor = CowCompactor::new(catalog, blob_store);
         let worker = Arc::new(CompactionWorker {
-            catalog,
+            compactor,
             wal_provider,
-            blob_store,
         });
         let accepting = Arc::new(AtomicBool::new(true));
         let (sender, receiver) = mpsc::channel(queue_capacity);
@@ -238,19 +243,45 @@ impl CompactionShutdown {
 
 impl CompactionWorker {
     async fn compact_export(&self, job: CompactionJob) -> Result<CompactionResult> {
+        let wal = self.open_wal(job.export_id()).await?;
+        self.compactor
+            .compact_export(job.export_id(), &wal, job.through_wal_seq())
+            .await
+    }
+
+    async fn open_wal(&self, export_id: &ExportId) -> Result<ExportWalHandle> {
+        self.wal_provider
+            .open_export(OpenWal::new(WalDomain::for_export_id(export_id.clone())))
+            .await
+    }
+}
+
+impl CowCompactor {
+    pub(crate) fn new(catalog: Arc<dyn CowTreeMetadataStore>, blob_store: LocalBlobStore) -> Self {
+        Self {
+            catalog,
+            blob_store,
+        }
+    }
+
+    pub(crate) async fn compact_export(
+        &self,
+        export_id: &ExportId,
+        wal: &ExportWalHandle,
+        through_wal_seq: WalSeq,
+    ) -> Result<CompactionResult> {
         let snapshot = self
             .catalog
-            .load_cow_tree(job.export_id())
+            .load_cow_tree(export_id)
             .await
             .map_err(ServerError::catalog)?;
-        let wal = self.open_wal(job.export_id()).await?;
         let bounds = wal.bounds().await?;
-        let target_wal_seq = job.through_wal_seq().min(bounds.last_durable);
+        let target_wal_seq = through_wal_seq.min(bounds.last_durable);
         let base_wal_seq = snapshot.base_wal_seq();
 
         if target_wal_seq <= base_wal_seq {
             return Ok(CompactionResult {
-                export_id: job.export_id().clone(),
+                export_id: export_id.clone(),
                 base_wal_seq,
                 target_wal_seq,
                 compacted_records: 0,
@@ -269,7 +300,7 @@ impl CompactionWorker {
 
         if compacted_records == 0 {
             return Ok(CompactionResult {
-                export_id: job.export_id().clone(),
+                export_id: export_id.clone(),
                 base_wal_seq,
                 target_wal_seq,
                 compacted_records,
@@ -293,7 +324,7 @@ impl CompactionWorker {
             .catalog
             .publish_compaction(
                 PublishCompaction::new(
-                    job.export_id().clone(),
+                    export_id.clone(),
                     expected_base,
                     target_wal_seq,
                     chunks.into_values().collect(),
@@ -309,19 +340,13 @@ impl CompactionWorker {
         };
 
         Ok(CompactionResult {
-            export_id: job.export_id().clone(),
+            export_id: export_id.clone(),
             base_wal_seq,
             target_wal_seq,
             compacted_records,
             written_leaf_blobs,
             outcome,
         })
-    }
-
-    async fn open_wal(&self, export_id: &ExportId) -> Result<ExportWalHandle> {
-        self.wal_provider
-            .open_export(OpenWal::new(WalDomain::for_export_id(export_id.clone())))
-            .await
     }
 }
 
