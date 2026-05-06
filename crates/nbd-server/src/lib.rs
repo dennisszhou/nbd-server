@@ -2,25 +2,25 @@
 
 #![deny(unsafe_code)]
 
-pub mod admission;
-pub mod compaction;
+mod admission;
+mod compaction;
 mod connection;
 
-pub mod error;
-pub mod export;
+mod error;
+mod export;
 mod extent_map;
 // The memory module owns the admitted unsafe byte-storage boundary.
 #[allow(unsafe_code)]
-pub mod memory;
+mod memory;
 pub mod observability;
 mod read_cache;
-pub mod registry;
-pub mod runtime;
-pub mod server;
-pub mod simple_durable;
+mod registry;
+mod runtime;
+mod server;
+mod simple_durable;
 mod tree_reader;
-pub mod wal;
-pub mod wal_durable;
+mod wal;
+mod wal_durable;
 
 pub use admission::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
