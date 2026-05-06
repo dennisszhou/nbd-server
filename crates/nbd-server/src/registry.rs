@@ -1,8 +1,8 @@
 use crate::{
-    observability::{self, event, target},
     ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, ExportWalHandle,
     LocalBlobStore, MemoryExportEngine, OpenWal, Result, SerialExportRuntime, ServerError,
     SimpleDurableEngine, WalDomain, WalDurableEngine, WalProvider,
+    observability::{self, event, target},
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{

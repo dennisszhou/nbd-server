@@ -1,8 +1,8 @@
 use nbd_control_plane::ExportRecord;
 use nbd_protocol::wire::NbdCookie;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 

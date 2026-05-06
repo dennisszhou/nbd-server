@@ -1,10 +1,10 @@
 use crate::{
+    ConnectionId, ExportFactory, LocalExportRegistry, LocalWalProvider, Result, ServerError,
     connection,
     observability::{self, event, target},
-    ConnectionId, ExportFactory, LocalExportRegistry, LocalWalProvider, Result, ServerError,
 };
 use nbd_config::NbdConfig;
-use nbd_control_plane::{open_catalog, CatalogProvider, CatalogUrl};
+use nbd_control_plane::{CatalogProvider, CatalogUrl, open_catalog};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;

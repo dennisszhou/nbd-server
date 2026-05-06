@@ -32,12 +32,12 @@ pub use export::{
     ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob, ExportReply, ExportRequest,
     ExportResult, OwnedAdmittedExportRequest,
 };
-pub use memory::{MemoryAdmissionPolicy, MemoryExportEngine, MAX_MEMORY_EXPORT_BYTES};
+pub use memory::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
 pub use observability::{ConnectionId, ExportJobContext, RequestSequence};
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use runtime::{
-    ConcurrentExportRuntime, ExportQueueSlot, ExportRuntime, ExportRuntimeHandle,
-    SerialExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY,
+    ConcurrentExportRuntime, DEFAULT_EXPORT_QUEUE_CAPACITY, ExportQueueSlot, ExportRuntime,
+    ExportRuntimeHandle, SerialExportRuntime,
 };
 pub use server::NbdServer;
 pub use simple_durable::{

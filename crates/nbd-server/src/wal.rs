@@ -1,5 +1,5 @@
 use crate::{ByteRange, Result, ServerError};
-use crc::{Crc, CRC_32_ISCSI};
+use crc::{CRC_32_ISCSI, Crc};
 use nbd_control_plane::{ExportId, WalSeq};
 use std::collections::VecDeque;
 use std::ffi::OsStr;

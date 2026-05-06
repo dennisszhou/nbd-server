@@ -1,5 +1,5 @@
 use crate::export::ExportCompletionSink;
-use crate::observability::{self, event, target, RequestSequenceGenerator};
+use crate::observability::{self, RequestSequenceGenerator, event, target};
 use crate::{
     CompletedExport, ConnectionId, ExportCompletion, ExportJob, ExportJobContext, ExportOwner,
     ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntimeHandle,
@@ -9,13 +9,13 @@ use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_CMD_DISC, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
 use nbd_protocol::handshake::{decode_client_flags, encode_server_handshake};
 use nbd_protocol::option::{
-    encode_ack_reply, encode_export_info_reply, encode_policy_option_reply,
-    encode_unknown_export_reply, encode_unsupported_option_reply, parse_option_request,
-    parse_option_request_header, OptionRequest, OPTION_REQUEST_HEADER_BYTES,
+    OPTION_REQUEST_HEADER_BYTES, OptionRequest, encode_ack_reply, encode_export_info_reply,
+    encode_policy_option_reply, encode_unknown_export_reply, encode_unsupported_option_reply,
+    parse_option_request, parse_option_request_header,
 };
 use nbd_protocol::transmission::{
-    encode_read_reply, encode_simple_reply, parse_request, parse_request_header, RequestHeader,
-    TransmissionRequest, MAX_IO_BYTES, REQUEST_HEADER_BYTES,
+    MAX_IO_BYTES, REQUEST_HEADER_BYTES, RequestHeader, TransmissionRequest, encode_read_reply,
+    encode_simple_reply, parse_request, parse_request_header,
 };
 use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
 use std::net::SocketAddr;
@@ -869,13 +869,13 @@ mod tests {
     };
     use nbd_protocol::constants::NBD_CMD_WRITE;
     use nbd_protocol::transmission::{
-        encode_disconnect_request, encode_read_request, encode_request_header, parse_simple_reply,
-        RequestHeader, SIMPLE_REPLY_BYTES,
+        RequestHeader, SIMPLE_REPLY_BYTES, encode_disconnect_request, encode_read_request,
+        encode_request_header, parse_simple_reply,
     };
     use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType};
     use std::sync::Arc;
-    use tokio::io::{duplex, split, DuplexStream};
-    use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+    use tokio::io::{DuplexStream, duplex, split};
+    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
     #[tokio::test]
     async fn connection_runtime_writes_out_of_order_completions_by_cookie() {

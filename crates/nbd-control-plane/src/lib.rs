@@ -13,8 +13,8 @@ pub use model::{
     ActiveExportDescriptor, BlobKey, ChunkIndex, CloneExport, CloneExportResult, CowChunkRef,
     CowTreeSnapshot, CreateExport, DeleteExport, ExportDescriptor, ExportEngineKind, ExportHead,
     ExportId, ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports,
-    NodeId, PublishCompaction, PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot,
-    Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    NodeId, PublishCompaction, PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef,
+    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, WalSeq,
 };
 pub use sqlite::SQLiteExportCatalog;
 use std::sync::Arc;

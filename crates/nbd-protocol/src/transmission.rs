@@ -3,7 +3,7 @@ use crate::constants::{
     NBD_SIMPLE_REPLY_MAGIC,
 };
 use crate::wire::{
-    write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, WireReader,
+    NbdCommandFlags, NbdCommandType, NbdCookie, WireReader, write_u16, write_u32, write_u64,
 };
 use crate::{ProtocolError, Result};
 

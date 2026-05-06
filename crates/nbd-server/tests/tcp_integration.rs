@@ -1,7 +1,7 @@
 mod support;
 
 use nbd_config::{ExportRuntimeKind, ServerConfig};
-use nbd_control_plane::{WalSeq, SIMPLE_CHUNK_BYTES};
+use nbd_control_plane::{SIMPLE_CHUNK_BYTES, WalSeq};
 use nbd_protocol::constants::{
     NBD_CMD_WRITE, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH, NBD_OPT_ABORT,
     NBD_REP_ERR_POLICY, NBD_REP_ERR_UNKNOWN, NBD_REP_ERR_UNSUP,
@@ -275,19 +275,23 @@ async fn raw_write_flush_and_read_replies_echo_cookies() {
         .send_write(write_cookie, 2, b"abcd")
         .await
         .expect("send write");
-    assert!(client
-        .read_simple_reply(write_cookie)
-        .await
-        .expect("read write reply")
-        .is_success());
+    assert!(
+        client
+            .read_simple_reply(write_cookie)
+            .await
+            .expect("read write reply")
+            .is_success()
+    );
 
     let flush_cookie = NbdCookie::new(101);
     client.send_flush(flush_cookie).await.expect("send flush");
-    assert!(client
-        .read_simple_reply(flush_cookie)
-        .await
-        .expect("read flush reply")
-        .is_success());
+    assert!(
+        client
+            .read_simple_reply(flush_cookie)
+            .await
+            .expect("read flush reply")
+            .is_success()
+    );
 
     let read_cookie = NbdCookie::new(102);
     client

@@ -3,8 +3,8 @@
 #![forbid(unsafe_code)]
 
 use nbd_config::{
-    catalog_file_url_for_path, CatalogConfig, ConfigError, LoggingConfig, NbdConfig, RuntimeConfig,
-    ServerConfig,
+    CatalogConfig, ConfigError, LoggingConfig, NbdConfig, RuntimeConfig, ServerConfig,
+    catalog_file_url_for_path,
 };
 use std::fs;
 use std::io;

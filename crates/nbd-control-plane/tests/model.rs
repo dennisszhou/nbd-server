@@ -2,7 +2,7 @@ use nbd_control_plane::{
     ActiveExportDescriptor, BlobKey, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport,
     CowChunkRef, CowTreeSnapshot, CreateExport, ExportDescriptor, ExportEngineKind, ExportHead,
     ExportId, ExportLayoutKind, ExportName, ExportState, ListExports, NodeId, PublishCompaction,
-    SimpleChunkRef, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    SIMPLE_CHUNK_BYTES, SimpleChunkRef, TREE_CHUNK_BYTES, Timestamp, WalSeq,
 };
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -20,9 +20,11 @@ fn catalog_url_parses_file_urls_as_sqlite() {
 fn catalog_url_rejects_unknown_schemes() {
     let error = CatalogUrl::parse("mysql://localhost/catalog").unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("unsupported catalog URL scheme `mysql`"));
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported catalog URL scheme `mysql`")
+    );
 }
 
 #[test]
@@ -35,20 +37,24 @@ fn create_export_validates_basic_domain_values() {
     assert_eq!(request.size_bytes(), 1024 * 1024);
     assert_eq!(request.block_size(), 4096);
     assert_eq!(request.engine_kind(), ExportEngineKind::Memory);
-    assert!(CreateExport::new(
-        ExportName::new("disk-b").unwrap(),
-        0,
-        4096,
-        ExportEngineKind::Memory,
-    )
-    .is_err());
-    assert!(CreateExport::new(
-        ExportName::new("disk-c").unwrap(),
-        4096,
-        0,
-        ExportEngineKind::Memory,
-    )
-    .is_err());
+    assert!(
+        CreateExport::new(
+            ExportName::new("disk-b").unwrap(),
+            0,
+            4096,
+            ExportEngineKind::Memory,
+        )
+        .is_err()
+    );
+    assert!(
+        CreateExport::new(
+            ExportName::new("disk-c").unwrap(),
+            4096,
+            0,
+            ExportEngineKind::Memory,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -61,11 +67,13 @@ fn clone_export_validates_distinct_names() {
 
     assert_eq!(request.source().as_str(), "source");
     assert_eq!(request.destination().as_str(), "destination");
-    assert!(CloneExport::new(
-        ExportName::new("same").expect("source name"),
-        ExportName::new("same").expect("destination name"),
-    )
-    .is_err());
+    assert!(
+        CloneExport::new(
+            ExportName::new("same").expect("source name"),
+            ExportName::new("same").expect("destination name"),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -96,13 +104,15 @@ fn export_head_can_represent_empty_memory() {
     assert_eq!(head.size_bytes(), 4096);
     assert_eq!(head.base_wal_seq(), WalSeq::zero());
     assert!(ExportHead::memory_empty(0).is_err());
-    assert!(ExportHead::new(
-        ExportLayoutKind::MemoryEmpty,
-        Some(NodeId::new("root").expect("node id")),
-        4096,
-        WalSeq::zero(),
-    )
-    .is_err());
+    assert!(
+        ExportHead::new(
+            ExportLayoutKind::MemoryEmpty,
+            Some(NodeId::new("root").expect("node id")),
+            4096,
+            WalSeq::zero(),
+        )
+        .is_err()
+    );
     assert!(ExportHead::new(ExportLayoutKind::MemoryEmpty, None, 4096, WalSeq::new(1),).is_err());
 }
 
@@ -115,13 +125,15 @@ fn export_head_can_represent_simple_mutable_tree() {
     assert_eq!(head.size_bytes(), 4096);
     assert_eq!(head.base_wal_seq(), WalSeq::zero());
     assert!(ExportHead::simple_mutable_tree(0).is_err());
-    assert!(ExportHead::new(
-        ExportLayoutKind::SimpleMutableTree,
-        None,
-        4096,
-        WalSeq::new(1),
-    )
-    .is_err());
+    assert!(
+        ExportHead::new(
+            ExportLayoutKind::SimpleMutableTree,
+            None,
+            4096,
+            WalSeq::new(1),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -171,12 +183,14 @@ fn simple_chunk_refs_are_full_sized_blob_refs() {
     assert_eq!(chunk.chunk_index(), ChunkIndex::new(7));
     assert_eq!(chunk.blob_key().as_str(), "blob-7");
     assert_eq!(chunk.len_bytes(), SIMPLE_CHUNK_BYTES);
-    assert!(SimpleChunkRef::new(
-        ChunkIndex::new(7),
-        BlobKey::new("blob-7").expect("valid blob key"),
-        SIMPLE_CHUNK_BYTES - 1,
-    )
-    .is_err());
+    assert!(
+        SimpleChunkRef::new(
+            ChunkIndex::new(7),
+            BlobKey::new("blob-7").expect("valid blob key"),
+            SIMPLE_CHUNK_BYTES - 1,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -191,12 +205,14 @@ fn cow_chunk_refs_are_full_sized_blob_refs() {
     assert_eq!(chunk.chunk_index(), ChunkIndex::new(3));
     assert_eq!(chunk.blob_key().as_str(), "blob-3");
     assert_eq!(chunk.len_bytes(), TREE_CHUNK_BYTES);
-    assert!(CowChunkRef::new(
-        ChunkIndex::new(3),
-        BlobKey::new("blob-3").expect("valid blob key"),
-        TREE_CHUNK_BYTES - 1,
-    )
-    .is_err());
+    assert!(
+        CowChunkRef::new(
+            ChunkIndex::new(3),
+            BlobKey::new("blob-3").expect("valid blob key"),
+            TREE_CHUNK_BYTES - 1,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -260,18 +276,22 @@ fn publish_compaction_validates_expected_base_and_chunks() {
         PublishCompaction::new(export_id.clone(), base.clone(), WalSeq::zero(), vec![chunk])
             .is_err()
     );
-    assert!(PublishCompaction::new(
-        export_id,
-        ExportHead::simple_mutable_tree(TREE_CHUNK_BYTES).expect("simple head"),
-        WalSeq::new(1),
-        vec![CowChunkRef::new(
-            ChunkIndex::new(0),
-            BlobKey::new("blob-1").expect("valid blob key"),
-            TREE_CHUNK_BYTES,
+    assert!(
+        PublishCompaction::new(
+            export_id,
+            ExportHead::simple_mutable_tree(TREE_CHUNK_BYTES).expect("simple head"),
+            WalSeq::new(1),
+            vec![
+                CowChunkRef::new(
+                    ChunkIndex::new(0),
+                    BlobKey::new("blob-1").expect("valid blob key"),
+                    TREE_CHUNK_BYTES,
+                )
+                .expect("cow chunk")
+            ],
         )
-        .expect("cow chunk")],
-    )
-    .is_err());
+        .is_err()
+    );
 }
 
 #[test]

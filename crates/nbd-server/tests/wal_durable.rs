@@ -2,7 +2,7 @@ use nbd_control_plane::{
     CatalogError, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot,
     CreateExport, ExportCatalog, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
     ExportName, ExportRecord, ExportState, NodeId, PublishCompaction, PublishCompactionOutcome,
-    SQLiteExportCatalog, Timestamp, WalSeq, TREE_CHUNK_BYTES,
+    SQLiteExportCatalog, TREE_CHUNK_BYTES, Timestamp, WalSeq,
 };
 use nbd_server::{
     ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime, ExportWalHandle,
@@ -10,8 +10,8 @@ use nbd_server::{
     WalProvider, WalRequest,
 };
 use nbd_test_support::TestRuntime;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::timeout;
@@ -233,7 +233,7 @@ async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
                 created.head().clone(),
                 WalSeq::new(2),
                 vec![
-                    CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk")
+                    CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk"),
                 ],
             )
             .expect("publish compaction"),

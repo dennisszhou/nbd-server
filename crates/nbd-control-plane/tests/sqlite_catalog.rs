@@ -2,8 +2,8 @@ use nbd_control_plane::{
     BlobKey, CatalogError, CatalogUrl, ChunkIndex, CloneExport, CowChunkRef, CowTreeMetadataStore,
     CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName,
     ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-    PublishCompactionOutcome, SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore, WalSeq,
-    SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SQLiteExportCatalog, SimpleChunkRef,
+    SimpleTreeMetadataStore, TREE_CHUNK_BYTES, WalSeq,
 };
 use nbd_test_support::TestRuntime;
 use sqlx::Row;
@@ -323,11 +323,13 @@ async fn delete_hides_export_from_load_and_default_list() {
         ExportLayoutKind::MemoryEmpty
     );
 
-    assert!(catalog
-        .list_exports(ListExports::active_only())
-        .await
-        .expect("list active")
-        .is_empty());
+    assert!(
+        catalog
+            .list_exports(ListExports::active_only())
+            .await
+            .expect("list active")
+            .is_empty()
+    );
 
     let all = catalog
         .list_exports(ListExports::include_deleted())
@@ -484,12 +486,14 @@ async fn simple_tree_rejects_foreign_root() {
     let source_snapshot = catalog
         .commit_simple_chunks(
             source.id(),
-            vec![SimpleChunkRef::new(
-                ChunkIndex::new(2),
-                BlobKey::new("source-simple").expect("valid blob key"),
-                SIMPLE_CHUNK_BYTES,
-            )
-            .expect("valid simple chunk")],
+            vec![
+                SimpleChunkRef::new(
+                    ChunkIndex::new(2),
+                    BlobKey::new("source-simple").expect("valid blob key"),
+                    SIMPLE_CHUNK_BYTES,
+                )
+                .expect("valid simple chunk"),
+            ],
         )
         .await
         .expect("commit source chunk");
@@ -549,9 +553,11 @@ async fn simple_tree_rejects_existing_leaf_metadata() {
         .await
         .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("chunk 1 is already materialized"));
+    assert!(
+        error
+            .to_string()
+            .contains("chunk 1 is already materialized")
+    );
 }
 
 #[tokio::test]
@@ -768,9 +774,11 @@ async fn clone_export_rejects_empty_cow_source() {
         )
         .await
         .expect_err("empty source must be rejected");
-    assert!(error
-        .to_string()
-        .contains("source committed snapshot is empty"));
+    assert!(
+        error
+            .to_string()
+            .contains("source committed snapshot is empty")
+    );
 }
 
 #[tokio::test]

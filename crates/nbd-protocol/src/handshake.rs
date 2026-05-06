@@ -2,7 +2,7 @@ use crate::constants::{
     IHAVEOPT_MAGIC, INIT_PASSWD, NBD_FLAG_C_FIXED_NEWSTYLE, NBD_FLAG_C_NO_ZEROES,
     NBD_FLAG_FIXED_NEWSTYLE, NBD_FLAG_NO_ZEROES,
 };
-use crate::wire::{write_u16, write_u64, WireReader};
+use crate::wire::{WireReader, write_u16, write_u64};
 use crate::{ProtocolError, Result};
 
 pub const SERVER_HANDSHAKE_FLAGS: u16 = NBD_FLAG_FIXED_NEWSTYLE | NBD_FLAG_NO_ZEROES;

@@ -1,5 +1,5 @@
-use nbd_protocol::wire::NbdCookie;
 use nbd_protocol::ProtocolError;
+use nbd_protocol::wire::NbdCookie;
 use std::io;
 use thiserror::Error;
 

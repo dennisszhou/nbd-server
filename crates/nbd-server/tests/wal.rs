@@ -433,11 +433,13 @@ async fn only_segment_file(root: &Path) -> PathBuf {
         .expect("read export dir")
         .expect("export dir")
         .path();
-    assert!(export_dirs
-        .next_entry()
-        .await
-        .expect("read export dir")
-        .is_none());
+    assert!(
+        export_dirs
+            .next_entry()
+            .await
+            .expect("read export dir")
+            .is_none()
+    );
 
     let mut segments = tokio::fs::read_dir(export_dir)
         .await

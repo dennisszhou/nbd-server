@@ -3,8 +3,8 @@
 mod logging;
 
 use nbd_config::{ConfigFile, ConfigKey, ConfigSource, NbdConfig};
-use nbd_server::observability::{self, event, target};
 use nbd_server::NbdServer;
+use nbd_server::observability::{self, event, target};
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;

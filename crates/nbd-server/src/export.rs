@@ -1,8 +1,8 @@
 use crate::{
-    admission::{AdmissionOp, AdmissionPermit},
-    observability::{self, event, target, ExportJobContext},
-    runtime::ExportQueueSlot,
     Result,
+    admission::{AdmissionOp, AdmissionPermit},
+    observability::{self, ExportJobContext, event, target},
+    runtime::ExportQueueSlot,
 };
 use nbd_protocol::wire::NbdCookie;
 use std::fmt;

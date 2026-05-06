@@ -1,6 +1,6 @@
 use crate::{
-    observability::{self, event, target},
     Result, ServerError,
+    observability::{self, event, target},
 };
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

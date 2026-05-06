@@ -5,14 +5,14 @@ use nbd_control_plane::{
     SimpleTreeMetadataStore, WalSeq,
 };
 use nbd_server::{
-    ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider, ServerError,
-    MAX_MEMORY_EXPORT_BYTES,
+    ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider,
+    MAX_MEMORY_EXPORT_BYTES, ServerError,
 };
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};

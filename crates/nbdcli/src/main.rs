@@ -3,8 +3,8 @@
 use clap::{Parser, Subcommand};
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
-    open_catalog, CatalogUrl, CloneExport, CreateExport, DeleteExport, ExportEngineKind,
-    ExportName, ExportRecord, InspectExport, ListExports,
+    CatalogUrl, CloneExport, CreateExport, DeleteExport, ExportEngineKind, ExportName,
+    ExportRecord, InspectExport, ListExports, open_catalog,
 };
 use std::error::Error;
 use std::path::PathBuf;

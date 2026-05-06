@@ -1,25 +1,25 @@
+use nbd_protocol::ProtocolError;
 use nbd_protocol::constants;
 use nbd_protocol::handshake::{
-    decode_client_flags, encode_client_flags, encode_server_handshake, SERVER_HANDSHAKE_FLAGS,
+    SERVER_HANDSHAKE_FLAGS, decode_client_flags, encode_client_flags, encode_server_handshake,
 };
 use nbd_protocol::option::{
+    MAX_OPTION_PAYLOAD_BYTES, OPTION_REPLY_HEADER_BYTES, OptionReply, OptionRequest,
     encode_abort_request, encode_ack_reply, encode_export_info_reply, encode_go_request,
     encode_policy_option_reply, encode_unknown_export_reply, encode_unsupported_option_reply,
     parse_option_reply, parse_option_reply_header, parse_option_request,
-    parse_option_request_header, OptionReply, OptionRequest, MAX_OPTION_PAYLOAD_BYTES,
-    OPTION_REPLY_HEADER_BYTES,
+    parse_option_request_header,
 };
 use nbd_protocol::transmission::{
-    encode_disconnect_request, encode_flush_request, encode_read_reply, encode_read_request,
-    encode_success_reply, encode_write_request, parse_read_reply, parse_request,
-    parse_request_header, parse_simple_reply, ReadReply, SimpleReply, TransmissionRequest,
-    MAX_IO_BYTES, REQUEST_HEADER_BYTES, SIMPLE_REPLY_BYTES,
+    MAX_IO_BYTES, REQUEST_HEADER_BYTES, ReadReply, SIMPLE_REPLY_BYTES, SimpleReply,
+    TransmissionRequest, encode_disconnect_request, encode_flush_request, encode_read_reply,
+    encode_read_request, encode_success_reply, encode_write_request, parse_read_reply,
+    parse_request, parse_request_header, parse_simple_reply,
 };
 use nbd_protocol::wire::{
-    write_u16, write_u32, write_u64, NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode,
-    WireReader,
+    NbdCommandFlags, NbdCommandType, NbdCookie, NbdOptionCode, WireReader, write_u16, write_u32,
+    write_u64,
 };
-use nbd_protocol::ProtocolError;
 
 #[test]
 fn known_wire_constants_match_the_nbd_protocol() {
@@ -40,7 +40,9 @@ fn wire_reader_and_writers_use_big_endian_layout() {
 
     assert_eq!(
         bytes,
-        [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,],
+        [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        ],
     );
 
     let mut reader = WireReader::new(&bytes);
@@ -270,9 +272,11 @@ fn happy_path_protocol_script_round_trips_supported_frames() {
     assert_eq!(encode_server_handshake().len(), 18);
     assert_eq!(SIMPLE_REPLY_BYTES, 16);
 
-    assert!(decode_client_flags(&encode_client_flags(true))
-        .unwrap()
-        .no_zeroes());
+    assert!(
+        decode_client_flags(&encode_client_flags(true))
+            .unwrap()
+            .no_zeroes()
+    );
 
     let go =
         parse_option_request(&encode_go_request("disk", &[constants::NBD_INFO_EXPORT]).unwrap())

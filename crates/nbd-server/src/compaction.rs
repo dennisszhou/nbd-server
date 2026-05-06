@@ -1,10 +1,10 @@
 use crate::{ExportWalHandle, LocalBlobStore, Result, ServerError};
 use nbd_control_plane::{
     ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportId,
-    ExportLayoutKind, PublishCompaction, PublishCompactionOutcome, WalSeq, TREE_CHUNK_BYTES,
+    ExportLayoutKind, PublishCompaction, PublishCompactionOutcome, TREE_CHUNK_BYTES, WalSeq,
 };
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

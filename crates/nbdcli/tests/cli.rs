@@ -1,6 +1,6 @@
 use nbd_control_plane::{
     BlobKey, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
-    InspectExport, PublishCompaction, SQLiteExportCatalog, WalSeq, TREE_CHUNK_BYTES,
+    InspectExport, PublishCompaction, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
 };
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
@@ -54,10 +54,12 @@ async fn cli_creates_inspects_lists_and_deletes_exports() {
 
     let active = nbdcli(&runtime, &["list", "--json"]);
     assert_success(&active);
-    assert!(json_stdout(&active)
-        .as_array()
-        .expect("active list")
-        .is_empty());
+    assert!(
+        json_stdout(&active)
+            .as_array()
+            .expect("active list")
+            .is_empty()
+    );
 
     let include_deleted = nbdcli(&runtime, &["list", "--include-deleted", "--json"]);
     assert_success(&include_deleted);

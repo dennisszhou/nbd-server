@@ -1,6 +1,6 @@
 use nbd_control_plane::{
     CatalogUrl, ChunkIndex, CowTreeMetadataStore, CreateExport, ExportCatalog, ExportEngineKind,
-    ExportId, ExportName, SQLiteExportCatalog, WalSeq, TREE_CHUNK_BYTES,
+    ExportId, ExportName, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
 };
 use nbd_server::{
     ByteRange, CompactionOutcome, CowCompactor, ExportWalHandle, LocalBlobStore, LocalWalProvider,

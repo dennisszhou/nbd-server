@@ -5,12 +5,12 @@ use nbd_protocol::constants::{
 };
 use nbd_protocol::handshake::encode_client_flags;
 use nbd_protocol::option::{
-    encode_go_request, parse_option_reply, parse_option_reply_header, OptionReply,
-    OPTION_REPLY_HEADER_BYTES,
+    OPTION_REPLY_HEADER_BYTES, OptionReply, encode_go_request, parse_option_reply,
+    parse_option_reply_header,
 };
 use nbd_protocol::transmission::{
-    encode_disconnect_request, encode_flush_request, encode_read_request, encode_write_request,
-    parse_simple_reply, SIMPLE_REPLY_BYTES,
+    SIMPLE_REPLY_BYTES, encode_disconnect_request, encode_flush_request, encode_read_request,
+    encode_write_request, parse_simple_reply,
 };
 use nbd_protocol::wire::NbdCookie;
 use nbd_protocol::wire::WireReader;
@@ -216,7 +216,7 @@ async fn read_go_replies(stream: &mut TcpStream) -> Result<(u64, u16)> {
                 return Err(ClientError::OptionError {
                     reply_type,
                     message,
-                })
+                });
             }
             OptionReply::Other { .. } => {}
         }

@@ -2,8 +2,8 @@ use nbd_control_plane::{
     ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
 };
 use nbd_server::{
-    ExportJob, ExportReply, ExportRequest, ExportRuntime, MemoryExportEngine, Result,
-    SerialExportRuntime, ServerError, MAX_MEMORY_EXPORT_BYTES,
+    ExportJob, ExportReply, ExportRequest, ExportRuntime, MAX_MEMORY_EXPORT_BYTES,
+    MemoryExportEngine, Result, SerialExportRuntime, ServerError,
 };
 use std::sync::Arc;
 

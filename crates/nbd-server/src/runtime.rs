@@ -1,14 +1,14 @@
 use crate::{
-    observability::{self, event, target},
     AdmissionPermit, AdmissionWaiter, AdmittedExportRequest, ExportAdmissionCtl,
     ExportAdmissionPolicyHandle, ExportCompletion, ExportEngineHandle, ExportJob, ExportJobContext,
     ExportRequest, ExportResult, Result, ServerError,
+    observability::{self, event, target},
 };
 use nbd_control_plane::ExportRecord;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::{mpsc, Notify, OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OnceCell, OwnedSemaphorePermit, Semaphore, mpsc};
 use tracing::Instrument;
 
 pub const DEFAULT_EXPORT_QUEUE_CAPACITY: usize = 128;
