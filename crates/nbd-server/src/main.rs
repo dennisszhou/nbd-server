@@ -2,13 +2,14 @@
 
 mod logging;
 
-use nbd_config::{ConfigSource, NbdConfig};
+use nbd_config::{ConfigFile, ConfigKey, ConfigSource, NbdConfig};
 use nbd_server::observability::{self, event, target};
 use nbd_server::NbdServer;
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
@@ -20,7 +21,15 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
-    let args = parse_serve_args(&raw_args)?;
+    let command = parse_args(&raw_args)?;
+
+    match command {
+        Command::Serve(args) => run_serve(args).await,
+        Command::Config(args) => run_config(args),
+    }
+}
+
+async fn run_serve(args: ServeArgs) -> Result<(), Box<dyn Error>> {
     let config_source = format!("{:?}", args.config_source);
     let config = NbdConfig::load(args.config_source)?;
     let logging_policy = logging::LoggingPolicy::from_options(logging::LoggingOptions {
@@ -64,6 +73,31 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn run_config(args: ConfigArgs) -> Result<(), Box<dyn Error>> {
+    let config_file = match args.config_path {
+        Some(path) => ConfigFile::explicit(path),
+        None => ConfigFile::local()?,
+    };
+    let loaded = config_file.load_or_default()?;
+
+    match args.action {
+        ConfigAction::Print => {
+            print!("{}", loaded.config().to_toml_string()?);
+        }
+        ConfigAction::Get(key) => {
+            println!("{}", key.value(loaded.config()));
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Serve(ServeArgs),
+    Config(ConfigArgs),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ServeArgs {
     config_source: ConfigSource,
@@ -71,16 +105,31 @@ struct ServeArgs {
     log_stdout: bool,
 }
 
-fn parse_serve_args(args: &[String]) -> Result<ServeArgs, Box<dyn Error>> {
-    let command = args.first().map(String::as_str);
-    if command != Some("serve") {
-        return Err(usage().into());
-    }
+#[derive(Debug, PartialEq, Eq)]
+struct ConfigArgs {
+    config_path: Option<PathBuf>,
+    action: ConfigAction,
+}
 
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigAction {
+    Print,
+    Get(ConfigKey),
+}
+
+fn parse_args(args: &[String]) -> Result<Command, Box<dyn Error>> {
+    match args.first().map(String::as_str) {
+        Some("serve") => parse_serve_args(&args[1..]).map(Command::Serve),
+        Some("config") => parse_config_args(&args[1..]).map(Command::Config),
+        _ => Err(usage().into()),
+    }
+}
+
+fn parse_serve_args(args: &[String]) -> Result<ServeArgs, Box<dyn Error>> {
     let mut config_path = None;
     let mut listen = "127.0.0.1:10809".parse::<SocketAddr>()?;
     let mut log_stdout = false;
-    let mut index = 1;
+    let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--config" => {
@@ -112,8 +161,35 @@ fn parse_serve_args(args: &[String]) -> Result<ServeArgs, Box<dyn Error>> {
     })
 }
 
+fn parse_config_args(args: &[String]) -> Result<ConfigArgs, Box<dyn Error>> {
+    let mut config_path = None;
+    let mut action = ConfigAction::Print;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => {
+                index += 1;
+                let value = args.get(index).ok_or("missing value for --config")?;
+                config_path = Some(PathBuf::from(value));
+            }
+            "get" => {
+                index += 1;
+                let value = args.get(index).ok_or("missing key for config get")?;
+                action = ConfigAction::Get(ConfigKey::from_str(value)?);
+            }
+            _ => return Err(usage().into()),
+        }
+        index += 1;
+    }
+
+    Ok(ConfigArgs {
+        config_path,
+        action,
+    })
+}
+
 fn usage() -> &'static str {
-    "usage: nbd-server serve [--config <path>] [--listen <addr:port>] [--log-stdout]"
+    "usage: nbd-server serve [--config <path>] [--listen <addr:port>] [--log-stdout]\n       nbd-server config [--config <path>] [get <key>]"
 }
 
 #[cfg(test)]
@@ -124,7 +200,10 @@ mod tests {
     fn serve_uses_default_config_source_without_config_arg() {
         let args = strings(&["serve", "--listen", "127.0.0.1:12000"]);
 
-        let parsed = parse_serve_args(&args).expect("parse args");
+        let parsed = parse_args(&args).expect("parse args");
+        let Command::Serve(parsed) = parsed else {
+            panic!("expected serve command");
+        };
 
         assert_eq!(parsed.config_source, ConfigSource::DefaultUserPath);
         assert_eq!(parsed.listen, "127.0.0.1:12000".parse().unwrap());
@@ -141,7 +220,10 @@ mod tests {
             "127.0.0.1:12001",
         ]);
 
-        let parsed = parse_serve_args(&args).expect("parse args");
+        let parsed = parse_args(&args).expect("parse args");
+        let Command::Serve(parsed) = parsed else {
+            panic!("expected serve command");
+        };
 
         assert_eq!(
             parsed.config_source,
@@ -155,10 +237,67 @@ mod tests {
     fn serve_parses_stdout_logging_flag() {
         let args = strings(&["serve", "--log-stdout", "--listen", "127.0.0.1:12002"]);
 
-        let parsed = parse_serve_args(&args).expect("parse args");
+        let parsed = parse_args(&args).expect("parse args");
+        let Command::Serve(parsed) = parsed else {
+            panic!("expected serve command");
+        };
 
         assert!(parsed.log_stdout);
         assert_eq!(parsed.listen, "127.0.0.1:12002".parse().unwrap());
+    }
+
+    #[test]
+    fn config_print_uses_default_path_without_config_arg() {
+        let args = strings(&["config"]);
+
+        let parsed = parse_args(&args).expect("parse args");
+        let Command::Config(parsed) = parsed else {
+            panic!("expected config command");
+        };
+
+        assert_eq!(parsed.config_path, None);
+        assert_eq!(parsed.action, ConfigAction::Print);
+    }
+
+    #[test]
+    fn config_print_preserves_explicit_path() {
+        let args = strings(&["config", "--config", "/tmp/nbd/custom.toml"]);
+
+        let parsed = parse_args(&args).expect("parse args");
+        let Command::Config(parsed) = parsed else {
+            panic!("expected config command");
+        };
+
+        assert_eq!(
+            parsed.config_path,
+            Some(PathBuf::from("/tmp/nbd/custom.toml"))
+        );
+        assert_eq!(parsed.action, ConfigAction::Print);
+    }
+
+    #[test]
+    fn config_get_parses_key() {
+        let args = strings(&[
+            "config",
+            "--config",
+            "/tmp/nbd/custom.toml",
+            "get",
+            "server.export_queue_depth",
+        ]);
+
+        let parsed = parse_args(&args).expect("parse args");
+        let Command::Config(parsed) = parsed else {
+            panic!("expected config command");
+        };
+
+        assert_eq!(
+            parsed.config_path,
+            Some(PathBuf::from("/tmp/nbd/custom.toml"))
+        );
+        assert_eq!(
+            parsed.action,
+            ConfigAction::Get(ConfigKey::ServerExportQueueDepth)
+        );
     }
 
     fn strings(values: &[&str]) -> Vec<String> {

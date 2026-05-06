@@ -1,17 +1,15 @@
 use nbd_config::{
     catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
-    default_log_file_path, default_state_dir_for_home, default_wal_dir_for_home, ConfigSource,
-    ExportRuntimeKind, NbdConfig, DEFAULT_EXPORT_QUEUE_DEPTH, DEFAULT_LOG_FILE_PATH,
-    DEFAULT_REPLY_QUEUE_CAPACITY,
+    default_log_file_path, default_wal_dir_for_home, ConfigFile, ConfigKey, ConfigSource,
+    ExportRuntimeKind, NbdConfig,
 };
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[test]
@@ -33,54 +31,32 @@ fn explicit_config_loads_from_requested_path() {
         catalog_file_url_for_path(catalog_path).unwrap()
     );
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
-    assert_eq!(
-        config.server.export_queue_depth.get(),
-        DEFAULT_EXPORT_QUEUE_DEPTH
-    );
-    assert_eq!(
-        config.server.connection.reply_queue_capacity.get(),
-        DEFAULT_REPLY_QUEUE_CAPACITY,
-    );
+    assert_eq!(config.server.export_queue_depth.get(), 128);
+    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
     assert_eq!(config.logging.file_path, default_log_file_path());
 }
 
 #[test]
-fn explicit_config_does_not_bootstrap_user_default() {
-    let _guard = HOME_ENV_LOCK.lock().unwrap();
+fn explicit_config_load_does_not_bootstrap_missing_file() {
     let temp = TempRoot::new();
-    let fake_home = temp.path().join("home");
-    let explicit_root = temp.path().join("explicit");
-    let config_path = explicit_root.join("config.toml");
-    let state_dir = explicit_root.join("state");
-    let catalog_path = explicit_root.join("catalog.db");
+    let config_path = temp.path().join("missing").join("config.toml");
 
-    fs::create_dir_all(&fake_home).unwrap();
-    fs::create_dir_all(&explicit_root).unwrap();
-    write_config(&config_path, &state_dir, &catalog_path);
+    let error = NbdConfig::load(ConfigSource::ExplicitPath(config_path.clone()))
+        .expect_err("explicit missing config should fail");
 
-    let old_home = EnvVarGuard::set("HOME", &fake_home);
-    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
-
-    assert_eq!(config.runtime.state_dir, state_dir);
-    assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
-    assert_eq!(config.runtime.wal_dir, state_dir.join("wal"));
-    assert!(!default_state_dir_for_home(&fake_home).exists());
-    drop(old_home);
+    assert!(error.to_string().contains("failed to read config"));
+    assert!(!config_path.exists());
 }
 
 #[test]
-fn default_user_path_bootstraps_absolute_config() {
-    let _guard = HOME_ENV_LOCK.lock().unwrap();
+fn default_config_for_home_uses_absolute_home_paths() {
     let temp = TempRoot::new();
     let fake_home = temp.path().join("home");
 
-    fs::create_dir_all(&fake_home).unwrap();
-
-    let old_home = EnvVarGuard::set("HOME", &fake_home);
-    let config = NbdConfig::load(ConfigSource::DefaultUserPath).unwrap();
+    let config = NbdConfig::default_for_home(&fake_home).unwrap();
     let config_path = default_config_path_for_home(&fake_home);
 
-    assert!(config_path.exists());
+    assert!(!config_path.exists());
     assert_eq!(config.runtime.state_dir, fake_home.join(".nbd"));
     assert_eq!(
         config.runtime.blob_dir,
@@ -96,38 +72,118 @@ fn default_user_path_bootstraps_absolute_config() {
     );
     assert!(config.catalog.url.starts_with("file:"));
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
-    assert_eq!(
-        config.server.export_queue_depth.get(),
-        DEFAULT_EXPORT_QUEUE_DEPTH
-    );
-    assert_eq!(
-        config.server.connection.reply_queue_capacity.get(),
-        DEFAULT_REPLY_QUEUE_CAPACITY,
-    );
+    assert_eq!(config.server.export_queue_depth.get(), 128);
+    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
     assert_eq!(config.logging.file_path, default_log_file_path());
+}
 
-    let loaded = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
-    assert_eq!(loaded, config);
-    drop(old_home);
+#[test]
+fn config_file_load_or_default_prints_missing_explicit_defaults_without_writing() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("generated").join("config.toml");
+
+    let loaded = ConfigFile::explicit(&config_path)
+        .load_or_default()
+        .expect("load defaults");
+
+    assert!(!loaded.existed());
+    assert_eq!(loaded.path(), config_path);
+    assert_eq!(
+        loaded.config().runtime.state_dir,
+        temp.path().join("generated")
+    );
+    assert_eq!(
+        loaded.config().runtime.blob_dir,
+        temp.path().join("generated").join("blobs")
+    );
+    assert_eq!(
+        loaded.config().runtime.wal_dir,
+        temp.path().join("generated").join("wal")
+    );
+    assert_eq!(
+        loaded.config().catalog.url,
+        catalog_file_url_for_path(temp.path().join("generated").join("catalog.db")).unwrap()
+    );
+    assert!(!config_path.exists());
+}
+
+#[test]
+fn config_file_load_or_bootstrap_writes_generated_defaults() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("bootstrapped").join("config.toml");
+
+    let loaded = ConfigFile::explicit(&config_path)
+        .load_or_bootstrap()
+        .expect("bootstrap config");
+
+    assert!(!loaded.existed());
+    assert!(config_path.exists());
+
+    let reloaded = ConfigFile::explicit(&config_path)
+        .load()
+        .expect("reload config");
+    assert!(reloaded.existed());
+    assert_eq!(reloaded.config(), loaded.config());
 }
 
 #[test]
 fn generated_default_config_includes_logging_section() {
-    let _guard = HOME_ENV_LOCK.lock().unwrap();
     let temp = TempRoot::new();
-    let fake_home = temp.path().join("home");
-
-    fs::create_dir_all(&fake_home).unwrap();
-
-    let old_home = EnvVarGuard::set("HOME", &fake_home);
-    let config_path = default_config_path_for_home(&fake_home);
-    let config = NbdConfig::load(ConfigSource::DefaultUserPath).unwrap();
-    let contents = fs::read_to_string(config_path).unwrap();
+    let config_path = temp.path().join("config.toml");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    let contents = config.to_toml_string().expect("serialize default config");
 
     assert_eq!(config.logging.file_path, default_log_file_path());
     assert!(contents.contains("[logging]"));
-    assert!(contents.contains(&format!("file_path = \"{DEFAULT_LOG_FILE_PATH}\"")));
-    drop(old_home);
+    assert!(contents.contains("file_path = \"/tmp/nbd/current.log\""));
+}
+
+#[test]
+fn config_keys_read_typed_values() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+
+    assert_eq!(
+        ConfigKey::from_str("catalog.url").unwrap().value(&config),
+        catalog_file_url_for_path(temp.path().join("catalog.db")).unwrap()
+    );
+    assert_eq!(
+        ConfigKey::from_str("runtime.blob_dir")
+            .unwrap()
+            .value(&config),
+        temp.path().join("blobs").display().to_string()
+    );
+    assert_eq!(
+        ConfigKey::from_str("server.export_runtime")
+            .unwrap()
+            .value(&config),
+        "concurrent"
+    );
+    assert_eq!(
+        ConfigKey::from_str("server.export_queue_depth")
+            .unwrap()
+            .value(&config),
+        "128"
+    );
+    assert_eq!(
+        ConfigKey::from_str("server.connection.reply_queue_capacity")
+            .unwrap()
+            .value(&config),
+        "128"
+    );
+}
+
+#[test]
+fn config_key_rejects_unknown_key_with_supported_keys() {
+    let error = ConfigKey::from_str("server.queue_depth").expect_err("unknown key should fail");
+
+    assert!(error.to_string().contains("unknown config key"));
+    assert!(error.to_string().contains("server.export_queue_depth"));
 }
 
 #[test]
@@ -228,14 +284,8 @@ fn explicit_server_config_loads_runtime_choice() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Serial);
-    assert_eq!(
-        config.server.export_queue_depth.get(),
-        DEFAULT_EXPORT_QUEUE_DEPTH
-    );
-    assert_eq!(
-        config.server.connection.reply_queue_capacity.get(),
-        DEFAULT_REPLY_QUEUE_CAPACITY,
-    );
+    assert_eq!(config.server.export_queue_depth.get(), 128);
+    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
 }
 
 #[test]
@@ -256,14 +306,8 @@ fn explicit_server_config_loads_concurrent_runtime_choice() {
     let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
 
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
-    assert_eq!(
-        config.server.export_queue_depth.get(),
-        DEFAULT_EXPORT_QUEUE_DEPTH
-    );
-    assert_eq!(
-        config.server.connection.reply_queue_capacity.get(),
-        DEFAULT_REPLY_QUEUE_CAPACITY,
-    );
+    assert_eq!(config.server.export_queue_depth.get(), 128);
+    assert_eq!(config.server.connection.reply_queue_capacity.get(), 128);
 }
 
 #[test]
@@ -340,29 +384,6 @@ fn write_config(config_path: &Path, state_dir: &Path, catalog_path: &Path) {
     );
 
     fs::write(config_path, contents).unwrap();
-}
-
-struct EnvVarGuard {
-    name: &'static str,
-    old_value: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(name: &'static str, value: &Path) -> Self {
-        let old_value = env::var_os(name);
-        env::set_var(name, value);
-
-        Self { name, old_value }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.old_value {
-            Some(value) => env::set_var(self.name, value),
-            None => env::remove_var(self.name),
-        }
-    }
 }
 
 struct TempRoot {

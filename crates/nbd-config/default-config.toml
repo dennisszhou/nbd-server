@@ -1,0 +1,17 @@
+[catalog]
+url = "{{catalog_url}}"
+
+[runtime]
+state_dir = "{{state_dir}}"
+blob_dir = "{{blob_dir}}"
+wal_dir = "{{wal_dir}}"
+
+[server]
+export_runtime = "concurrent"
+export_queue_depth = 128
+
+[server.connection]
+reply_queue_capacity = 128
+
+[logging]
+file_path = "/tmp/nbd/current.log"
