@@ -9,13 +9,19 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tracing::Instrument;
 
 pub struct NbdServer {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
+}
+
+struct ConnectionTaskOutcome {
+    connection_id: ConnectionId,
+    peer_addr: SocketAddr,
+    result: Result<()>,
 }
 
 impl NbdServer {
@@ -67,9 +73,14 @@ impl NbdServer {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
         let task = tokio::spawn(async move {
+            let connection_shutdown = connection::ServerConnectionShutdown::new();
+            let mut connections = JoinSet::new();
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
+                    joined = connections.join_next(), if !connections.is_empty() => {
+                        log_connection_task_join(joined);
+                    }
                     accepted = listener.accept() => {
                         let Ok((stream, peer_addr)) = accepted else {
                             break;
@@ -85,6 +96,7 @@ impl NbdServer {
                             peer_addr = %peer_addr,
                         );
                         let registry = registry.clone();
+                        let shutdown = connection_shutdown.subscribe();
                         let span = tracing::debug_span!(
                             target: target::CONNECTION,
                             "connection",
@@ -94,30 +106,28 @@ impl NbdServer {
                             connection_id = connection_id.raw(),
                             peer_addr = %peer_addr,
                         );
-                        tokio::spawn(async move {
-                            if let Err(error) = connection::serve(
+                        connections.spawn(async move {
+                            let result = connection::serve_with_shutdown(
                                 stream,
                                 registry,
                                 reply_capacity,
                                 connection_id,
                                 peer_addr,
+                                shutdown,
                             )
-                            .await
-                            {
-                                tracing::warn!(
-                                    target: target::CONNECTION,
-                                    event = event::CONNECTION_ERROR,
-                                    service = observability::SERVICE_NAME,
-                                    server_instance_id = observability::server_instance_id(),
-                                    pid = observability::pid(),
-                                    connection_id = connection_id.raw(),
-                                    peer_addr = %peer_addr,
-                                    error = %error,
-                                );
+                            .await;
+                            ConnectionTaskOutcome {
+                                connection_id,
+                                peer_addr,
+                                result,
                             }
                         }.instrument(span));
                     }
                 }
+            }
+            connection_shutdown.shutdown();
+            while let Some(joined) = connections.join_next().await {
+                log_connection_task_join(Some(joined));
             }
         });
 
@@ -176,8 +186,38 @@ impl Drop for NbdServer {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(task) = &self.task {
-            task.abort();
+        let _ = self.task.take();
+    }
+}
+
+fn log_connection_task_join(joined: Option<std::result::Result<ConnectionTaskOutcome, JoinError>>) {
+    match joined {
+        Some(Ok(ConnectionTaskOutcome {
+            result: Err(error),
+            connection_id,
+            peer_addr,
+        })) => {
+            tracing::warn!(
+                target: target::CONNECTION,
+                event = event::CONNECTION_ERROR,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                connection_id = connection_id.raw(),
+                peer_addr = %peer_addr,
+                error = %error,
+            );
+        }
+        Some(Ok(ConnectionTaskOutcome { result: Ok(()), .. })) | None => {}
+        Some(Err(error)) => {
+            tracing::warn!(
+                target: target::CONNECTION,
+                event = event::CONNECTION_ERROR,
+                service = observability::SERVICE_NAME,
+                server_instance_id = observability::server_instance_id(),
+                pid = observability::pid(),
+                error = %error,
+            );
         }
     }
 }

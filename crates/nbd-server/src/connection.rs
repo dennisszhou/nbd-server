@@ -29,6 +29,11 @@ use tokio::task::JoinHandle;
 const SUPPORTED_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
 
 #[derive(Clone)]
+pub(crate) struct ServerConnectionShutdown {
+    tx: watch::Sender<bool>,
+}
+
+#[derive(Clone)]
 pub(crate) struct ConnectionShutdown {
     rx: Option<watch::Receiver<bool>>,
 }
@@ -138,7 +143,25 @@ impl ExportCompletionSink for ConnectionExportCompletion {
     }
 }
 
+impl ServerConnectionShutdown {
+    pub(crate) fn new() -> Self {
+        let (tx, _rx) = watch::channel(false);
+        Self { tx }
+    }
+
+    pub(crate) fn subscribe(&self) -> ConnectionShutdown {
+        ConnectionShutdown {
+            rx: Some(self.tx.subscribe()),
+        }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        let _ = self.tx.send(true);
+    }
+}
+
 impl ConnectionShutdown {
+    #[cfg(test)]
     fn not_cancelled() -> Self {
         Self { rx: None }
     }
@@ -209,24 +232,6 @@ impl ConnectionRuntime {
 
         run_connection_tasks(reader_task, writer_task).await
     }
-}
-
-pub async fn serve(
-    stream: TcpStream,
-    registry: Arc<LocalExportRegistry>,
-    reply_capacity: usize,
-    connection_id: ConnectionId,
-    peer_addr: SocketAddr,
-) -> Result<()> {
-    serve_with_shutdown(
-        stream,
-        registry,
-        reply_capacity,
-        connection_id,
-        peer_addr,
-        ConnectionShutdown::not_cancelled(),
-    )
-    .await
 }
 
 pub(crate) async fn serve_with_shutdown(

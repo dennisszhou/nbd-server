@@ -15,6 +15,8 @@ use std::time::Duration;
 use support::nbd::{
     EngineProfile, RawNbdConnection, RawNbdOptionClient, RawNbdReply, ServerFixture,
 };
+use tokio::io::AsyncReadExt;
+use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 
 #[tokio::test]
@@ -202,6 +204,66 @@ async fn active_export_rejects_second_mounter_until_disconnect() {
     let reopened = reconnect_after_disconnect(server.addr()).await;
     reopened.disconnect().await.expect("disconnect reopened");
     server.shutdown().await.expect("shutdown server");
+}
+
+#[tokio::test]
+async fn shutdown_releases_active_wal_export_for_restart() {
+    let fixture = ServerFixture::new(EngineProfile::WAL_DURABLE)
+        .await
+        .expect("server fixture");
+    fixture
+        .create_export("disk-wal", 4096, 4096)
+        .await
+        .expect("create export");
+
+    let server = fixture.start_server().await.expect("start server");
+    let mut client = NbdClient::connect(server.addr(), "disk-wal")
+        .await
+        .expect("connect client");
+    client.write(0, b"persist").await.expect("write data");
+
+    timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .expect("shutdown should not wait for mounted client forever")
+        .expect("shutdown server");
+    drop(client);
+
+    let restarted = fixture.start_server().await.expect("restart server");
+    let mut reopened = NbdClient::connect(restarted.addr(), "disk-wal")
+        .await
+        .expect("reopen export after shutdown");
+    assert_eq!(
+        reopened.read(0, 7).await.expect("read persisted data"),
+        b"persist".to_vec(),
+    );
+
+    reopened.disconnect().await.expect("disconnect reopened");
+    restarted
+        .shutdown()
+        .await
+        .expect("shutdown restarted server");
+}
+
+#[tokio::test]
+async fn shutdown_stops_connection_before_negotiation_finishes() {
+    let fixture = ServerFixture::new(EngineProfile::MEMORY)
+        .await
+        .expect("server fixture");
+    let server = fixture.start_server().await.expect("start server");
+    let mut stream = TcpStream::connect(server.addr())
+        .await
+        .expect("connect raw TCP client");
+    let mut handshake = [0; 18];
+    stream
+        .read_exact(&mut handshake)
+        .await
+        .expect("read server handshake");
+
+    timeout(Duration::from_secs(5), server.shutdown())
+        .await
+        .expect("shutdown should not wait for client flags")
+        .expect("shutdown server");
+    drop(stream);
 }
 
 #[tokio::test]
