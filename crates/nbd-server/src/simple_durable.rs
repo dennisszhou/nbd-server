@@ -396,6 +396,7 @@ impl LocalBlobStore {
         Err(ServerError::Io {
             context: "create blob",
             message: "failed to allocate unique blob key".to_owned(),
+            source: None,
         })
     }
 
@@ -435,6 +436,7 @@ impl LocalBlobStore {
         let len = usize::try_from(len).map_err(|_| ServerError::Io {
             context: "read blob",
             message: format!("length {len} does not fit in memory"),
+            source: None,
         })?;
         let path = self.blob_path(key)?;
         let mut file = File::open(&path)
@@ -469,6 +471,7 @@ impl LocalBlobStore {
             return Err(ServerError::Io {
                 context: "resolve blob path",
                 message: format!("blob key `{key}` escaped blob root"),
+                source: None,
             });
         }
         Ok(path)
@@ -508,6 +511,7 @@ impl SimpleMutableTree {
                     snapshot.export_id(),
                     descriptor.id()
                 ),
+                source: None,
             });
         }
 
@@ -649,6 +653,7 @@ async fn sync_directory(path: PathBuf) -> Result<()> {
     .map_err(|error| ServerError::Io {
         context: "sync blob directory",
         message: error.to_string(),
+        source: None,
     })?
     .map_err(|source| ServerError::io("sync blob directory", source))?;
     tracing::trace!(

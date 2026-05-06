@@ -108,5 +108,6 @@ fn invalid_block(message: impl Into<String>) -> ServerError {
     ServerError::Io {
         context: "block read",
         message: message.into(),
+        source: None,
     }
 }

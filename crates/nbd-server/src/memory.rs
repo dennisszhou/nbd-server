@@ -74,6 +74,7 @@ impl MemoryExportEngine {
         if head.layout_kind() != ExportLayoutKind::MemoryEmpty {
             return Err(ServerError::Catalog {
                 message: format!("export `{name}` does not have a memory_empty head"),
+                source: None,
             });
         }
         let size_bytes = head.size_bytes();

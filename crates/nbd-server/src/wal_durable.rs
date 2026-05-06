@@ -130,6 +130,7 @@ impl WalDurableEngine {
                     "export `{}` does not have a cow immutable tree head",
                     meta.name()
                 ),
+                source: None,
             });
         }
         if meta.head().root_node_id().is_some() {
@@ -138,6 +139,7 @@ impl WalDurableEngine {
                     "export `{}` has a committed COW root that is not readable yet",
                     meta.name()
                 ),
+                source: None,
             });
         }
 
@@ -186,6 +188,7 @@ impl WalDurableEngine {
         if descriptor.engine_kind() != nbd_control_plane::ExportEngineKind::WalDurable {
             return Err(ServerError::Catalog {
                 message: format!("export `{}` is not a wal_durable export", descriptor.name()),
+                source: None,
             });
         }
 
@@ -923,6 +926,7 @@ impl TreeReader<RootSnapshot> for ZeroTreeReader {
         if !root.is_zero_backed() {
             return Err(ServerError::Catalog {
                 message: "zero backing reader requires a zero-backed root".to_owned(),
+                source: None,
             });
         }
         let parts = if range.is_empty() {
@@ -940,6 +944,7 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
         validate_range("read", range, root.size_bytes())?;
         let snapshot = root.cow_tree().ok_or_else(|| ServerError::Catalog {
             message: "COW backing reader requires a COW root snapshot".to_owned(),
+            source: None,
         })?;
 
         let mut parts = Vec::new();
@@ -983,6 +988,7 @@ fn validate_snapshot_can_open(
                 snapshot.export_id(),
                 descriptor.id()
             ),
+            source: None,
         });
     }
     Ok(())

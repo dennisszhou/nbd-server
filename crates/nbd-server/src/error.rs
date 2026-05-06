@@ -2,10 +2,11 @@ use nbd_control_plane::ExportName;
 use nbd_protocol::ProtocolError;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ServerError {
     ExportTooLarge {
         name: ExportName,
@@ -33,12 +34,14 @@ pub enum ServerError {
     Io {
         context: &'static str,
         message: String,
+        source: Option<Arc<std::io::Error>>,
     },
     Protocol {
         source: ProtocolError,
     },
     Catalog {
         message: String,
+        source: Option<nbd_control_plane::CatalogError>,
     },
     Wal {
         context: &'static str,
@@ -57,12 +60,14 @@ impl ServerError {
         Self::Io {
             context,
             message: source.to_string(),
+            source: Some(Arc::new(source)),
         }
     }
 
     pub(crate) fn catalog(source: nbd_control_plane::CatalogError) -> Self {
         Self::Catalog {
             message: source.to_string(),
+            source: Some(source),
         }
     }
 
@@ -120,15 +125,40 @@ impl fmt::Display for ServerError {
             ),
             Self::LockPoisoned { resource } => write!(f, "lock poisoned for {resource}"),
             Self::RuntimeClosed { resource } => write!(f, "{resource} is closed"),
-            Self::Io { context, message } => write!(f, "{context}: {message}"),
+            Self::Io {
+                context, message, ..
+            } => write!(f, "{context}: {message}"),
             Self::Protocol { source } => write!(f, "{source}"),
-            Self::Catalog { message } => write!(f, "{message}"),
+            Self::Catalog { message, .. } => write!(f, "{message}"),
             Self::Wal { context, message } => write!(f, "{context}: {message}"),
         }
     }
 }
 
-impl Error for ServerError {}
+impl Error for ServerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io {
+                source: Some(source),
+                ..
+            } => Some(source.as_ref()),
+            Self::Protocol { source } => Some(source),
+            Self::Catalog {
+                source: Some(source),
+                ..
+            } => Some(source),
+            Self::Io { source: None, .. }
+            | Self::Catalog { source: None, .. }
+            | Self::ExportTooLarge { .. }
+            | Self::ExportBusy { .. }
+            | Self::ExportOwnerMismatch { .. }
+            | Self::OutOfBounds { .. }
+            | Self::LockPoisoned { .. }
+            | Self::RuntimeClosed { .. }
+            | Self::Wal { .. } => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -173,9 +203,27 @@ mod tests {
             ServerError::Io {
                 context: "write reply",
                 message: "broken pipe".to_owned(),
+                source: None,
             }
             .request_failure_log_level(),
             RequestFailureLogLevel::Warn,
         );
+    }
+
+    #[test]
+    fn wrapped_errors_expose_sources() {
+        let io = ServerError::io(
+            "read test file",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        );
+        assert!(io.source().is_some());
+        assert!(io.clone().source().is_some());
+
+        let catalog = ServerError::catalog(nbd_control_plane::CatalogError::invalid_field(
+            "test",
+            "bad value",
+        ));
+        assert!(catalog.source().is_some());
+        assert!(catalog.clone().source().is_some());
     }
 }
