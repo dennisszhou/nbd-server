@@ -1,48 +1,37 @@
 //! Error types for catalog operations.
 
 use crate::model::ExportName;
-use std::error::Error;
-use std::fmt;
+use std::error::Error as StdError;
 use std::sync::Arc;
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CatalogError>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum CatalogError {
-    InvalidCatalogUrl {
-        url: String,
-        reason: String,
-    },
-    UnsupportedCatalogProvider {
-        url: String,
-        reason: String,
-    },
-    InvalidExportName {
-        name: String,
-        reason: String,
-    },
-    InvalidField {
-        field: &'static str,
-        reason: String,
-    },
-    ExportAlreadyExists {
-        name: ExportName,
-    },
-    ExportNotFound {
-        name: ExportName,
-    },
-    ExportDeleted {
-        name: ExportName,
-    },
-    InvalidExportState {
-        state: String,
-    },
-    InvalidExportEngineKind {
-        engine_kind: String,
-    },
+    #[error("invalid catalog URL `{url}`: {reason}")]
+    InvalidCatalogUrl { url: String, reason: String },
+    #[error("unsupported catalog provider for `{url}`: {reason}")]
+    UnsupportedCatalogProvider { url: String, reason: String },
+    #[error("invalid export name `{name}`: {reason}")]
+    InvalidExportName { name: String, reason: String },
+    #[error("invalid {field}: {reason}")]
+    InvalidField { field: &'static str, reason: String },
+    #[error("export `{name}` already exists")]
+    ExportAlreadyExists { name: ExportName },
+    #[error("export `{name}` not found")]
+    ExportNotFound { name: ExportName },
+    #[error("export `{name}` is deleted")]
+    ExportDeleted { name: ExportName },
+    #[error("invalid export state `{state}`")]
+    InvalidExportState { state: String },
+    #[error("invalid export engine kind `{engine_kind}`")]
+    InvalidExportEngineKind { engine_kind: String },
+    #[error("{message}")]
     Database {
         message: String,
-        source: Option<Arc<dyn Error + Send + Sync>>,
+        #[source]
+        source: Option<Arc<dyn StdError + Send + Sync>>,
     },
 }
 
@@ -84,67 +73,11 @@ impl CatalogError {
 
     pub(crate) fn database_source(
         message: impl Into<String>,
-        source: impl Error + Send + Sync + 'static,
+        source: impl StdError + Send + Sync + 'static,
     ) -> Self {
         Self::Database {
             message: message.into(),
             source: Some(Arc::new(source)),
-        }
-    }
-}
-
-impl fmt::Display for CatalogError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCatalogUrl { url, reason } => {
-                write!(f, "invalid catalog URL `{url}`: {reason}")
-            }
-            Self::UnsupportedCatalogProvider { url, reason } => {
-                write!(f, "unsupported catalog provider for `{url}`: {reason}")
-            }
-            Self::InvalidExportName { name, reason } => {
-                write!(f, "invalid export name `{name}`: {reason}")
-            }
-            Self::InvalidField { field, reason } => {
-                write!(f, "invalid {field}: {reason}")
-            }
-            Self::ExportAlreadyExists { name } => {
-                write!(f, "export `{name}` already exists")
-            }
-            Self::ExportNotFound { name } => {
-                write!(f, "export `{name}` not found")
-            }
-            Self::ExportDeleted { name } => {
-                write!(f, "export `{name}` is deleted")
-            }
-            Self::InvalidExportState { state } => {
-                write!(f, "invalid export state `{state}`")
-            }
-            Self::InvalidExportEngineKind { engine_kind } => {
-                write!(f, "invalid export engine kind `{engine_kind}`")
-            }
-            Self::Database { message, .. } => f.write_str(message),
-        }
-    }
-}
-
-impl Error for CatalogError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Database {
-                source: Some(source),
-                ..
-            } => Some(source.as_ref()),
-            Self::Database { source: None, .. }
-            | Self::InvalidCatalogUrl { .. }
-            | Self::UnsupportedCatalogProvider { .. }
-            | Self::InvalidExportName { .. }
-            | Self::InvalidField { .. }
-            | Self::ExportAlreadyExists { .. }
-            | Self::ExportNotFound { .. }
-            | Self::ExportDeleted { .. }
-            | Self::InvalidExportState { .. }
-            | Self::InvalidExportEngineKind { .. } => None,
         }
     }
 }

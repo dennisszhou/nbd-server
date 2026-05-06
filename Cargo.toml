@@ -21,3 +21,6 @@ unsafe_code = "warn"
 
 [workspace.lints.clippy]
 all = "warn"
+
+[workspace.dependencies]
+thiserror = "2.0"

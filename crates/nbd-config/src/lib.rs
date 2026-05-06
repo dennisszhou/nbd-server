@@ -4,12 +4,11 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::env;
-use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use thiserror::Error;
 
 const CONFIG_DIR: &str = ".nbd";
 const CACHE_DIR: &str = ".cache";
@@ -158,29 +157,25 @@ pub enum ConfigSource {
 }
 
 /// Errors returned while loading or bootstrapping config.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("could not determine user home directory")]
     MissingHomeDir,
+    #[error("path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
-    ReadConfig {
-        path: PathBuf,
-        source: io::Error,
-    },
-    WriteConfig {
-        path: PathBuf,
-        source: io::Error,
-    },
-    CreateConfigDir {
-        path: PathBuf,
-        source: io::Error,
-    },
+    #[error("failed to read config {}: {source}", path.display())]
+    ReadConfig { path: PathBuf, source: io::Error },
+    #[error("failed to write config {}: {source}", path.display())]
+    WriteConfig { path: PathBuf, source: io::Error },
+    #[error("failed to create config directory {}: {source}", path.display())]
+    CreateConfigDir { path: PathBuf, source: io::Error },
+    #[error("failed to parse config {}: {source}", path.display())]
     ParseConfig {
         path: PathBuf,
         source: toml::de::Error,
     },
-    SerializeDefaultConfig {
-        source: toml::ser::Error,
-    },
+    #[error("failed to serialize default config: {source}")]
+    SerializeDefaultConfig { source: toml::ser::Error },
 }
 
 impl NbdConfig {
@@ -289,45 +284,4 @@ fn home_dir() -> Result<PathBuf, ConfigError> {
         .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
         .filter(|path| !path.as_os_str().is_empty())
         .ok_or(ConfigError::MissingHomeDir)
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingHomeDir => write!(f, "could not determine user home directory"),
-            Self::NonUtf8Path(path) => write!(f, "path is not valid UTF-8: {}", path.display()),
-            Self::ReadConfig { path, source } => {
-                write!(f, "failed to read config {}: {source}", path.display())
-            }
-            Self::WriteConfig { path, source } => {
-                write!(f, "failed to write config {}: {source}", path.display())
-            }
-            Self::CreateConfigDir { path, source } => {
-                write!(
-                    f,
-                    "failed to create config directory {}: {source}",
-                    path.display()
-                )
-            }
-            Self::ParseConfig { path, source } => {
-                write!(f, "failed to parse config {}: {source}", path.display())
-            }
-            Self::SerializeDefaultConfig { source } => {
-                write!(f, "failed to serialize default config: {source}")
-            }
-        }
-    }
-}
-
-impl Error for ConfigError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::MissingHomeDir | Self::NonUtf8Path(_) => None,
-            Self::ReadConfig { source, .. }
-            | Self::WriteConfig { source, .. }
-            | Self::CreateConfigDir { source, .. } => Some(source),
-            Self::ParseConfig { source, .. } => Some(source),
-            Self::SerializeDefaultConfig { source } => Some(source),
-        }
-    }
 }

@@ -16,6 +16,7 @@ crc = "3.4"
 nbd-config = { path = "../nbd-config" }
 nbd-control-plane = { path = "../nbd-control-plane" }
 nbd-protocol = { path = "../nbd-protocol" }
+thiserror.workspace = true
 tokio = { version = "1.37", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 tracing-appender = "0.2"

@@ -1,48 +1,54 @@
 use nbd_control_plane::ExportName;
 use nbd_protocol::ProtocolError;
-use std::error::Error;
-use std::fmt;
 use std::sync::Arc;
+use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum ServerError {
+    #[error("export `{name}` size {size_bytes} exceeds in-memory limit {max_size_bytes}")]
     ExportTooLarge {
         name: ExportName,
         size_bytes: u64,
         max_size_bytes: u64,
     },
-    ExportBusy {
-        name: ExportName,
-    },
-    ExportOwnerMismatch {
-        name: ExportName,
-    },
+    #[error("export `{name}` is already active")]
+    ExportBusy { name: ExportName },
+    #[error("export `{name}` is owned by a different active owner")]
+    ExportOwnerMismatch { name: ExportName },
+    #[error(
+        "export {operation} range is out of bounds: offset={offset}, length={length}, size={size_bytes}"
+    )]
     OutOfBounds {
         operation: &'static str,
         offset: u64,
         length: u64,
         size_bytes: u64,
     },
-    LockPoisoned {
-        resource: &'static str,
-    },
-    RuntimeClosed {
-        resource: &'static str,
-    },
+    #[error("lock poisoned for {resource}")]
+    LockPoisoned { resource: &'static str },
+    #[error("{resource} is closed")]
+    RuntimeClosed { resource: &'static str },
+    #[error("{context}: {message}")]
     Io {
         context: &'static str,
         message: String,
+        #[source]
         source: Option<Arc<std::io::Error>>,
     },
+    #[error("{source}")]
     Protocol {
+        #[from]
         source: ProtocolError,
     },
+    #[error("{message}")]
     Catalog {
         message: String,
+        #[source]
         source: Option<nbd_control_plane::CatalogError>,
     },
+    #[error("{context}: {message}")]
     Wal {
         context: &'static str,
         message: String,
@@ -93,77 +99,11 @@ impl ServerError {
     }
 }
 
-impl From<ProtocolError> for ServerError {
-    fn from(source: ProtocolError) -> Self {
-        Self::Protocol { source }
-    }
-}
-
-impl fmt::Display for ServerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ExportTooLarge {
-                name,
-                size_bytes,
-                max_size_bytes,
-            } => write!(
-                f,
-                "export `{name}` size {size_bytes} exceeds in-memory limit {max_size_bytes}",
-            ),
-            Self::ExportBusy { name } => write!(f, "export `{name}` is already active"),
-            Self::ExportOwnerMismatch { name } => {
-                write!(f, "export `{name}` is owned by a different active owner")
-            }
-            Self::OutOfBounds {
-                operation,
-                offset,
-                length,
-                size_bytes,
-            } => write!(
-                f,
-                "export {operation} range is out of bounds: offset={offset}, length={length}, size={size_bytes}",
-            ),
-            Self::LockPoisoned { resource } => write!(f, "lock poisoned for {resource}"),
-            Self::RuntimeClosed { resource } => write!(f, "{resource} is closed"),
-            Self::Io {
-                context, message, ..
-            } => write!(f, "{context}: {message}"),
-            Self::Protocol { source } => write!(f, "{source}"),
-            Self::Catalog { message, .. } => write!(f, "{message}"),
-            Self::Wal { context, message } => write!(f, "{context}: {message}"),
-        }
-    }
-}
-
-impl Error for ServerError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Io {
-                source: Some(source),
-                ..
-            } => Some(source.as_ref()),
-            Self::Protocol { source } => Some(source),
-            Self::Catalog {
-                source: Some(source),
-                ..
-            } => Some(source),
-            Self::Io { source: None, .. }
-            | Self::Catalog { source: None, .. }
-            | Self::ExportTooLarge { .. }
-            | Self::ExportBusy { .. }
-            | Self::ExportOwnerMismatch { .. }
-            | Self::OutOfBounds { .. }
-            | Self::LockPoisoned { .. }
-            | Self::RuntimeClosed { .. }
-            | Self::Wal { .. } => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use nbd_protocol::ProtocolError;
+    use std::error::Error as _;
 
     #[test]
     fn expected_client_request_errors_are_debug() {

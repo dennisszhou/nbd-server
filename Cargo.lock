@@ -713,6 +713,7 @@ name = "nbd-config"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "thiserror",
  "toml",
 ]
 
@@ -724,6 +725,7 @@ dependencies = [
  "nbd-test-support",
  "serde",
  "sqlx",
+ "thiserror",
  "tokio",
  "uuid",
 ]
@@ -731,6 +733,9 @@ dependencies = [
 [[package]]
 name = "nbd-protocol"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "nbd-server"
@@ -745,6 +750,7 @@ dependencies = [
  "nbd-test-support",
  "nbd-us-client",
  "sqlx",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-appender",
@@ -757,6 +763,7 @@ name = "nbd-test-support"
 version = "0.1.0"
 dependencies = [
  "nbd-config",
+ "thiserror",
  "toml",
 ]
 
@@ -765,6 +772,7 @@ name = "nbd-us-client"
 version = "0.1.0"
 dependencies = [
  "nbd-protocol",
+ "thiserror",
  "tokio",
 ]
 

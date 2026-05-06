@@ -6,12 +6,11 @@ use nbd_config::{
     catalog_file_url_for_path, CatalogConfig, ConfigError, LoggingConfig, NbdConfig, RuntimeConfig,
     ServerConfig,
 };
-use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 /// Isolated runtime state for integration tests.
 #[derive(Debug)]
@@ -132,55 +131,21 @@ fn write_config(path: &Path, config: NbdConfig) -> Result<(), TestRuntimeError> 
 }
 
 /// Errors returned while constructing a test runtime.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum TestRuntimeError {
+    #[error("failed to create temporary runtime root: {source}")]
     CreateTempRoot { source: io::Error },
+    #[error("failed to create state dir {}: {source}", path.display())]
     CreateStateDir { path: PathBuf, source: io::Error },
+    #[error("failed to write test config {}: {source}", path.display())]
     WriteConfig { path: PathBuf, source: io::Error },
+    #[error("failed to serialize test config: {source}")]
     SerializeConfig { source: toml::ser::Error },
-    Config { source: ConfigError },
-}
-
-impl From<ConfigError> for TestRuntimeError {
-    fn from(source: ConfigError) -> Self {
-        Self::Config { source }
-    }
-}
-
-impl fmt::Display for TestRuntimeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CreateTempRoot { source } => {
-                write!(f, "failed to create temporary runtime root: {source}")
-            }
-            Self::CreateStateDir { path, source } => {
-                write!(f, "failed to create state dir {}: {source}", path.display())
-            }
-            Self::WriteConfig { path, source } => {
-                write!(
-                    f,
-                    "failed to write test config {}: {source}",
-                    path.display()
-                )
-            }
-            Self::SerializeConfig { source } => {
-                write!(f, "failed to serialize test config: {source}")
-            }
-            Self::Config { source } => write!(f, "{source}"),
-        }
-    }
-}
-
-impl Error for TestRuntimeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::CreateTempRoot { source }
-            | Self::CreateStateDir { source, .. }
-            | Self::WriteConfig { source, .. } => Some(source),
-            Self::SerializeConfig { source } => Some(source),
-            Self::Config { source } => Some(source),
-        }
-    }
+    #[error("{source}")]
+    Config {
+        #[from]
+        source: ConfigError,
+    },
 }
 
 #[derive(Debug)]

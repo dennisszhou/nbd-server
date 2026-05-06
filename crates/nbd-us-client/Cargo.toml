@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 nbd-protocol = { path = "../nbd-protocol" }
+thiserror.workspace = true
 tokio = { version = "1.37", features = ["io-util", "net"] }
 
 [dev-dependencies]
