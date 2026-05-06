@@ -146,7 +146,7 @@ make docker-smoke KERNEL_SMOKE_SCENARIO=memory-basic \
   artifact path.
 - `KERNEL_SMOKE_ENGINE=memory make docker-smoke` remains a compatibility
   shortcut for the matching basic scenario.
-- `make build-tools` builds `nbd-server` and `nbdcli`.
+- `make build` builds `nbd-server` and `nbdcli`.
 - `make -C prisma db-migrate` applies Prisma migrations to `DATABASE_URL`.
 - If Docker/kernel smoke cannot run, say exactly why and what was run instead.
 

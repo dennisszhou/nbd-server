@@ -52,7 +52,7 @@ DOCKER_KERNEL_SMOKE_ENV = \
 DOCKER_KERNEL_SMOKE_ARTIFACT_ARGS = \
 	-v "$(DOCKER_KERNEL_SMOKE_ARTIFACT_DIR):$(DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT)"
 
-.PHONY: test test-protocol fmt clippy build-tools docker-build docker-test \
+.PHONY: test test-protocol fmt clippy build docker-build docker-test \
 	docker-shell docker-kernel-shell docker-attach docker-smoke docker-stop \
 	kernel-smoke-inner
 
@@ -68,7 +68,7 @@ fmt:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
-build-tools:
+build:
 	cargo build -p nbd-server -p nbdcli
 
 docker-build:

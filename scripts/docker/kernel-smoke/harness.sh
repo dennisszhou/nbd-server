@@ -349,7 +349,7 @@ prepare_kernel_smoke() {
 
     mkdir -p "$(dirname "${CATALOG}")"
     DATABASE_URL="file:${CATALOG}" make -C prisma db-migrate
-    make build-tools
+    make build
     require_executable "${NBDCLI}"
     require_executable "${NBD_SERVER}"
 }
