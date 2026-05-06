@@ -908,12 +908,8 @@ async fn wal_durable_protocol_clones_committed_snapshot() {
     assert_eq!(source_after.head().base_wal_seq(), WalSeq::new(2));
     assert_eq!(clone_after.head().base_wal_seq(), WalSeq::new(1));
 
-    let mut source = NbdClient::connect(server.addr(), "source")
-        .await
-        .expect("reconnect source");
-    let mut clone = NbdClient::connect(server.addr(), "clone")
-        .await
-        .expect("reconnect clone");
+    let mut source = reconnect_export_after_disconnect(server.addr(), "source").await;
+    let mut clone = reconnect_export_after_disconnect(server.addr(), "clone").await;
     assert_eq!(
         source.read(0, 7).await.expect("read source head"),
         b"source0".to_vec(),
@@ -1043,16 +1039,22 @@ fn assert_option_error(
 }
 
 async fn reconnect_after_disconnect(addr: std::net::SocketAddr) -> NbdClient {
-    for _ in 0..10 {
-        match NbdClient::connect(addr, "disk-a").await {
-            Ok(client) => return client,
-            Err(ClientError::OptionError {
-                reply_type: NBD_REP_ERR_POLICY,
-                ..
-            }) => tokio::task::yield_now().await,
-            Err(error) => panic!("unexpected reconnect error: {error}"),
-        }
-    }
+    reconnect_export_after_disconnect(addr, "disk-a").await
+}
 
-    panic!("export remained busy after disconnect");
+async fn reconnect_export_after_disconnect(addr: std::net::SocketAddr, name: &str) -> NbdClient {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match NbdClient::connect(addr, name).await {
+                Ok(client) => return client,
+                Err(ClientError::OptionError {
+                    reply_type: NBD_REP_ERR_POLICY,
+                    ..
+                }) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("unexpected reconnect error: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("export remained busy after disconnect")
 }

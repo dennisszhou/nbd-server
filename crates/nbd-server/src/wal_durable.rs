@@ -25,6 +25,7 @@ pub struct WalDurableEngine {
     wal: ExportWalHandle,
     read_view: Arc<ExportReadView>,
     compaction: Option<CompactionCoordinator>,
+    wal_debt_threshold_bytes: u64,
     write_lock: Mutex<()>,
 }
 
@@ -105,6 +106,7 @@ struct RetiredOverlayExtent {
 }
 
 const DEFAULT_READ_CACHE_BYTES: usize = 1024 * 1024 * 1024;
+const DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WalReplaySummary {
@@ -152,6 +154,7 @@ impl WalDurableEngine {
             wal,
             read_view,
             compaction: None,
+            wal_debt_threshold_bytes: DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
             write_lock: Mutex::new(()),
         })
     }
@@ -161,6 +164,24 @@ impl WalDurableEngine {
         wal: ExportWalHandle,
         blob_store: LocalBlobStore,
         catalog: Arc<dyn CowTreeMetadataStore>,
+    ) -> Result<Self> {
+        Self::open_with_cow_tree_and_wal_debt_threshold(
+            descriptor,
+            wal,
+            blob_store,
+            catalog,
+            DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn open_with_cow_tree_and_wal_debt_threshold(
+        descriptor: &ActiveExportDescriptor,
+        wal: ExportWalHandle,
+        blob_store: LocalBlobStore,
+        catalog: Arc<dyn CowTreeMetadataStore>,
+        wal_debt_threshold_bytes: u64,
     ) -> Result<Self> {
         if descriptor.engine_kind() != nbd_control_plane::ExportEngineKind::WalDurable {
             return Err(ServerError::Catalog {
@@ -200,6 +221,7 @@ impl WalDurableEngine {
             wal,
             read_view,
             compaction: Some(compaction),
+            wal_debt_threshold_bytes,
             write_lock: Mutex::new(()),
         })
     }
@@ -246,11 +268,28 @@ impl WalDurableEngine {
         let request = WalRequest::new(range, data)?;
         let _write = self.write_lock.lock().await;
         let record = self.wal.append(request).await?;
-        self.read_view.apply_wal_record(record).await
+        self.read_view.apply_wal_record(record).await?;
+        self.compact_if_wal_debt_exceeds_threshold().await;
+        Ok(())
     }
 
     fn flush(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn compact_if_wal_debt_exceeds_threshold(&self) {
+        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
+        if wal_debt_bytes < self.wal_debt_threshold_bytes {
+            return;
+        }
+        let Some(compaction) = &self.compaction else {
+            return;
+        };
+
+        let target_wal_seq = self.read_view.last_applied_seq().await;
+        compaction
+            .compact_best_effort(target_wal_seq, wal_debt_bytes, "write_pressure")
+            .await;
     }
 }
 
@@ -337,8 +376,19 @@ impl CompactionCoordinator {
 
     async fn compact_close_best_effort(&self) {
         let target_wal_seq = self.read_view.last_applied_seq().await;
+        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
+        self.compact_best_effort(target_wal_seq, wal_debt_bytes, "engine_close")
+            .await;
+    }
+
+    async fn compact_best_effort(
+        &self,
+        target_wal_seq: WalSeq,
+        wal_debt_bytes: u64,
+        phase: &'static str,
+    ) {
         match self.compact_through(target_wal_seq).await {
-            Ok(result) => log_close_compaction_completed(&self.export_name, &result),
+            Ok(result) => log_compaction_completed(&self.export_name, &result, phase),
             Err(error) => {
                 tracing::warn!(
                     target: target::WAL,
@@ -349,7 +399,8 @@ impl CompactionCoordinator {
                     export_id = %self.export_id,
                     export_name = %self.export_name,
                     target_wal_seq = target_wal_seq.get(),
-                    phase = "engine_close",
+                    wal_debt_bytes,
+                    phase,
                     error = %error,
                 );
             }
@@ -395,7 +446,7 @@ impl CompactionCoordinator {
                 export_id = %self.export_id,
                 export_name = %self.export_name,
                 target_wal_seq = prune_through.get(),
-                phase = "engine_close_prune",
+                phase = "wal_prune",
                 error = %error,
             );
         }
@@ -461,7 +512,7 @@ fn log_replay_completed(
     );
 }
 
-fn log_close_compaction_completed(name: &ExportName, result: &CompactionResult) {
+fn log_compaction_completed(name: &ExportName, result: &CompactionResult, phase: &'static str) {
     tracing::info!(
         target: target::WAL,
         event = event::WAL_COMPACTION_COMPLETED,
@@ -475,7 +526,7 @@ fn log_close_compaction_completed(name: &ExportName, result: &CompactionResult) 
         compacted_records = result.compacted_records(),
         written_leaf_blobs = result.written_leaf_blobs(),
         outcome = ?result.outcome(),
-        phase = "engine_close",
+        phase,
     );
 }
 

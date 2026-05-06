@@ -1,8 +1,8 @@
 use nbd_control_plane::{
-    CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CreateExport, ExportCatalog,
-    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName, ExportRecord,
-    ExportState, NodeId, PublishCompaction, SQLiteExportCatalog, Timestamp, WalSeq,
-    TREE_CHUNK_BYTES,
+    CatalogError, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot,
+    CreateExport, ExportCatalog, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
+    ExportName, ExportRecord, ExportState, NodeId, PublishCompaction, PublishCompactionOutcome,
+    SQLiteExportCatalog, Timestamp, WalSeq, TREE_CHUNK_BYTES,
 };
 use nbd_server::{
     ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime, ExportWalHandle,
@@ -10,7 +10,11 @@ use nbd_server::{
     WalProvider, WalRequest,
 };
 use nbd_test_support::TestRuntime;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::timeout;
 
 const MIGRATIONS: &[&str] = &[include_str!(
     "../../../prisma/migrations/20260506000000_baseline/migration.sql"
@@ -393,6 +397,200 @@ async fn wal_durable_engine_close_compacts_applied_writes_and_advances_read_view
 }
 
 #[tokio::test]
+async fn wal_durable_write_pressure_compacts_when_debt_reaches_threshold() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    let cow_tree_store = Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>;
+    let (created, wal, engine, export_runtime) =
+        wal_durable_cow_runtime(&runtime, &catalog, "disk-pressure", cow_tree_store, 5).await;
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 0,
+                data: b"abcd".to_vec(),
+            },
+        )
+        .await
+        .expect("first write"),
+        ExportReply::Done,
+    );
+    assert_eq!(engine.wal_debt_bytes().await, 4);
+    assert_eq!(
+        catalog
+            .load_cow_tree(created.id())
+            .await
+            .expect("load pre-threshold tree")
+            .base_wal_seq(),
+        WalSeq::zero(),
+    );
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 4,
+                data: b"e".to_vec(),
+            },
+        )
+        .await
+        .expect("threshold write"),
+        ExportReply::Done,
+    );
+
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load compacted tree");
+    assert!(snapshot.root_node_id().is_some());
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
+    assert_eq!(engine.wal_debt_bytes().await, 0);
+    assert_eq!(
+        wal.bounds().await.expect("WAL bounds").pruned_through,
+        WalSeq::new(2),
+    );
+    assert_eq!(
+        execute_request(&export_runtime, ExportRequest::Read { offset: 0, len: 5 })
+            .await
+            .expect("read compacted write"),
+        ExportReply::Read {
+            data: b"abcde".to_vec(),
+        },
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
+async fn wal_durable_write_pressure_failure_preserves_successful_write() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    let failing_store = Arc::new(FailingCowTreeStore::new(catalog.clone()));
+    let (created, _wal, engine, export_runtime) = wal_durable_cow_runtime(
+        &runtime,
+        &catalog,
+        "disk-pressure-fail",
+        failing_store.clone() as Arc<dyn CowTreeMetadataStore>,
+        5,
+    )
+    .await;
+
+    failing_store.fail_future_calls();
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 0,
+                data: b"fails".to_vec(),
+            },
+        )
+        .await
+        .expect("write remains successful"),
+        ExportReply::Done,
+    );
+    failing_store.wait_for_attempt().await;
+
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load tree after failed compaction");
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
+    assert!(snapshot.root_node_id().is_none());
+    assert_eq!(engine.wal_debt_bytes().await, 5);
+    assert_eq!(
+        execute_request(&export_runtime, ExportRequest::Read { offset: 0, len: 5 })
+            .await
+            .expect("read retained overlay"),
+        ExportReply::Read {
+            data: b"fails".to_vec(),
+        },
+    );
+
+    failing_store.allow_future_calls();
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
+async fn wal_durable_write_pressure_blocks_later_writes_until_compaction_finishes() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    let blocking_store = Arc::new(BlockingCowTreeStore::new(catalog.clone()));
+    let (_created, _wal, engine, export_runtime) = wal_durable_cow_runtime(
+        &runtime,
+        &catalog,
+        "disk-pressure-block",
+        blocking_store.clone() as Arc<dyn CowTreeMetadataStore>,
+        5,
+    )
+    .await;
+
+    let first_slot = export_runtime.reserve().await.expect("reserve first");
+    let (first_job, first_receiver) = ExportJob::oneshot(
+        ExportRequest::Write {
+            offset: 0,
+            data: b"first".to_vec(),
+        },
+        first_slot,
+    );
+    export_runtime
+        .submit(first_job)
+        .await
+        .expect("submit first write");
+    blocking_store.wait_for_publish_count(1).await;
+    assert_eq!(
+        timeout(
+            Duration::from_secs(5),
+            execute_request(
+                &export_runtime,
+                ExportRequest::Read {
+                    offset: 1024,
+                    len: 1
+                }
+            ),
+        )
+        .await
+        .expect("independent read should not wait for compaction")
+        .expect("independent read"),
+        ExportReply::Read { data: vec![0] },
+    );
+
+    let second_slot = export_runtime.reserve().await.expect("reserve second");
+    let (second_job, mut second_receiver) = ExportJob::oneshot(
+        ExportRequest::Write {
+            offset: 16,
+            data: b"x".to_vec(),
+        },
+        second_slot,
+    );
+    export_runtime
+        .submit(second_job)
+        .await
+        .expect("submit second write");
+    assert!(
+        timeout(Duration::from_millis(50), &mut second_receiver)
+            .await
+            .is_err(),
+        "second write completed while first write-pressure compaction was blocked",
+    );
+
+    blocking_store.release_first_publish();
+    assert_done(first_receiver.await.expect("first completion"));
+    assert_done(second_receiver.await.expect("second completion"));
+    assert_eq!(engine.wal_debt_bytes().await, 1);
+    assert_eq!(
+        execute_request(&export_runtime, ExportRequest::Read { offset: 0, len: 17 })
+            .await
+            .expect("read both writes"),
+        ExportReply::Read {
+            data: b"first\0\0\0\0\0\0\0\0\0\0\0x".to_vec(),
+        },
+    );
+
+    export_runtime.close().await.expect("close runtime");
+}
+
+#[tokio::test]
 async fn wal_durable_engine_rejects_out_of_bounds_ranges() {
     let (_runtime, _wal, _meta, export_runtime) =
         wal_durable_runtime("disk-bounds", "export-bounds", 8).await;
@@ -478,6 +676,53 @@ async fn wal_durable_runtime(
     (runtime, wal, meta, export_runtime)
 }
 
+async fn wal_durable_cow_runtime(
+    runtime: &TestRuntime,
+    catalog: &SQLiteExportCatalog,
+    name: &str,
+    cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+    wal_debt_threshold_bytes: u64,
+) -> (
+    ExportRecord,
+    ExportWalHandle,
+    Arc<WalDurableEngine>,
+    ConcurrentExportRuntime,
+) {
+    let created = catalog
+        .create_export(
+            CreateExport::new(
+                ExportName::new(name).expect("export name"),
+                TREE_CHUNK_BYTES,
+                4096,
+                ExportEngineKind::WalDurable,
+            )
+            .expect("create export"),
+        )
+        .await
+        .expect("create wal export");
+    let descriptor = catalog
+        .load_export_descriptor(created.name().clone())
+        .await
+        .expect("load descriptor");
+    let wal = open_wal(runtime, created.id().as_str()).await;
+    let engine = Arc::new(
+        WalDurableEngine::open_with_cow_tree_and_wal_debt_threshold(
+            &descriptor,
+            wal.clone(),
+            LocalBlobStore::new(runtime.root_path().join("blobs")),
+            cow_tree_store,
+            wal_debt_threshold_bytes,
+        )
+        .await
+        .expect("wal durable engine"),
+    );
+    let head = engine.export_head().await.expect("engine head");
+    let meta = descriptor.into_record(head).expect("runtime meta");
+    let export_runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 4);
+
+    (created, wal, engine, export_runtime)
+}
+
 async fn execute_request(
     export_runtime: &ConcurrentExportRuntime,
     request: ExportRequest,
@@ -490,6 +735,11 @@ async fn execute_request(
     result
 }
 
+fn assert_done(completed: nbd_server::CompletedExport) {
+    let (result, _queue_slot) = completed.into_parts();
+    assert_eq!(result.expect("export reply"), ExportReply::Done);
+}
+
 async fn open_wal(runtime: &TestRuntime, export_id: &str) -> ExportWalHandle {
     let provider = LocalWalProvider::new(runtime.wal_dir());
     provider
@@ -498,6 +748,134 @@ async fn open_wal(runtime: &TestRuntime, export_id: &str) -> ExportWalHandle {
         )))
         .await
         .expect("open WAL")
+}
+
+struct FailingCowTreeStore {
+    inner: SQLiteExportCatalog,
+    fail_calls: AtomicBool,
+    attempted: AtomicBool,
+    notify: Notify,
+}
+
+impl FailingCowTreeStore {
+    fn new(inner: SQLiteExportCatalog) -> Self {
+        Self {
+            inner,
+            fail_calls: AtomicBool::new(false),
+            attempted: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn fail_future_calls(&self) {
+        self.fail_calls.store(true, Ordering::SeqCst);
+    }
+
+    fn allow_future_calls(&self) {
+        self.fail_calls.store(false, Ordering::SeqCst);
+    }
+
+    async fn wait_for_attempt(&self) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if self.attempted.load(Ordering::SeqCst) {
+                    return;
+                }
+                self.notify.notified().await;
+            }
+        })
+        .await
+        .expect("wait for failed compaction attempt");
+    }
+
+    fn mark_attempted(&self) {
+        self.attempted.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl CowTreeMetadataStore for FailingCowTreeStore {
+    async fn load_cow_tree(
+        &self,
+        export_id: &ExportId,
+    ) -> nbd_control_plane::Result<CowTreeSnapshot> {
+        if self.fail_calls.load(Ordering::SeqCst) {
+            self.mark_attempted();
+            return Err(CatalogError::database("injected compaction load failure"));
+        }
+        self.inner.load_cow_tree(export_id).await
+    }
+
+    async fn publish_compaction(
+        &self,
+        request: PublishCompaction,
+    ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
+        if self.fail_calls.load(Ordering::SeqCst) {
+            self.mark_attempted();
+            return Err(CatalogError::database(
+                "injected compaction publish failure",
+            ));
+        }
+        self.inner.publish_compaction(request).await
+    }
+}
+
+struct BlockingCowTreeStore {
+    inner: SQLiteExportCatalog,
+    publish_count: AtomicUsize,
+    publish_started: Notify,
+    release_publish: Notify,
+}
+
+impl BlockingCowTreeStore {
+    fn new(inner: SQLiteExportCatalog) -> Self {
+        Self {
+            inner,
+            publish_count: AtomicUsize::new(0),
+            publish_started: Notify::new(),
+            release_publish: Notify::new(),
+        }
+    }
+
+    async fn wait_for_publish_count(&self, expected: usize) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if self.publish_count.load(Ordering::SeqCst) >= expected {
+                    return;
+                }
+                self.publish_started.notified().await;
+            }
+        })
+        .await
+        .expect("wait for blocked compaction publish");
+    }
+
+    fn release_first_publish(&self) {
+        self.release_publish.notify_waiters();
+    }
+}
+
+#[async_trait::async_trait]
+impl CowTreeMetadataStore for BlockingCowTreeStore {
+    async fn load_cow_tree(
+        &self,
+        export_id: &ExportId,
+    ) -> nbd_control_plane::Result<CowTreeSnapshot> {
+        self.inner.load_cow_tree(export_id).await
+    }
+
+    async fn publish_compaction(
+        &self,
+        request: PublishCompaction,
+    ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
+        let count = self.publish_count.fetch_add(1, Ordering::SeqCst) + 1;
+        self.publish_started.notify_waiters();
+        if count == 1 {
+            self.release_publish.notified().await;
+        }
+        self.inner.publish_compaction(request).await
+    }
 }
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
