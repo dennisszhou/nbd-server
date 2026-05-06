@@ -3,7 +3,7 @@ Date: 2026-05-06
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 1 and Series 2 approved; Series 1 is current
+- current state: Series 1 finished; Series 2 approved and current
 Completion:
 - execution complete: no
 
@@ -79,7 +79,7 @@ return active descriptors; create/inspect/list/clone and compaction publication
 outcomes return `ExportRecord`; targeted catalog, server, Prisma, formatting,
 and clippy verification pass.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
