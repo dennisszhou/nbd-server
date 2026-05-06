@@ -1,5 +1,5 @@
 use nbd_control_plane::{
-    ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
+    ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
 };
 use nbd_server::{
     ExportJob, ExportReply, ExportRequest, ExportRuntime, MemoryExportEngine, Result,
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn memory_export_reads_zeroes_then_written_bytes() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let export = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
 
     assert_eq!(export.name().as_str(), "disk-a");
@@ -83,7 +83,7 @@ async fn memory_export_rejects_out_of_bounds_ranges() {
 
 #[test]
 fn memory_export_rejects_oversized_catalog_exports() {
-    let meta = export_meta("huge", MAX_MEMORY_EXPORT_BYTES + 1);
+    let meta = export_record("huge", MAX_MEMORY_EXPORT_BYTES + 1);
 
     assert!(matches!(
         MemoryExportEngine::new(&meta),
@@ -106,13 +106,13 @@ async fn submit(runtime: &SerialExportRuntime, request: ExportRequest) -> Result
 }
 
 fn memory_runtime(name: &str, size_bytes: u64) -> SerialExportRuntime {
-    let meta = export_meta(name, size_bytes);
+    let meta = export_record(name, size_bytes);
     let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
     SerialExportRuntime::new(meta, engine)
 }
 
-fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
-    ExportMeta::new(
+fn export_record(name: &str, size_bytes: u64) -> ExportRecord {
+    ExportRecord::new(
         ExportId::new(format!("export-{name}")).expect("export id"),
         ExportName::new(name).expect("export name"),
         4096,

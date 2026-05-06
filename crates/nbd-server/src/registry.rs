@@ -7,8 +7,8 @@ use crate::{
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    CowTreeMetadataStore, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportId, ExportMeta,
-    ExportName, SimpleTreeMetadataStore,
+    CowTreeMetadataStore, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportId, ExportName,
+    ExportRecord, SimpleTreeMetadataStore,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,7 @@ pub struct ExportFactory {
 }
 
 struct OpenedEngine {
-    meta: ExportMeta,
+    meta: ExportRecord,
     engine: ExportEngineHandle,
 }
 
@@ -109,7 +109,7 @@ impl LocalExportRegistry {
         match self.create_runtime(name.clone()).await {
             Ok(runtime) => {
                 let mut active = self.active()?;
-                let meta = runtime.export_meta();
+                let meta = runtime.export_record();
                 active.insert(
                     name.clone(),
                     ActiveExportState::Open(ActiveExport {
@@ -186,7 +186,7 @@ impl LocalExportRegistry {
             runtime
         };
 
-        let meta = runtime.export_meta();
+        let meta = runtime.export_record();
         runtime.close().await?;
         self.factory.enqueue_close_compaction(&meta).await;
         self.active()?.remove(name);
@@ -328,7 +328,7 @@ impl ExportFactory {
                 OpenedEngine {
                     meta: descriptor
                         .clone()
-                        .into_meta(head)
+                        .into_record(head)
                         .map_err(ServerError::catalog)?,
                     engine,
                 }
@@ -345,7 +345,7 @@ impl ExportFactory {
                 OpenedEngine {
                     meta: descriptor
                         .clone()
-                        .into_meta(head)
+                        .into_record(head)
                         .map_err(ServerError::catalog)?,
                     engine,
                 }
@@ -364,7 +364,7 @@ impl ExportFactory {
                 OpenedEngine {
                     meta: descriptor
                         .clone()
-                        .into_meta(head)
+                        .into_record(head)
                         .map_err(ServerError::catalog)?,
                     engine,
                 }
@@ -378,7 +378,7 @@ impl ExportFactory {
         self.wal_provider.open_export(OpenWal::new(domain)).await
     }
 
-    async fn enqueue_close_compaction(&self, meta: &ExportMeta) {
+    async fn enqueue_close_compaction(&self, meta: &ExportRecord) {
         if meta.engine_kind() != ExportEngineKind::WalDurable {
             return;
         }

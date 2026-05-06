@@ -10,7 +10,7 @@ use crate::{
 use bytes::Bytes;
 use nbd_control_plane::{
     CowTreeMetadataStore, CowTreeSnapshot, ExportDescriptor, ExportHead, ExportLayoutKind,
-    ExportMeta, ExportName, NodeId, WalSeq, TREE_CHUNK_BYTES,
+    ExportName, ExportRecord, NodeId, WalSeq, TREE_CHUNK_BYTES,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -107,7 +107,7 @@ struct CowTreeReader {
 }
 
 impl WalDurableEngine {
-    pub async fn open(meta: &ExportMeta, wal: ExportWalHandle) -> Result<Self> {
+    pub async fn open(meta: &ExportRecord, wal: ExportWalHandle) -> Result<Self> {
         if meta.head().layout_kind() != ExportLayoutKind::CowImmutableTree {
             return Err(ServerError::Catalog {
                 message: format!(
@@ -338,7 +338,7 @@ fn root_node_id_for_log(root: &RootSnapshot) -> &str {
 }
 
 impl RootSnapshot {
-    fn from_meta(meta: &ExportMeta) -> Self {
+    fn from_meta(meta: &ExportRecord) -> Self {
         Self {
             backing: RootBacking::Zero {
                 root_node_id: meta.head().root_node_id().cloned(),

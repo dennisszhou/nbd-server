@@ -299,13 +299,13 @@ mod tests {
         runtime::{ExportRuntime, SerialExportRuntime},
     };
     use nbd_control_plane::{
-        ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
+        ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
     };
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn connection_completion_holds_slot_until_reply_drop() {
-        let meta = export_meta("disk-a", 4096);
+        let meta = export_record("disk-a", 4096);
         let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory engine"));
         let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
         let queue_slot = runtime.reserve().await.expect("reserve queue slot");
@@ -338,7 +338,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_completion_waits_for_reply_queue_capacity() {
-        let meta = export_meta("disk-a", 4096);
+        let meta = export_record("disk-a", 4096);
         let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory engine"));
         let runtime = SerialExportRuntime::with_capacity(meta, engine, 2);
         let queued_slot = runtime.reserve().await.expect("reserve queued slot");
@@ -440,8 +440,8 @@ mod tests {
         drop(second_permit);
     }
 
-    fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
-        ExportMeta::new(
+    fn export_record(name: &str, size_bytes: u64) -> ExportRecord {
+        ExportRecord::new(
             ExportId::new(format!("export-{name}")).expect("export id"),
             ExportName::new(name).expect("export name"),
             4096,

@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use nbd_config::{ConfigSource, NbdConfig};
 use nbd_control_plane::{
     open_catalog, CatalogUrl, CloneExport, CreateExport, DeleteExport, ExportEngineKind,
-    ExportMeta, ExportName, InspectExport, ListExports,
+    ExportName, ExportRecord, InspectExport, ListExports,
 };
 use std::error::Error;
 use std::path::PathBuf;
@@ -147,7 +147,7 @@ fn load_config(path: Option<PathBuf>) -> Result<NbdConfig, Box<dyn Error>> {
     Ok(NbdConfig::load(source)?)
 }
 
-fn print_export_list(exports: &[ExportMeta]) {
+fn print_export_list(exports: &[ExportRecord]) {
     for export in exports {
         println!(
             "{}\t{}\tsize={}\tblock_size={}\tengine={}\tlayout={}",
@@ -161,7 +161,7 @@ fn print_export_list(exports: &[ExportMeta]) {
     }
 }
 
-fn print_export(export: &ExportMeta) {
+fn print_export(export: &ExportRecord) {
     println!("name: {}", export.name());
     println!("state: {}", export.state());
     println!("size: {}", export.size_bytes());

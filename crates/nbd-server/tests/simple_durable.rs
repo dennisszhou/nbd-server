@@ -1,6 +1,6 @@
 use nbd_control_plane::{
-    BlobKey, CatalogUrl, ChunkIndex, CreateExport, ExportCatalog, ExportEngineKind, ExportMeta,
-    ExportName, InspectExport, SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore,
+    BlobKey, CatalogUrl, ChunkIndex, CreateExport, ExportCatalog, ExportEngineKind, ExportName,
+    ExportRecord, InspectExport, SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore,
     SIMPLE_CHUNK_BYTES,
 };
 use nbd_server::{
@@ -336,14 +336,14 @@ async fn simple_durable_engine_flush_is_done() {
     export_runtime.close().await.expect("close runtime");
 }
 
-async fn simple_tree_fixture(name: &str) -> (TestRuntime, SQLiteExportCatalog, ExportMeta) {
+async fn simple_tree_fixture(name: &str) -> (TestRuntime, SQLiteExportCatalog, ExportRecord) {
     simple_tree_fixture_with_size(name, 128 * 1024 * 1024).await
 }
 
 async fn simple_tree_fixture_with_size(
     name: &str,
     size_bytes: u64,
-) -> (TestRuntime, SQLiteExportCatalog, ExportMeta) {
+) -> (TestRuntime, SQLiteExportCatalog, ExportRecord) {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -379,7 +379,7 @@ async fn simple_tree_fixture_with_size(
     (runtime, catalog, meta)
 }
 
-async fn load_tree(catalog: &SQLiteExportCatalog, meta: &ExportMeta) -> SimpleMutableTree {
+async fn load_tree(catalog: &SQLiteExportCatalog, meta: &ExportRecord) -> SimpleMutableTree {
     let descriptor = catalog
         .load_export_descriptor(meta.name().clone())
         .await
@@ -395,7 +395,7 @@ async fn simple_durable_runtime(
 ) -> (
     TestRuntime,
     SQLiteExportCatalog,
-    ExportMeta,
+    ExportRecord,
     ConcurrentExportRuntime,
 ) {
     let (runtime, catalog, meta) = simple_tree_fixture_with_size(name, size_bytes).await;
@@ -427,7 +427,11 @@ async fn execute_request(
     result.expect("export reply")
 }
 
-async fn simple_chunk_key(catalog: &SQLiteExportCatalog, meta: &ExportMeta, index: u64) -> BlobKey {
+async fn simple_chunk_key(
+    catalog: &SQLiteExportCatalog,
+    meta: &ExportRecord,
+    index: u64,
+) -> BlobKey {
     catalog
         .load_simple_tree(meta.id())
         .await

@@ -103,9 +103,9 @@ pub struct PublishCompaction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PublishCompactionOutcome {
-    Published(ExportMeta),
-    AlreadyCovered(ExportMeta),
-    StalePlan(ExportMeta),
+    Published(ExportRecord),
+    AlreadyCovered(ExportRecord),
+    StalePlan(ExportRecord),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,8 +136,8 @@ pub struct CloneExport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloneExportResult {
-    source: ExportMeta,
-    destination: ExportMeta,
+    source: ExportRecord,
+    destination: ExportRecord,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +156,7 @@ pub struct ListExports {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExportMeta {
+pub struct ExportRecord {
     id: ExportId,
     name: ExportName,
     block_size: u64,
@@ -588,13 +588,13 @@ impl PublishCompaction {
 }
 
 impl PublishCompactionOutcome {
-    pub fn meta(&self) -> &ExportMeta {
+    pub fn record(&self) -> &ExportRecord {
         match self {
             Self::Published(meta) | Self::AlreadyCovered(meta) | Self::StalePlan(meta) => meta,
         }
     }
 
-    pub fn into_meta(self) -> ExportMeta {
+    pub fn into_record(self) -> ExportRecord {
         match self {
             Self::Published(meta) | Self::AlreadyCovered(meta) | Self::StalePlan(meta) => meta,
         }
@@ -659,8 +659,8 @@ impl ExportDescriptor {
         self.deleted_at.as_ref()
     }
 
-    pub fn into_meta(self, head: ExportHead) -> Result<ExportMeta> {
-        ExportMeta::new(
+    pub fn into_record(self, head: ExportHead) -> Result<ExportRecord> {
+        ExportRecord::new(
             self.id,
             self.name,
             self.block_size,
@@ -734,18 +734,18 @@ impl CloneExport {
 }
 
 impl CloneExportResult {
-    pub fn new(source: ExportMeta, destination: ExportMeta) -> Self {
+    pub fn new(source: ExportRecord, destination: ExportRecord) -> Self {
         Self {
             source,
             destination,
         }
     }
 
-    pub fn source(&self) -> &ExportMeta {
+    pub fn source(&self) -> &ExportRecord {
         &self.source
     }
 
-    pub fn destination(&self) -> &ExportMeta {
+    pub fn destination(&self) -> &ExportRecord {
         &self.destination
     }
 }
@@ -788,7 +788,7 @@ impl ListExports {
     }
 }
 
-impl ExportMeta {
+impl ExportRecord {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ExportId,

@@ -4,7 +4,7 @@ use crate::{
     ExportAdmissionPolicyHandle, ExportCompletion, ExportEngineHandle, ExportJob, ExportJobContext,
     ExportRequest, ExportResult, Result, ServerError,
 };
-use nbd_control_plane::ExportMeta;
+use nbd_control_plane::ExportRecord;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
@@ -15,7 +15,7 @@ pub const DEFAULT_EXPORT_QUEUE_CAPACITY: usize = 128;
 /// Export-owned request execution boundary.
 #[async_trait::async_trait]
 pub trait ExportRuntime: Send + Sync {
-    fn export_meta(&self) -> ExportMeta;
+    fn export_record(&self) -> ExportRecord;
 
     async fn reserve(&self) -> Result<ExportQueueSlot>;
 
@@ -35,7 +35,7 @@ pub struct ExportQueueSlot {
 /// Runtime policy that executes accepted export jobs one at a time.
 #[derive(Debug, Clone)]
 pub struct SerialExportRuntime {
-    meta: ExportMeta,
+    meta: ExportRecord,
     queue_depth: Arc<Semaphore>,
     lifecycle: Arc<SerialRuntimeLifecycle>,
     sender: mpsc::Sender<ExportJob>,
@@ -44,7 +44,7 @@ pub struct SerialExportRuntime {
 /// Runtime policy that executes compatible admitted export jobs concurrently.
 #[derive(Clone)]
 pub struct ConcurrentExportRuntime {
-    meta: ExportMeta,
+    meta: ExportRecord,
     engine: ExportEngineHandle,
     admission: ExportAdmissionCtl,
     admission_policy: ExportAdmissionPolicyHandle,
@@ -102,11 +102,11 @@ enum PreparedExportJob {
 }
 
 impl SerialExportRuntime {
-    pub fn new(meta: ExportMeta, engine: ExportEngineHandle) -> Self {
+    pub fn new(meta: ExportRecord, engine: ExportEngineHandle) -> Self {
         Self::with_capacity(meta, engine, DEFAULT_EXPORT_QUEUE_CAPACITY)
     }
 
-    pub fn with_capacity(meta: ExportMeta, engine: ExportEngineHandle, capacity: usize) -> Self {
+    pub fn with_capacity(meta: ExportRecord, engine: ExportEngineHandle, capacity: usize) -> Self {
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
         let admission_policy = engine.admission_policy();
         let queue_depth = Arc::new(Semaphore::new(capacity));
@@ -148,11 +148,11 @@ impl SerialExportRuntime {
 }
 
 impl ConcurrentExportRuntime {
-    pub fn new(meta: ExportMeta, engine: ExportEngineHandle) -> Self {
+    pub fn new(meta: ExportRecord, engine: ExportEngineHandle) -> Self {
         Self::with_capacity(meta, engine, DEFAULT_EXPORT_QUEUE_CAPACITY)
     }
 
-    pub fn with_capacity(meta: ExportMeta, engine: ExportEngineHandle, capacity: usize) -> Self {
+    pub fn with_capacity(meta: ExportRecord, engine: ExportEngineHandle, capacity: usize) -> Self {
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
         let admission_policy = engine.admission_policy();
         Self {
@@ -173,7 +173,7 @@ impl ConcurrentExportRuntime {
 }
 
 async fn execute_admitted_job(
-    meta: ExportMeta,
+    meta: ExportRecord,
     runtime_kind: &'static str,
     engine: ExportEngineHandle,
     admission_policy: ExportAdmissionPolicyHandle,
@@ -224,7 +224,7 @@ fn prepare_admitted_job(
 }
 
 async fn execute_registered_job(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     engine: ExportEngineHandle,
     job: RegisteredExportJob,
@@ -258,7 +258,11 @@ async fn complete_rejected_job(job: RejectedExportJob) {
     job.completion.complete(job.result, job.queue_slot).await;
 }
 
-fn trace_runtime_submit(meta: &ExportMeta, runtime_kind: &'static str, context: &ExportJobContext) {
+fn trace_runtime_submit(
+    meta: &ExportRecord,
+    runtime_kind: &'static str,
+    context: &ExportJobContext,
+) {
     tracing::trace!(
         target: target::RUNTIME,
         event = event::RUNTIME_SUBMIT,
@@ -275,7 +279,7 @@ fn trace_runtime_submit(meta: &ExportMeta, runtime_kind: &'static str, context: 
 }
 
 fn trace_runtime_task_started(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     context: &ExportJobContext,
 ) {
@@ -295,7 +299,7 @@ fn trace_runtime_task_started(
 }
 
 fn trace_runtime_task_completed(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     context: &ExportJobContext,
 ) {
@@ -352,7 +356,7 @@ fn trace_admission_granted(context: &ExportJobContext, permit: &AdmissionPermit)
 }
 
 fn trace_engine_execute_started(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     context: &ExportJobContext,
 ) {
@@ -376,7 +380,7 @@ fn trace_engine_execute_started(
 }
 
 fn trace_engine_execute_finished(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     context: &ExportJobContext,
     result: &ExportResult,
@@ -416,7 +420,7 @@ fn trace_engine_execute_finished(
 }
 
 fn trace_engine_execute_failed(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     context: &ExportJobContext,
     error: &ServerError,
@@ -616,7 +620,7 @@ impl Drop for ConcurrentActiveJob {
 
 #[async_trait::async_trait]
 impl ExportRuntime for SerialExportRuntime {
-    fn export_meta(&self) -> ExportMeta {
+    fn export_record(&self) -> ExportRecord {
         self.meta.clone()
     }
 
@@ -656,7 +660,7 @@ impl ExportRuntime for SerialExportRuntime {
 
 #[async_trait::async_trait]
 impl ExportRuntime for ConcurrentExportRuntime {
-    fn export_meta(&self) -> ExportMeta {
+    fn export_record(&self) -> ExportRecord {
         self.meta.clone()
     }
 

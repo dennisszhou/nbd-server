@@ -3,7 +3,7 @@ use crate::{
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
 };
-use nbd_control_plane::{ExportDescriptor, ExportHead, ExportLayoutKind, ExportMeta, ExportName};
+use nbd_control_plane::{ExportDescriptor, ExportHead, ExportLayoutKind, ExportName, ExportRecord};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::ptr;
@@ -60,7 +60,7 @@ impl ExportAdmissionPolicy for MemoryAdmissionPolicy {
 }
 
 impl MemoryExportEngine {
-    pub fn new(meta: &ExportMeta) -> Result<Self> {
+    pub fn new(meta: &ExportRecord) -> Result<Self> {
         Self::from_export_head(meta.name().clone(), meta.block_size(), meta.head())
     }
 
@@ -220,7 +220,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admitted_non_overlapping_writes_can_share_storage() {
-        let meta = export_meta("disk-a", 4096);
+        let meta = export_record("disk-a", 4096);
         let engine = Arc::new(MemoryExportEngine::new(&meta).expect("memory export"));
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
         let policy = engine.admission_policy();
@@ -305,7 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_policy_blocks_overlapping_requests_in_admission() {
-        let meta = export_meta("disk-a", 4096);
+        let meta = export_record("disk-a", 4096);
         let engine = MemoryExportEngine::new(&meta).expect("memory export");
         let admission = ExportAdmissionCtl::new(meta.size_bytes());
         let policy = engine.admission_policy();
@@ -347,8 +347,8 @@ mod tests {
             .expect("read permit");
     }
 
-    fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
-        ExportMeta::new(
+    fn export_record(name: &str, size_bytes: u64) -> ExportRecord {
+        ExportRecord::new(
             ExportId::new(format!("export-{name}")).expect("export id"),
             ExportName::new(name).expect("export name"),
             4096,

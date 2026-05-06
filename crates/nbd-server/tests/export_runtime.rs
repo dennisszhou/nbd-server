@@ -1,5 +1,5 @@
 use nbd_control_plane::{
-    ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
+    ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
 };
 use nbd_server::{
     AdmittedExportRequest, ConcurrentExportRuntime, ExportAdmissionPolicyHandle, ExportEngine,
@@ -12,11 +12,11 @@ use tokio::sync::oneshot;
 
 #[tokio::test]
 async fn serial_runtime_executes_accepted_jobs() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let engine = Arc::new(MemoryExportEngine::new(&meta).unwrap());
     let runtime = SerialExportRuntime::new(meta.clone(), engine);
 
-    assert_eq!(runtime.export_meta(), meta);
+    assert_eq!(runtime.export_record(), meta);
 
     assert_eq!(
         submit(&runtime, ExportRequest::Read { offset: 0, len: 4 },).await,
@@ -48,7 +48,7 @@ async fn serial_runtime_executes_accepted_jobs() {
 
 #[tokio::test]
 async fn serial_runtime_queue_slot_reservation_releases_on_drop() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let engine = Arc::new(MemoryExportEngine::new(&meta).unwrap());
     let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
 
@@ -70,7 +70,7 @@ async fn serial_runtime_queue_slot_reservation_releases_on_drop() {
 
 #[tokio::test]
 async fn serial_runtime_close_rejects_new_work_and_waits_for_active_job() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let engine = Arc::new(BlockingEngine::new(entered_tx, release_rx));
@@ -117,7 +117,7 @@ async fn serial_runtime_close_rejects_new_work_and_waits_for_active_job() {
 
 #[tokio::test]
 async fn concurrent_runtime_queue_slot_reservation_releases_on_drop() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let (engine, _releases) = GatedEngine::new(0);
     let runtime = ConcurrentExportRuntime::with_capacity(meta, engine, 1);
 
@@ -139,7 +139,7 @@ async fn concurrent_runtime_queue_slot_reservation_releases_on_drop() {
 
 #[tokio::test]
 async fn concurrent_runtime_runs_compatible_jobs_concurrently() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let (engine, releases) = GatedEngine::new(2);
     let runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 2);
 
@@ -165,7 +165,7 @@ async fn concurrent_runtime_runs_compatible_jobs_concurrently() {
 
 #[tokio::test]
 async fn concurrent_runtime_serializes_conflicting_jobs_by_admission() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let (engine, mut releases) = GatedEngine::new(2);
     let runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 2);
 
@@ -195,7 +195,7 @@ async fn concurrent_runtime_serializes_conflicting_jobs_by_admission() {
 
 #[tokio::test]
 async fn concurrent_runtime_orders_flush_as_barrier() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let (engine, mut releases) = GatedEngine::new(2);
     let runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 2);
 
@@ -224,7 +224,7 @@ async fn concurrent_runtime_orders_flush_as_barrier() {
 
 #[tokio::test]
 async fn concurrent_runtime_close_waits_for_accepted_jobs() {
-    let meta = export_meta("disk-a", 4096);
+    let meta = export_record("disk-a", 4096);
     let (engine, mut releases) = GatedEngine::new(1);
     let runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 2);
 
@@ -254,7 +254,7 @@ async fn concurrent_runtime_close_waits_for_accepted_jobs() {
 
 #[tokio::test]
 async fn concurrent_runtime_completes_post_acceptance_admission_errors() {
-    let meta = export_meta("disk-a", 8);
+    let meta = export_record("disk-a", 8);
     let (engine, _releases) = GatedEngine::new_with_extent(0, 8);
     let runtime = ConcurrentExportRuntime::with_capacity(meta, engine, 1);
 
@@ -397,8 +397,8 @@ impl ExportEngine for GatedEngine {
     }
 }
 
-fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
-    ExportMeta::new(
+fn export_record(name: &str, size_bytes: u64) -> ExportRecord {
+    ExportRecord::new(
         ExportId::new(format!("export-{name}")).expect("export id"),
         ExportName::new(name).expect("export name"),
         4096,

@@ -299,7 +299,7 @@ impl CompactionFixture {
         &self,
         name: &str,
         size_bytes: u64,
-    ) -> nbd_control_plane::ExportMeta {
+    ) -> nbd_control_plane::ExportRecord {
         self.catalog
             .create_export(
                 CreateExport::new(

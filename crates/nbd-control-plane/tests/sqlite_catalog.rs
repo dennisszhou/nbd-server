@@ -1,7 +1,7 @@
 use nbd_control_plane::{
     BlobKey, CatalogError, CatalogUrl, ChunkIndex, CloneExport, CowChunkRef, CowTreeMetadataStore,
-    CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportMeta,
-    ExportName, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+    CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName,
+    ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
     PublishCompactionOutcome, SQLiteExportCatalog, SimpleChunkRef, SimpleTreeMetadataStore, WalSeq,
     SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
@@ -650,7 +650,7 @@ async fn cow_tree_allows_shared_immutable_root() {
         )
         .await
         .expect("publish compaction")
-        .into_meta();
+        .into_record();
     let source_root = published.head().root_node_id().expect("source root");
 
     sqlx::query(
@@ -732,7 +732,7 @@ async fn clone_export_copies_root_and_reuses_unchanged_nodes() {
         )
         .await
         .expect("publish child compaction")
-        .into_meta();
+        .into_record();
     let child_root = published_child.head().root_node_id().expect("child root");
     assert_ne!(child_root, source_root);
 
@@ -1141,10 +1141,10 @@ fn export_name(name: &str) -> ExportName {
 
 async fn publish_cow_root(
     catalog: &SQLiteExportCatalog,
-    export: &ExportMeta,
+    export: &ExportRecord,
     checkpoint: u64,
     chunks: Vec<CowChunkRef>,
-) -> ExportMeta {
+) -> ExportRecord {
     catalog
         .publish_compaction(
             PublishCompaction::new(
@@ -1157,7 +1157,7 @@ async fn publish_cow_root(
         )
         .await
         .expect("publish compaction")
-        .into_meta()
+        .into_record()
 }
 
 async fn cow_child_node(catalog: &SQLiteExportCatalog, root: &NodeId, slot: u64) -> NodeId {

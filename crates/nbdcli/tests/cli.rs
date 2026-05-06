@@ -236,7 +236,7 @@ async fn publish_cow_root(runtime: &TestRuntime, name: &str, checkpoint: u64) ->
         )
         .await
         .expect("publish source root")
-        .into_meta();
+        .into_record();
 
     Value::String(
         published

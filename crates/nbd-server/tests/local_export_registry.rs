@@ -46,7 +46,7 @@ async fn registry_rejects_second_unique_owner_until_close() {
         .open(export_name("disk-a"), owner_a)
         .await
         .expect("open first owner");
-    assert_eq!(first_runtime.export_meta().size_bytes(), 4096);
+    assert_eq!(first_runtime.export_record().size_bytes(), 4096);
     assert!(matches!(
         registry.open(export_name("disk-a"), owner_b).await,
         Err(ServerError::ExportBusy { name }) if name.as_str() == "disk-a",

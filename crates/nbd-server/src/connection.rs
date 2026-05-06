@@ -289,7 +289,7 @@ async fn negotiate_options(
                     }
                 };
 
-                let meta = runtime.export_meta();
+                let meta = runtime.export_record();
                 tracing::info!(
                     target: target::EXPORT,
                     event = event::EXPORT_OPEN_COMPLETED,
@@ -865,7 +865,7 @@ mod tests {
         MemoryAdmissionPolicy, SerialExportRuntime,
     };
     use nbd_control_plane::{
-        ExportEngineKind, ExportHead, ExportId, ExportMeta, ExportName, ExportState, Timestamp,
+        ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
     };
     use nbd_protocol::constants::NBD_CMD_WRITE;
     use nbd_protocol::transmission::{
@@ -1003,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn reply_write_holds_queue_slot_until_socket_write_finishes() {
-        let meta = export_meta("disk-a", 4096);
+        let meta = export_record("disk-a", 4096);
         let engine = Arc::new(NoopEngine);
         let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
         let queue_slot = runtime.reserve().await.expect("reserve queue slot");
@@ -1125,7 +1125,7 @@ mod tests {
         UnboundedReceiver<()>,
         UnboundedReceiver<()>,
     ) {
-        let meta = export_meta("disk-a", 4096);
+        let meta = export_record("disk-a", 4096);
         let engine = Arc::new(NoopEngine);
         let reservations = SerialExportRuntime::with_capacity(meta.clone(), engine, capacity);
         let (submitted_sender, submitted_receiver) = mpsc::channel(8);
@@ -1148,7 +1148,7 @@ mod tests {
 
     #[derive(Clone)]
     struct ControllableRuntime {
-        meta: ExportMeta,
+        meta: ExportRecord,
         reservations: SerialExportRuntime,
         submitted: mpsc::Sender<ExportJob>,
         reserve_started: UnboundedSender<()>,
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::runtime::ExportRuntime for ControllableRuntime {
-        fn export_meta(&self) -> ExportMeta {
+        fn export_record(&self) -> ExportRecord {
             self.meta.clone()
         }
 
@@ -1195,8 +1195,8 @@ mod tests {
         }
     }
 
-    fn export_meta(name: &str, size_bytes: u64) -> ExportMeta {
-        ExportMeta::new(
+    fn export_record(name: &str, size_bytes: u64) -> ExportRecord {
+        ExportRecord::new(
             ExportId::new(format!("export-{name}")).expect("export id"),
             ExportName::new(name).expect("export name"),
             4096,

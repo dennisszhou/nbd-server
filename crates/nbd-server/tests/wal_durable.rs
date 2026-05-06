@@ -1,7 +1,8 @@
 use nbd_control_plane::{
     CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CreateExport, ExportCatalog,
-    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta, ExportName, ExportState,
-    NodeId, PublishCompaction, SQLiteExportCatalog, Timestamp, WalSeq, TREE_CHUNK_BYTES,
+    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName, ExportRecord,
+    ExportState, NodeId, PublishCompaction, SQLiteExportCatalog, Timestamp, WalSeq,
+    TREE_CHUNK_BYTES,
 };
 use nbd_server::{
     ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime, ExportWalHandle,
@@ -64,7 +65,7 @@ async fn wal_durable_engine_reads_zeroes_then_written_overlay() {
         wal.bounds().await.expect("bounds").last_durable,
         WalSeq::new(1),
     );
-    assert_eq!(export_runtime.export_meta(), meta);
+    assert_eq!(export_runtime.export_record(), meta);
 
     export_runtime.close().await.expect("close runtime");
 }
@@ -72,7 +73,7 @@ async fn wal_durable_engine_reads_zeroes_then_written_overlay() {
 #[tokio::test]
 async fn wal_durable_engine_replays_retained_records_on_open() {
     let runtime = TestRuntime::new().expect("test runtime");
-    let meta = export_meta("disk-replay", "export-replay", 4096);
+    let meta = export_record("disk-replay", "export-replay", 4096);
     let wal = open_wal(&runtime, "export-replay").await;
     wal.append(
         WalRequest::new(nbd_server::ByteRange::new(1, 3), b"abc".to_vec())
@@ -218,7 +219,7 @@ async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
         .expect("wal durable engine"),
     );
     let head = engine.export_head().await.expect("engine head");
-    let meta = descriptor.into_meta(head).expect("runtime meta");
+    let meta = descriptor.into_record(head).expect("runtime meta");
     let export_runtime = ConcurrentExportRuntime::with_capacity(meta, engine, 4);
 
     assert_eq!(
@@ -277,7 +278,7 @@ async fn wal_durable_zero_backing_open_rejects_committed_root() {
         WalSeq::zero(),
     )
     .expect("head");
-    let meta = ExportMeta::new(
+    let meta = ExportRecord::new(
         ExportId::new("export-root").expect("export id"),
         ExportName::new("disk-root").expect("export name"),
         4096,
@@ -303,11 +304,11 @@ async fn wal_durable_runtime(
 ) -> (
     TestRuntime,
     ExportWalHandle,
-    ExportMeta,
+    ExportRecord,
     ConcurrentExportRuntime,
 ) {
     let runtime = TestRuntime::new().expect("test runtime");
-    let meta = export_meta(name, export_id, size_bytes);
+    let meta = export_record(name, export_id, size_bytes);
     let wal = open_wal(&runtime, export_id).await;
     let engine = Arc::new(
         WalDurableEngine::open(&meta, wal.clone())
@@ -357,8 +358,8 @@ async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     catalog
 }
 
-fn export_meta(name: &str, export_id: &str, size_bytes: u64) -> ExportMeta {
-    ExportMeta::new(
+fn export_record(name: &str, export_id: &str, size_bytes: u64) -> ExportRecord {
+    ExportRecord::new(
         ExportId::new(export_id).expect("export id"),
         ExportName::new(name).expect("export name"),
         4096,

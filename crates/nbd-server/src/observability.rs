@@ -1,4 +1,4 @@
-use nbd_control_plane::ExportMeta;
+use nbd_control_plane::ExportRecord;
 use nbd_protocol::wire::NbdCookie;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -268,7 +268,7 @@ pub fn duration_ms(duration: Duration) -> u128 {
 }
 
 pub(crate) fn request_span(
-    meta: &ExportMeta,
+    meta: &ExportRecord,
     runtime_kind: &'static str,
     context: &ExportJobContext,
 ) -> tracing::Span {

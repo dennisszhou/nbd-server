@@ -12,7 +12,7 @@ pub use error::{CatalogError, Result};
 pub use model::{
     BlobKey, ChunkIndex, CloneExport, CloneExportResult, CowChunkRef, CowTreeSnapshot,
     CreateExport, DeleteExport, ExportDescriptor, ExportEngineKind, ExportHead, ExportId,
-    ExportLayoutKind, ExportMeta, ExportName, ExportState, InspectExport, ListExports, NodeId,
+    ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports, NodeId,
     PublishCompaction, PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot, Timestamp,
     WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
@@ -22,7 +22,7 @@ use std::sync::Arc;
 /// Runtime metadata boundary for export catalog operations.
 #[async_trait::async_trait]
 pub trait ExportCatalog: Send + Sync {
-    async fn create_export(&self, request: CreateExport) -> Result<ExportMeta>;
+    async fn create_export(&self, request: CreateExport) -> Result<ExportRecord>;
 
     async fn clone_export(&self, request: CloneExport) -> Result<CloneExportResult>;
 
@@ -31,7 +31,7 @@ pub trait ExportCatalog: Send + Sync {
     /// Load an export for serving/open paths.
     ///
     /// Implementations must reject deleted exports.
-    async fn load_export(&self, name: ExportName) -> Result<ExportMeta>;
+    async fn load_export(&self, name: ExportName) -> Result<ExportRecord>;
 
     /// Load exports-only metadata for serving/open paths.
     ///
@@ -45,9 +45,9 @@ pub trait ExportCatalog: Send + Sync {
     /// Inspect an export for operator visibility.
     ///
     /// Unlike `load_export`, this may return deleted exports.
-    async fn inspect_export(&self, request: InspectExport) -> Result<ExportMeta>;
+    async fn inspect_export(&self, request: InspectExport) -> Result<ExportRecord>;
 
-    async fn list_exports(&self, request: ListExports) -> Result<Vec<ExportMeta>>;
+    async fn list_exports(&self, request: ListExports) -> Result<Vec<ExportRecord>>;
 }
 
 #[async_trait::async_trait]

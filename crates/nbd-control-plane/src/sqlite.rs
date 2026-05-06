@@ -3,8 +3,8 @@
 use crate::{
     BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport, CloneExportResult,
     CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, DeleteExport, ExportCatalog,
-    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportMeta,
-    ExportName, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
+    ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
     PublishCompactionOutcome, Result, SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot,
     Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
@@ -52,7 +52,7 @@ impl SQLiteExportCatalog {
         &self.pool
     }
 
-    async fn fetch_by_name(&self, name: &ExportName) -> Result<ExportMeta> {
+    async fn fetch_by_name(&self, name: &ExportName) -> Result<ExportRecord> {
         let row = sqlx::query(
             r#"
             SELECT
@@ -79,7 +79,7 @@ impl SQLiteExportCatalog {
         .await
         .map_err(map_sqlx_error)?;
 
-        row.map(|row| row_to_export_meta(&row))
+        row.map(|row| row_to_export_record(&row))
             .unwrap_or_else(|| Err(CatalogError::ExportNotFound { name: name.clone() }))
     }
 
@@ -111,7 +111,7 @@ impl SQLiteExportCatalog {
 
 #[async_trait::async_trait]
 impl ExportCatalog for SQLiteExportCatalog {
-    async fn create_export(&self, request: CreateExport) -> Result<ExportMeta> {
+    async fn create_export(&self, request: CreateExport) -> Result<ExportRecord> {
         let export_id = ExportId::new(Uuid::new_v4().to_string())?;
         let now = current_timestamp()?;
         let size_bytes = u64_to_i64("size_bytes", request.size_bytes())?;
@@ -176,7 +176,7 @@ impl ExportCatalog for SQLiteExportCatalog {
 
         tx.commit().await.map_err(map_sqlx_error)?;
 
-        ExportMeta::new(
+        ExportRecord::new(
             export_id,
             request.name().clone(),
             request.block_size(),
@@ -193,7 +193,7 @@ impl ExportCatalog for SQLiteExportCatalog {
         let destination_id = ExportId::new(Uuid::new_v4().to_string())?;
         let now = current_timestamp()?;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let source = fetch_export_meta_by_name_in_tx(&mut tx, request.source()).await?;
+        let source = fetch_export_record_by_name_in_tx(&mut tx, request.source()).await?;
         if source.state() == ExportState::Deleted {
             return Err(CatalogError::ExportDeleted {
                 name: request.source().clone(),
@@ -257,7 +257,7 @@ impl ExportCatalog for SQLiteExportCatalog {
         .await
         .map_err(map_sqlx_error)?;
 
-        let destination = fetch_export_meta_by_id_in_tx(&mut tx, &destination_id).await?;
+        let destination = fetch_export_record_by_id_in_tx(&mut tx, &destination_id).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(CloneExportResult::new(source, destination))
     }
@@ -294,7 +294,7 @@ impl ExportCatalog for SQLiteExportCatalog {
         }
     }
 
-    async fn load_export(&self, name: ExportName) -> Result<ExportMeta> {
+    async fn load_export(&self, name: ExportName) -> Result<ExportRecord> {
         let meta = self.fetch_by_name(&name).await?;
         if meta.state() == ExportState::Deleted {
             Err(CatalogError::ExportDeleted { name })
@@ -316,11 +316,11 @@ impl ExportCatalog for SQLiteExportCatalog {
         load_export_head(&self.pool, export_id).await
     }
 
-    async fn inspect_export(&self, request: InspectExport) -> Result<ExportMeta> {
+    async fn inspect_export(&self, request: InspectExport) -> Result<ExportRecord> {
         self.fetch_by_name(request.name()).await
     }
 
-    async fn list_exports(&self, request: ListExports) -> Result<Vec<ExportMeta>> {
+    async fn list_exports(&self, request: ListExports) -> Result<Vec<ExportRecord>> {
         let include_deleted = if request.includes_deleted() {
             1_i64
         } else {
@@ -353,7 +353,7 @@ impl ExportCatalog for SQLiteExportCatalog {
         .await
         .map_err(map_sqlx_error)?;
 
-        rows.iter().map(row_to_export_meta).collect()
+        rows.iter().map(row_to_export_record).collect()
     }
 }
 
@@ -570,7 +570,7 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
         request: PublishCompaction,
     ) -> Result<PublishCompactionOutcome> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let current = fetch_export_meta_by_id_in_tx(&mut tx, request.export_id()).await?;
+        let current = fetch_export_record_by_id_in_tx(&mut tx, request.export_id()).await?;
         if current.state() == ExportState::Deleted {
             return Err(CatalogError::ExportDeleted {
                 name: current.name().clone(),
@@ -749,7 +749,7 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
 
         if update.rows_affected() == 0 {
             tx.rollback().await.map_err(map_sqlx_error)?;
-            let current = fetch_export_meta_by_id(&self.pool, request.export_id()).await?;
+            let current = fetch_export_record_by_id(&self.pool, request.export_id()).await?;
             return Ok(PublishCompactionOutcome::StalePlan(current));
         }
 
@@ -766,7 +766,7 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
         .await
         .map_err(map_sqlx_error)?;
 
-        let published = fetch_export_meta_by_id_in_tx(&mut tx, request.export_id()).await?;
+        let published = fetch_export_record_by_id_in_tx(&mut tx, request.export_id()).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(PublishCompactionOutcome::Published(published))
     }
@@ -1289,10 +1289,10 @@ async fn load_export_head(pool: &SqlitePool, export_id: &ExportId) -> Result<Exp
     row_to_export_head(&row)
 }
 
-async fn fetch_export_meta_by_id_in_tx(
+async fn fetch_export_record_by_id_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     export_id: &ExportId,
-) -> Result<ExportMeta> {
+) -> Result<ExportRecord> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -1320,13 +1320,13 @@ async fn fetch_export_meta_by_id_in_tx(
     .map_err(map_sqlx_error)?
     .ok_or_else(|| CatalogError::database(format!("export `{export_id}` not found")))?;
 
-    row_to_export_meta(&row)
+    row_to_export_record(&row)
 }
 
-async fn fetch_export_meta_by_name_in_tx(
+async fn fetch_export_record_by_name_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     name: &ExportName,
-) -> Result<ExportMeta> {
+) -> Result<ExportRecord> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -1354,10 +1354,13 @@ async fn fetch_export_meta_by_name_in_tx(
     .map_err(map_sqlx_error)?
     .ok_or_else(|| CatalogError::ExportNotFound { name: name.clone() })?;
 
-    row_to_export_meta(&row)
+    row_to_export_record(&row)
 }
 
-async fn fetch_export_meta_by_id(pool: &SqlitePool, export_id: &ExportId) -> Result<ExportMeta> {
+async fn fetch_export_record_by_id(
+    pool: &SqlitePool,
+    export_id: &ExportId,
+) -> Result<ExportRecord> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -1385,7 +1388,7 @@ async fn fetch_export_meta_by_id(pool: &SqlitePool, export_id: &ExportId) -> Res
     .map_err(map_sqlx_error)?
     .ok_or_else(|| CatalogError::database(format!("export `{export_id}` not found")))?;
 
-    row_to_export_meta(&row)
+    row_to_export_record(&row)
 }
 
 fn row_to_export_descriptor(row: &SqliteRow) -> Result<ExportDescriptor> {
@@ -1432,9 +1435,9 @@ fn row_to_export_head(row: &SqliteRow) -> Result<ExportHead> {
     )
 }
 
-fn row_to_export_meta(row: &SqliteRow) -> Result<ExportMeta> {
+fn row_to_export_record(row: &SqliteRow) -> Result<ExportRecord> {
     let descriptor = row_to_export_descriptor(row)?;
-    descriptor.into_meta(row_to_export_head(row)?)
+    descriptor.into_record(row_to_export_head(row)?)
 }
 
 fn current_timestamp() -> Result<Timestamp> {
