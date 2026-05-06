@@ -3,7 +3,7 @@ Date: 2026-05-06
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 1 finished; Series 2 approved and current
+- current state: Series 2 finished; waiting for Series 3 evaluation
 Completion:
 - execution complete: no
 
@@ -305,7 +305,7 @@ the engine hook; serial runtime retains an engine handle for close; concurrent
 runtime calls close after its lifecycle is empty; no compaction behavior is
 moved yet.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
