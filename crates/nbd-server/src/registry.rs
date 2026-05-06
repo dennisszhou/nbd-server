@@ -184,18 +184,46 @@ impl LocalExportRegistry {
             runtime
         };
 
-        runtime.close().await?;
-        self.active()?.remove(name);
-        tracing::info!(
-            target: target::EXPORT,
-            event = event::EXPORT_CLOSE_COMPLETED,
-            service = observability::SERVICE_NAME,
-            server_instance_id = observability::server_instance_id(),
-            pid = observability::pid(),
-            export_name = %name,
-            owner_id = owner.id().raw(),
-        );
-        Ok(())
+        let close_result = runtime.close().await;
+        {
+            let mut active = self.active()?;
+            if matches!(
+                active.get(name),
+                Some(ActiveExportState::Closing { owner: active_owner })
+                    if active_owner == owner
+            ) {
+                active.remove(name);
+            }
+        }
+
+        match &close_result {
+            Ok(()) => {
+                tracing::info!(
+                    target: target::EXPORT,
+                    event = event::EXPORT_CLOSE_COMPLETED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    export_name = %name,
+                    owner_id = owner.id().raw(),
+                    status = "ok",
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: target::EXPORT,
+                    event = event::EXPORT_CLOSE_COMPLETED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    export_name = %name,
+                    owner_id = owner.id().raw(),
+                    status = "error",
+                    error = %error,
+                );
+            }
+        }
+        close_result
     }
 
     async fn create_runtime(&self, name: ExportName) -> Result<ExportRuntimeHandle> {
@@ -380,5 +408,224 @@ fn runtime_kind_name(kind: ExportRuntimeKind) -> &'static str {
     match kind {
         ExportRuntimeKind::Serial => "serial",
         ExportRuntimeKind::Concurrent => "concurrent",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ExportJob, ExportQueueSlot, ExportRuntime};
+    use nbd_control_plane::{
+        CatalogError, CloneExport, CloneExportResult, CowTreeSnapshot, CreateExport, DeleteExport,
+        ExportHead, ExportState, InspectExport, ListExports, PublishCompaction,
+        PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot, Timestamp,
+    };
+
+    #[tokio::test]
+    async fn final_owner_close_error_removes_closing_entry() {
+        let name = export_name("disk-a");
+        let owner = ExportOwner::unique_connection();
+        let runtime = Arc::new(FailingCloseRuntime::new(export_record("disk-a", 4096)));
+        let registry = registry_with_active_runtime(name.clone(), owner, runtime);
+
+        assert!(matches!(
+            registry.close(&name, &owner).await,
+            Err(ServerError::RuntimeClosed { resource }) if resource == "failing test runtime",
+        ));
+        assert!(
+            !registry.active().expect("active map").contains_key(&name),
+            "failed final close should not leave a stale Closing entry",
+        );
+        registry
+            .close(&name, &owner)
+            .await
+            .expect("close is idempotent after cleanup");
+    }
+
+    fn registry_with_active_runtime(
+        name: ExportName,
+        owner: ExportOwner,
+        runtime: ExportRuntimeHandle,
+    ) -> LocalExportRegistry {
+        let catalog = Arc::new(UnusedCatalog);
+        let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
+        let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
+        let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
+        let factory = Arc::new(ExportFactory::new(
+            ServerConfig::default(),
+            PathBuf::from("."),
+            export_catalog.clone(),
+            simple_tree_store,
+            cow_tree_store,
+            Arc::new(UnusedWalProvider),
+        ));
+        let mut active = HashMap::new();
+        active.insert(
+            name,
+            ActiveExportState::Open(ActiveExport {
+                owner,
+                runtime,
+                connections: 1,
+            }),
+        );
+
+        LocalExportRegistry {
+            catalog: export_catalog,
+            factory,
+            active: Mutex::new(active),
+        }
+    }
+
+    struct FailingCloseRuntime {
+        meta: ExportRecord,
+    }
+
+    impl FailingCloseRuntime {
+        fn new(meta: ExportRecord) -> Self {
+            Self { meta }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExportRuntime for FailingCloseRuntime {
+        fn export_record(&self) -> ExportRecord {
+            self.meta.clone()
+        }
+
+        async fn reserve(&self) -> Result<ExportQueueSlot> {
+            panic!("failing close runtime should not reserve");
+        }
+
+        async fn submit(&self, _job: ExportJob) -> Result<()> {
+            panic!("failing close runtime should not submit");
+        }
+
+        async fn close(&self) -> Result<()> {
+            Err(ServerError::RuntimeClosed {
+                resource: "failing test runtime",
+            })
+        }
+    }
+
+    struct UnusedCatalog;
+
+    #[async_trait::async_trait]
+    impl ExportCatalog for UnusedCatalog {
+        async fn create_export(
+            &self,
+            _request: CreateExport,
+        ) -> nbd_control_plane::Result<ExportRecord> {
+            Err(unused_catalog_error())
+        }
+
+        async fn clone_export(
+            &self,
+            _request: CloneExport,
+        ) -> nbd_control_plane::Result<CloneExportResult> {
+            Err(unused_catalog_error())
+        }
+
+        async fn delete_export(&self, _request: DeleteExport) -> nbd_control_plane::Result<()> {
+            Err(unused_catalog_error())
+        }
+
+        async fn load_export(&self, _name: ExportName) -> nbd_control_plane::Result<ExportRecord> {
+            Err(unused_catalog_error())
+        }
+
+        async fn load_export_descriptor(
+            &self,
+            _name: ExportName,
+        ) -> nbd_control_plane::Result<ActiveExportDescriptor> {
+            Err(unused_catalog_error())
+        }
+
+        async fn load_export_head(
+            &self,
+            _export_id: &ExportId,
+        ) -> nbd_control_plane::Result<ExportHead> {
+            Err(unused_catalog_error())
+        }
+
+        async fn inspect_export(
+            &self,
+            _request: InspectExport,
+        ) -> nbd_control_plane::Result<ExportRecord> {
+            Err(unused_catalog_error())
+        }
+
+        async fn list_exports(
+            &self,
+            _request: ListExports,
+        ) -> nbd_control_plane::Result<Vec<ExportRecord>> {
+            Err(unused_catalog_error())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SimpleTreeMetadataStore for UnusedCatalog {
+        async fn load_simple_tree(
+            &self,
+            _export_id: &ExportId,
+        ) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
+            Err(unused_catalog_error())
+        }
+
+        async fn commit_simple_chunks(
+            &self,
+            _export_id: &ExportId,
+            _chunks: Vec<SimpleChunkRef>,
+        ) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
+            Err(unused_catalog_error())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CowTreeMetadataStore for UnusedCatalog {
+        async fn load_cow_tree(
+            &self,
+            _export_id: &ExportId,
+        ) -> nbd_control_plane::Result<CowTreeSnapshot> {
+            Err(unused_catalog_error())
+        }
+
+        async fn publish_compaction(
+            &self,
+            _request: PublishCompaction,
+        ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
+            Err(unused_catalog_error())
+        }
+    }
+
+    struct UnusedWalProvider;
+
+    #[async_trait::async_trait]
+    impl WalProvider for UnusedWalProvider {
+        async fn open_export(&self, _request: OpenWal) -> Result<ExportWalHandle> {
+            Err(ServerError::wal("unused test WAL provider", "not used"))
+        }
+    }
+
+    fn unused_catalog_error() -> CatalogError {
+        CatalogError::database("unused test catalog")
+    }
+
+    fn export_name(name: &str) -> ExportName {
+        ExportName::new(name).expect("valid export name")
+    }
+
+    fn export_record(name: &str, size_bytes: u64) -> ExportRecord {
+        ExportRecord::new(
+            ExportId::new(format!("export-{name}")).expect("export id"),
+            export_name(name),
+            4096,
+            ExportEngineKind::Memory,
+            ExportState::Active,
+            ExportHead::memory_empty(size_bytes).expect("memory head"),
+            Timestamp::new("created").expect("created timestamp"),
+            Timestamp::new("updated").expect("updated timestamp"),
+            None,
+        )
+        .expect("export record")
     }
 }
