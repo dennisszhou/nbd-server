@@ -370,7 +370,7 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
         .await
         .expect("create export");
     let catalog_for_assert = catalog.clone();
-    let failing_compaction_store = Arc::new(FailingCowTreeStore::new());
+    let failing_compaction_store = Arc::new(FailingCowTreeStore::new(catalog.clone()));
     let registry = local_registry_with_compaction_store(
         catalog,
         &runtime,
@@ -392,6 +392,7 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
     )
     .await
     .expect("write");
+    failing_compaction_store.fail_future_calls();
     registry
         .close(&export_name("disk-wal"), &owner)
         .await
@@ -404,6 +405,7 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
     assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
     assert!(snapshot.root_node_id().is_none());
 
+    failing_compaction_store.allow_future_calls();
     let reopened_owner = ExportOwner::unique_connection();
     let reopened = registry
         .open(export_name("disk-wal"), reopened_owner)
@@ -468,7 +470,7 @@ fn local_registry_with_compaction_store(
     let catalog = Arc::new(catalog);
     let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
     let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
-    let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
+    let cow_tree_store = compaction_store.clone();
     let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
     let compaction_manager = CompactionManager::with_queue_capacity(
         compaction_store,
@@ -489,16 +491,28 @@ fn local_registry_with_compaction_store(
 }
 
 struct FailingCowTreeStore {
+    inner: SQLiteExportCatalog,
+    fail_calls: AtomicBool,
     attempted: AtomicBool,
     notify: Notify,
 }
 
 impl FailingCowTreeStore {
-    fn new() -> Self {
+    fn new(inner: SQLiteExportCatalog) -> Self {
         Self {
+            inner,
+            fail_calls: AtomicBool::new(false),
             attempted: AtomicBool::new(false),
             notify: Notify::new(),
         }
+    }
+
+    fn fail_future_calls(&self) {
+        self.fail_calls.store(true, Ordering::SeqCst);
+    }
+
+    fn allow_future_calls(&self) {
+        self.fail_calls.store(false, Ordering::SeqCst);
     }
 
     async fn wait_for_attempt(&self) {
@@ -524,20 +538,26 @@ impl FailingCowTreeStore {
 impl CowTreeMetadataStore for FailingCowTreeStore {
     async fn load_cow_tree(
         &self,
-        _export_id: &nbd_control_plane::ExportId,
+        export_id: &nbd_control_plane::ExportId,
     ) -> nbd_control_plane::Result<CowTreeSnapshot> {
-        self.mark_attempted();
-        Err(CatalogError::database("injected compaction load failure"))
+        if self.fail_calls.load(Ordering::SeqCst) {
+            self.mark_attempted();
+            return Err(CatalogError::database("injected compaction load failure"));
+        }
+        self.inner.load_cow_tree(export_id).await
     }
 
     async fn publish_compaction(
         &self,
-        _request: PublishCompaction,
+        request: PublishCompaction,
     ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
-        self.mark_attempted();
-        Err(CatalogError::database(
-            "injected compaction publish failure",
-        ))
+        if self.fail_calls.load(Ordering::SeqCst) {
+            self.mark_attempted();
+            return Err(CatalogError::database(
+                "injected compaction publish failure",
+            ));
+        }
+        self.inner.publish_compaction(request).await
     }
 }
 

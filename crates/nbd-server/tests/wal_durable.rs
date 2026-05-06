@@ -227,6 +227,129 @@ async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
 }
 
 #[tokio::test]
+async fn wal_durable_engine_close_compacts_applied_writes_and_advances_read_view() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let catalog = migrated_catalog(&runtime).await;
+    let created = catalog
+        .create_export(
+            CreateExport::new(
+                ExportName::new("disk-close").expect("export name"),
+                TREE_CHUNK_BYTES,
+                4096,
+                ExportEngineKind::WalDurable,
+            )
+            .expect("create export"),
+        )
+        .await
+        .expect("create wal export");
+    let descriptor = catalog
+        .load_export_descriptor(created.name().clone())
+        .await
+        .expect("load descriptor");
+    let wal = open_wal(&runtime, created.id().as_str()).await;
+    let engine = Arc::new(
+        WalDurableEngine::open_with_cow_tree(
+            &descriptor,
+            wal.clone(),
+            LocalBlobStore::new(runtime.root_path().join("blobs")),
+            Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
+        )
+        .await
+        .expect("wal durable engine"),
+    );
+    let head = engine.export_head().await.expect("engine head");
+    let meta = descriptor.clone().into_record(head).expect("runtime meta");
+    let export_runtime = ConcurrentExportRuntime::with_capacity(meta, engine.clone(), 4);
+
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 0,
+                data: b"close".to_vec(),
+            },
+        )
+        .await
+        .expect("first write"),
+        ExportReply::Done,
+    );
+    assert_eq!(
+        execute_request(
+            &export_runtime,
+            ExportRequest::Write {
+                offset: 8,
+                data: b"done".to_vec(),
+            },
+        )
+        .await
+        .expect("second write"),
+        ExportReply::Done,
+    );
+
+    export_runtime.close().await.expect("close runtime");
+
+    let snapshot = catalog
+        .load_cow_tree(created.id())
+        .await
+        .expect("load compacted snapshot");
+    assert!(snapshot.root_node_id().is_some());
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
+    assert_eq!(
+        engine
+            .export_head()
+            .await
+            .expect("engine read view head")
+            .base_wal_seq(),
+        WalSeq::new(2),
+    );
+    assert_eq!(
+        wal.bounds().await.expect("WAL bounds").pruned_through,
+        WalSeq::new(2),
+    );
+
+    let reopened_descriptor = catalog
+        .load_export_descriptor(created.name().clone())
+        .await
+        .expect("load reopened descriptor");
+    let reopened_engine = Arc::new(
+        WalDurableEngine::open_with_cow_tree(
+            &reopened_descriptor,
+            open_wal(&runtime, created.id().as_str()).await,
+            LocalBlobStore::new(runtime.root_path().join("blobs")),
+            Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
+        )
+        .await
+        .expect("reopen wal durable engine"),
+    );
+    let reopened_head = reopened_engine
+        .export_head()
+        .await
+        .expect("reopened engine head");
+    let reopened_meta = reopened_descriptor
+        .into_record(reopened_head)
+        .expect("reopened runtime meta");
+    let reopened_runtime =
+        ConcurrentExportRuntime::with_capacity(reopened_meta, reopened_engine, 4);
+
+    assert_eq!(
+        execute_request(
+            &reopened_runtime,
+            ExportRequest::Read { offset: 0, len: 12 },
+        )
+        .await
+        .expect("read compacted data"),
+        ExportReply::Read {
+            data: b"close\0\0\0done".to_vec(),
+        },
+    );
+
+    reopened_runtime
+        .close()
+        .await
+        .expect("close reopened runtime");
+}
+
+#[tokio::test]
 async fn wal_durable_engine_rejects_out_of_bounds_ranges() {
     let (_runtime, _wal, _meta, export_runtime) =
         wal_durable_runtime("disk-bounds", "export-bounds", 8).await;
