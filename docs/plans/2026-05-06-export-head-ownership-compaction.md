@@ -176,6 +176,7 @@ pub struct ExportReadView {
 struct ExportReadViewState {
     root: RootSnapshot,
     last_applied_seq: WalSeq,
+    wal_debt_bytes: u64,
     overlay: OverlayExtentMap,
     cache: ReadCache,
 }
@@ -213,6 +214,15 @@ The coordinator owns the state machine for one open export. A stateless helper
 may still own the mechanics of reading WAL records and writing COW blobs, but
 the active engine owns target selection, write gating, publication, read-view
 advancement, and close behavior.
+
+`wal_debt_bytes` is engine-local derived state, not durable source of truth.
+It is the sum of payload bytes for applied WAL records after the current
+runtime base. Replay initializes it from records with `seq > base_wal_seq`.
+Each newly appended and applied write adds its payload length. Successful
+compaction through the current `last_applied_seq` advances the base and resets
+debt to zero. If a future partial compaction advances to a sequence before
+`last_applied_seq`, the first implementation may leave debt conservatively high
+rather than subtracting per-record byte lengths.
 
 Stop-the-world compaction is the first write-pressure policy. When WAL debt is
 below the hard threshold, writes append to WAL and update the read view. The
@@ -335,6 +345,8 @@ successful catalog publication.
 - The catalog head is the durable source of truth.
 - `RootSnapshot` is runtime serving state derived from catalog state.
 - `TreeReader` receives the read version as an argument and owns no version.
+- `wal_debt_bytes` is derived pressure state; it must not be required for
+  correctness.
 - `WalDurableEngine` owns the read view and compaction coordinator.
 - Only successful catalog publication advances the durable base.
 - `ExportReadView::advance_root` must not advance beyond `last_applied_seq`.
@@ -360,6 +372,11 @@ Writing to a WAL durable export:
 4. The record is applied to the read view.
 5. If WAL debt exceeds the hard threshold, the coordinator compacts through a
    stable applied target before releasing the write lock.
+
+If write-pressure compaction fails after the WAL append has become durable and
+the read view has been updated, the write still succeeds. The failure leaves
+the retained WAL debt in place, logs the failure, and lets a later write or
+close attempt compaction again.
 
 Closing a WAL durable export:
 

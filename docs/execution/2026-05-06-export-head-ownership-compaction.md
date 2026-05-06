@@ -3,7 +3,7 @@ Date: 2026-05-06
 Status: approved
 Approval:
 - overall doc approved: yes
-- current state: Series 2 finished; waiting for Series 3 evaluation
+- current state: Series 3 and Series 4 approved; Series 3 is current
 Completion:
 - execution complete: no
 
@@ -383,7 +383,7 @@ any retained compaction code is a direct async helper owned by
 success, already-covered/stale outcomes, failure recovery, and reopen replay
 after failure.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
@@ -398,6 +398,111 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Not included: write-pressure threshold compaction and generational/backoff
 policy.
+
+### Series 3 Commit Plan
+
+```text
+Commit 1/3: compaction: extract direct COW compactor
+
+  Type:             preparatory
+  Required:         yes
+  Summary:          Move the current COW compaction mechanics behind a direct
+                    async compactor helper while keeping the existing manager
+                    as its only caller. This separates compaction execution
+                    from queue ownership before moving close compaction into
+                    the engine.
+  Invariant focus:  Compaction publication semantics are unchanged while the
+                    executable compaction path stops depending on worker state.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/compaction.rs
+                    crates/nbd-server/tests/compaction.rs
+  Preconditions:    Series 2 is finished and runtime close can call engine
+                    shutdown hooks.
+  Postconditions:   Existing manager-driven compaction tests still pass through
+                    the extracted direct compactor, and no registry or engine
+                    ownership behavior has changed yet.
+  Verify:           cargo test -p nbd-server --test compaction
+                    cargo fmt --all --check
+  Risks:            Moderate; this moves compaction mechanics without intending
+                    a behavior change, so review should watch for hidden
+                    publication or replay-range drift.
+  Not included:     No engine-owned coordinator, no runtime close compaction,
+                    and no deletion of the queue/manager lifecycle.
+  Depends on:       Series 2
+
+Commit 2/3: wal_durable: compact on engine close
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add the engine-local CompactionCoordinator, share the WAL
+                    read view through Arc, and have WalDurableEngine close
+                    compact through the read view's applied WAL high watermark.
+                    Registry close stops enqueueing its own compaction job.
+  Invariant focus:  The active engine owns close compaction, and successful
+                    publication is the only event that advances the live read
+                    base.
+  Test level:       integration
+  Review gate:      structures
+  Files:            crates/nbd-server/src/compaction.rs
+                    crates/nbd-server/src/registry.rs
+                    crates/nbd-server/src/wal_durable.rs
+                    crates/nbd-server/tests/compaction.rs
+                    crates/nbd-server/tests/local_export_registry.rs
+                    crates/nbd-server/tests/wal_durable.rs
+  Preconditions:    Commit 1 has a direct compactor that can be called without
+                    the queue worker lifecycle.
+  Postconditions:   WalDurableEngine::close runs best-effort compaction after
+                    runtime drain, advances the read view after successful
+                    catalog publication, prunes only after publication, and
+                    logs but does not fail close on compaction errors.
+  Verify:           cargo test -p nbd-server --test compaction
+                    cargo test -p nbd-server --test local_export_registry
+                    cargo test -p nbd-server --test wal_durable
+                    cargo fmt --all --check
+  Risks:            High; failure ordering must preserve acknowledged writes,
+                    and read-view advancement must never move beyond the
+                    applied WAL sequence.
+  Not included:     No write-pressure threshold behavior and no deletion of the
+                    old public queue/manager types yet.
+  Depends on:       Commit 1
+
+Commit 3/3: compaction: remove global queue manager
+
+  Type:             cleanup
+  Required:         yes
+  Summary:          Delete the obsolete global compaction queue, enqueue
+                    outcomes, worker shutdown path, and server/factory wiring.
+                    Keep only the direct helper and engine-owned coordinator.
+  Invariant focus:  No close path or server lifecycle can publish compaction
+                    through a registry-owned background queue.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/compaction.rs
+                    crates/nbd-server/src/lib.rs
+                    crates/nbd-server/src/registry.rs
+                    crates/nbd-server/src/server.rs
+                    crates/nbd-server/tests/compaction.rs
+                    crates/nbd-server/tests/local_export_registry.rs
+                    docs/architecture/compaction-manager-architecture.md
+                    docs/architecture/local-export-registry-architecture.md
+                    docs/architecture/nbd-s3-long-term-architecture.md
+  Preconditions:    Commit 2 has moved live close compaction into
+                    WalDurableEngine.
+  Postconditions:   The old CompactionManager, CompactionQueue,
+                    CompactionEnqueueOutcome, and background worker shutdown
+                    lifecycle no longer exist in live code.
+  Verify:           cargo test -p nbd-server --test compaction
+                    cargo test -p nbd-server --test local_export_registry
+                    make test-protocol
+                    cargo fmt --all --check
+                    cargo clippy --workspace --all-targets -- -D warnings
+  Risks:            Moderate deletion churn; review should confirm no server
+                    shutdown or registry close path lost necessary cleanup.
+  Not included:     No WAL debt accounting, write-pressure compaction, backoff,
+                    or public operator compaction API.
+  Depends on:       Commit 2
+```
 
 ## Series 4: Stop-The-World Write-Pressure Compaction
 
@@ -415,14 +520,16 @@ read view except for the brief root-advance update.
 
 Review focus: target selection, debt accounting, write lock scope, admission
 interaction, read concurrency, threshold test hooks, and avoiding public config
-surface before it is needed.
+surface before it is needed. WAL debt is derived engine-local pressure state:
+payload bytes for applied WAL records after the current base.
 
 Done means: production uses the internal 2 GiB threshold, tests can construct a
 smaller threshold, write-pressure compaction publishes and advances the read
-view, and a second write waits behind compaction rather than racing against the
-base transition.
+view, a successful full compaction resets WAL debt to zero, compaction failure
+after a durable write does not fail the write, and a second write waits behind
+compaction rather than racing against the base transition.
 
-Approval: pending
+Approval: approved
 
 Verification plan:
 
@@ -437,3 +544,73 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Not included: write backoff, generational compaction, manual operator
 compaction, active read-view retention across processes, or orphan blob GC.
+
+### Series 4 Commit Plan
+
+```text
+Commit 1/2: wal_durable: track WAL replay debt
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add wal_debt_bytes to the WAL durable read-view state and
+                    update replay, append application, and root advancement to
+                    maintain it as derived pressure state.
+  Invariant focus:  WAL debt reflects applied post-base payload bytes and is
+                    never required for correctness.
+  Test level:       integration
+  Review gate:      code
+  Files:            crates/nbd-server/src/wal_durable.rs
+                    crates/nbd-server/tests/wal_durable.rs
+  Preconditions:    Series 3 has made the engine-local coordinator the only
+                    compaction owner.
+  Postconditions:   Replayed WAL initializes debt, newly applied writes add
+                    payload bytes, and advancing the base through the current
+                    applied sequence resets debt to zero.
+  Verify:           cargo test -p nbd-server --test wal_durable
+                    cargo fmt --all --check
+  Risks:            Moderate; stale or undercounted pressure state could delay
+                    compaction, but catalog head plus retained WAL still own
+                    correctness.
+  Not included:     No threshold policy, write-triggered compaction, public
+                    configuration, or per-record partial-debt subtraction.
+  Depends on:       Series 3
+
+Commit 2/2: wal_durable: compact writes over debt threshold
+
+  Type:             semantic
+  Required:         yes
+  Summary:          Add the internal write-pressure threshold policy and make
+                    the writer that crosses it compact through the stable
+                    applied target while holding the engine write lock.
+  Invariant focus:  Write-pressure compaction must not race with later writes
+                    or turn an already durable write into a client-visible
+                    failure.
+  Test level:       integration
+  Review gate:      structures
+  Files:            crates/nbd-server/src/compaction.rs
+                    crates/nbd-server/src/wal_durable.rs
+                    crates/nbd-server/tests/compaction.rs
+                    crates/nbd-server/tests/local_export_registry.rs
+                    crates/nbd-server/tests/wal_durable.rs
+  Preconditions:    Commit 1 exposes accurate enough engine-local WAL debt for
+                    the first stop-the-world policy.
+  Postconditions:   Production uses an internal 2 GiB debt threshold, tests can
+                    construct smaller thresholds, the crossing writer compacts
+                    through last_applied_seq, successful compaction advances
+                    the read view and resets debt, failures are logged without
+                    failing the already durable write, and later writes wait
+                    behind the write lock while compaction is running.
+  Verify:           cargo test -p nbd-server --test wal_durable
+                    cargo test -p nbd-server --test compaction
+                    cargo test -p nbd-server --test local_export_registry
+                    make test-protocol
+                    cargo fmt --all --check
+                    cargo clippy --workspace --all-targets -- -D warnings
+  Risks:            High; this intentionally adds a blocking write-path
+                    compaction point, so tests must prove ordering and
+                    post-append failure semantics.
+  Not included:     No write backoff, generational compaction, manual operator
+                    compaction, active read-view retention, or GC of orphaned
+                    compaction blobs.
+  Depends on:       Commit 1
+```
