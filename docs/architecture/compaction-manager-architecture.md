@@ -294,7 +294,7 @@ the base root, checkpoint, size, and layout that the compaction plan used.
 Publication outcomes are:
 
 ```text
-current.checkpoint_wal_seq >= compacted_through
+current.base_wal_seq >= compacted_through
   -> AlreadyCovered, no head change
 
 current root/checkpoint/size/layout != expected base
@@ -348,7 +348,7 @@ by the committed tree. It does not immediately delete those WAL records.
 Cleanup may prune a WAL segment only after both are true:
 
 ```text
-segment.max_seq <= published_checkpoint_wal_seq
+segment.max_seq <= published_base_wal_seq
 segment.closed_at <= now - wal_retention_window
 ```
 

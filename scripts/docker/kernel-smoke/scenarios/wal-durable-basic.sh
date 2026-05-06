@@ -31,7 +31,7 @@ run_smoke_scenario() {
         "clone-created"
     assert_export_field \
         "${CLONE_EXPORT_NAME}" \
-        "checkpoint_wal_seq" \
+        "base_wal_seq" \
         "0" \
         "clone-created"
 

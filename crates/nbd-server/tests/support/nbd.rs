@@ -24,19 +24,9 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../../prisma/migrations/20260501000000_init/migration.sql"),
-    include_str!(
-        "../../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
-    ),
-    include_str!(
-        "../../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
-    ),
-    include_str!(
-        "../../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"
-    ),
-    include_str!("../../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 

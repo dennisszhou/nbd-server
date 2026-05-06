@@ -81,8 +81,16 @@ fn export_head_can_represent_empty_memory() {
     assert_eq!(head.layout_kind(), ExportLayoutKind::MemoryEmpty);
     assert!(head.root_node_id().is_none());
     assert_eq!(head.size_bytes(), 4096);
-    assert_eq!(head.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(head.base_wal_seq(), WalSeq::zero());
     assert!(ExportHead::memory_empty(0).is_err());
+    assert!(ExportHead::new(
+        ExportLayoutKind::MemoryEmpty,
+        Some(NodeId::new("root").expect("node id")),
+        4096,
+        WalSeq::zero(),
+    )
+    .is_err());
+    assert!(ExportHead::new(ExportLayoutKind::MemoryEmpty, None, 4096, WalSeq::new(1),).is_err());
 }
 
 #[test]
@@ -92,8 +100,15 @@ fn export_head_can_represent_simple_mutable_tree() {
     assert_eq!(head.layout_kind(), ExportLayoutKind::SimpleMutableTree);
     assert!(head.root_node_id().is_none());
     assert_eq!(head.size_bytes(), 4096);
-    assert_eq!(head.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(head.base_wal_seq(), WalSeq::zero());
     assert!(ExportHead::simple_mutable_tree(0).is_err());
+    assert!(ExportHead::new(
+        ExportLayoutKind::SimpleMutableTree,
+        None,
+        4096,
+        WalSeq::new(1),
+    )
+    .is_err());
 }
 
 #[test]
@@ -103,8 +118,19 @@ fn export_head_can_represent_empty_cow_tree() {
     assert_eq!(head.layout_kind(), ExportLayoutKind::CowImmutableTree);
     assert!(head.root_node_id().is_none());
     assert_eq!(head.size_bytes(), 4096);
-    assert_eq!(head.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(head.base_wal_seq(), WalSeq::zero());
     assert!(ExportHead::cow_immutable_tree(0).is_err());
+
+    let root = NodeId::new("root").expect("node id");
+    let head = ExportHead::new(
+        ExportLayoutKind::CowImmutableTree,
+        Some(root.clone()),
+        4096,
+        WalSeq::new(7),
+    )
+    .expect("cow tree head with base");
+    assert_eq!(head.root_node_id(), Some(&root));
+    assert_eq!(head.base_wal_seq(), WalSeq::new(7));
 }
 
 #[test]
@@ -183,7 +209,7 @@ fn cow_tree_snapshots_validate_chunk_shape() {
     .expect("cow snapshot");
     assert_eq!(snapshot.export_id(), &export_id);
     assert_eq!(snapshot.root_node_id(), Some(&root));
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(4));
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(4));
     assert_eq!(
         snapshot.chunk(ChunkIndex::new(0)).unwrap().len_bytes(),
         TREE_CHUNK_BYTES

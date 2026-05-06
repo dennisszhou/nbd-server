@@ -14,17 +14,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
-    include_str!(
-        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
-    ),
-    include_str!(
-        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
-    ),
-    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
-    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 #[tokio::test]
 async fn compaction_publishes_checkpoint_from_wal_records() {
@@ -50,7 +42,7 @@ async fn compaction_publishes_checkpoint_from_wal_records() {
         .await
         .expect("load cow tree");
     assert!(snapshot.root_node_id().is_some());
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(2));
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
     let chunk = snapshot.chunk(ChunkIndex::new(0)).expect("chunk zero");
     assert_eq!(
         fixture
@@ -94,7 +86,7 @@ async fn compaction_preserves_unaffected_committed_chunks() {
         .load_cow_tree(created.id())
         .await
         .expect("load cow tree");
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(2));
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
     assert_eq!(snapshot.chunk(ChunkIndex::new(0)), Some(&base_chunk));
     assert!(snapshot.chunk(ChunkIndex::new(1)).is_some());
 }
@@ -142,7 +134,7 @@ async fn compaction_clamps_target_to_durable_wal_bounds() {
         .load_cow_tree(created.id())
         .await
         .expect("load cow tree");
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(1));
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(1));
 }
 
 #[tokio::test]
@@ -201,7 +193,7 @@ async fn shutdown_finishes_current_job_and_drops_pending_jobs() {
         .load_cow_tree(created.id())
         .await
         .expect("load cow tree");
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(1));
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(1));
 }
 
 struct CompactionFixture {

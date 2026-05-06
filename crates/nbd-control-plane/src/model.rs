@@ -55,11 +55,29 @@ pub enum ExportLayoutKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExportHead {
-    layout_kind: ExportLayoutKind,
-    root_node_id: Option<NodeId>,
+#[serde(tag = "layout_kind", rename_all = "snake_case")]
+pub enum ExportHead {
+    MemoryEmpty(MemoryExportHead),
+    SimpleMutableTree(SimpleMutableTreeHead),
+    CowImmutableTree(CowImmutableTreeHead),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryExportHead {
     size_bytes: u64,
-    checkpoint_wal_seq: WalSeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimpleMutableTreeHead {
+    size_bytes: u64,
+    root_node_id: Option<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CowImmutableTreeHead {
+    size_bytes: u64,
+    root_node_id: Option<NodeId>,
+    base_wal_seq: WalSeq,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +107,7 @@ pub struct CowTreeSnapshot {
     export_id: ExportId,
     size_bytes: u64,
     root_node_id: Option<NodeId>,
-    checkpoint_wal_seq: WalSeq,
+    base_wal_seq: WalSeq,
     chunks: BTreeMap<ChunkIndex, CowChunkRef>,
 }
 
@@ -289,65 +307,121 @@ impl ExportHead {
         layout_kind: ExportLayoutKind,
         root_node_id: Option<NodeId>,
         size_bytes: u64,
-        checkpoint_wal_seq: WalSeq,
+        base_wal_seq: WalSeq,
+    ) -> Result<Self> {
+        match layout_kind {
+            ExportLayoutKind::MemoryEmpty => {
+                Self::memory_empty_with_base(size_bytes, root_node_id, base_wal_seq)
+            }
+            ExportLayoutKind::SimpleMutableTree => {
+                Self::simple_mutable_tree_with_root_and_base(size_bytes, root_node_id, base_wal_seq)
+            }
+            ExportLayoutKind::CowImmutableTree => {
+                Self::cow_immutable_tree_with_root(size_bytes, root_node_id, base_wal_seq)
+            }
+        }
+    }
+
+    pub fn memory_empty(size_bytes: u64) -> Result<Self> {
+        Self::memory_empty_with_base(size_bytes, None, WalSeq::zero())
+    }
+
+    pub fn simple_mutable_tree(size_bytes: u64) -> Result<Self> {
+        Self::simple_mutable_tree_with_root(size_bytes, None)
+    }
+
+    pub fn cow_immutable_tree(size_bytes: u64) -> Result<Self> {
+        Self::cow_immutable_tree_with_root(size_bytes, None, WalSeq::zero())
+    }
+
+    pub fn simple_mutable_tree_with_root(
+        size_bytes: u64,
+        root_node_id: Option<NodeId>,
+    ) -> Result<Self> {
+        Self::simple_mutable_tree_with_root_and_base(size_bytes, root_node_id, WalSeq::zero())
+    }
+
+    pub fn cow_immutable_tree_with_root(
+        size_bytes: u64,
+        root_node_id: Option<NodeId>,
+        base_wal_seq: WalSeq,
     ) -> Result<Self> {
         validate_non_zero("size_bytes", size_bytes)?;
-        if layout_kind == ExportLayoutKind::MemoryEmpty && root_node_id.is_some() {
+        Ok(Self::CowImmutableTree(CowImmutableTreeHead {
+            size_bytes,
+            root_node_id,
+            base_wal_seq,
+        }))
+    }
+
+    pub fn layout_kind(&self) -> ExportLayoutKind {
+        match self {
+            Self::MemoryEmpty(_) => ExportLayoutKind::MemoryEmpty,
+            Self::SimpleMutableTree(_) => ExportLayoutKind::SimpleMutableTree,
+            Self::CowImmutableTree(_) => ExportLayoutKind::CowImmutableTree,
+        }
+    }
+
+    pub fn root_node_id(&self) -> Option<&NodeId> {
+        match self {
+            Self::MemoryEmpty(_) => None,
+            Self::SimpleMutableTree(head) => head.root_node_id.as_ref(),
+            Self::CowImmutableTree(head) => head.root_node_id.as_ref(),
+        }
+    }
+
+    pub fn size_bytes(&self) -> u64 {
+        match self {
+            Self::MemoryEmpty(head) => head.size_bytes,
+            Self::SimpleMutableTree(head) => head.size_bytes,
+            Self::CowImmutableTree(head) => head.size_bytes,
+        }
+    }
+
+    pub fn base_wal_seq(&self) -> WalSeq {
+        match self {
+            Self::MemoryEmpty(_) | Self::SimpleMutableTree(_) => WalSeq::zero(),
+            Self::CowImmutableTree(head) => head.base_wal_seq,
+        }
+    }
+
+    fn memory_empty_with_base(
+        size_bytes: u64,
+        root_node_id: Option<NodeId>,
+        base_wal_seq: WalSeq,
+    ) -> Result<Self> {
+        validate_non_zero("size_bytes", size_bytes)?;
+        if root_node_id.is_some() {
             return Err(CatalogError::invalid_field(
                 "root_node_id",
                 "memory_empty export heads must not have a root node",
             ));
         }
+        if base_wal_seq != WalSeq::zero() {
+            return Err(CatalogError::invalid_field(
+                "base_wal_seq",
+                "memory_empty export heads must not carry WAL sequence state",
+            ));
+        }
+        Ok(Self::MemoryEmpty(MemoryExportHead { size_bytes }))
+    }
 
-        Ok(Self {
-            layout_kind,
+    fn simple_mutable_tree_with_root_and_base(
+        size_bytes: u64,
+        root_node_id: Option<NodeId>,
+        base_wal_seq: WalSeq,
+    ) -> Result<Self> {
+        validate_non_zero("size_bytes", size_bytes)?;
+        if base_wal_seq != WalSeq::zero() {
+            return Err(CatalogError::invalid_field(
+                "base_wal_seq",
+                "simple_mutable_tree export heads must not carry WAL sequence state",
+            ));
+        }
+        Ok(Self::SimpleMutableTree(SimpleMutableTreeHead {
+            size_bytes,
             root_node_id,
-            size_bytes,
-            checkpoint_wal_seq,
-        })
-    }
-
-    pub fn memory_empty(size_bytes: u64) -> Result<Self> {
-        Self::new(
-            ExportLayoutKind::MemoryEmpty,
-            None,
-            size_bytes,
-            WalSeq::zero(),
-        )
-    }
-
-    pub fn simple_mutable_tree(size_bytes: u64) -> Result<Self> {
-        Self::new(
-            ExportLayoutKind::SimpleMutableTree,
-            None,
-            size_bytes,
-            WalSeq::zero(),
-        )
-    }
-
-    pub fn cow_immutable_tree(size_bytes: u64) -> Result<Self> {
-        Self::new(
-            ExportLayoutKind::CowImmutableTree,
-            None,
-            size_bytes,
-            WalSeq::zero(),
-        )
-    }
-
-    pub fn layout_kind(&self) -> ExportLayoutKind {
-        self.layout_kind
-    }
-
-    pub fn root_node_id(&self) -> Option<&NodeId> {
-        self.root_node_id.as_ref()
-    }
-
-    pub fn size_bytes(&self) -> u64 {
-        self.size_bytes
-    }
-
-    pub fn checkpoint_wal_seq(&self) -> WalSeq {
-        self.checkpoint_wal_seq
+        }))
     }
 }
 
@@ -464,7 +538,7 @@ impl CowTreeSnapshot {
         export_id: ExportId,
         size_bytes: u64,
         root_node_id: Option<NodeId>,
-        checkpoint_wal_seq: WalSeq,
+        base_wal_seq: WalSeq,
         chunks: BTreeMap<ChunkIndex, CowChunkRef>,
     ) -> Result<Self> {
         validate_non_zero("size_bytes", size_bytes)?;
@@ -492,7 +566,7 @@ impl CowTreeSnapshot {
             export_id,
             size_bytes,
             root_node_id,
-            checkpoint_wal_seq,
+            base_wal_seq,
             chunks,
         })
     }
@@ -509,8 +583,8 @@ impl CowTreeSnapshot {
         self.root_node_id.as_ref()
     }
 
-    pub fn checkpoint_wal_seq(&self) -> WalSeq {
-        self.checkpoint_wal_seq
+    pub fn base_wal_seq(&self) -> WalSeq {
+        self.base_wal_seq
     }
 
     pub fn chunks(&self) -> &BTreeMap<ChunkIndex, CowChunkRef> {
@@ -535,7 +609,7 @@ impl PublishCompaction {
                 "compaction publication requires a cow_immutable_tree base",
             ));
         }
-        if compacted_through <= expected_base.checkpoint_wal_seq() {
+        if compacted_through <= expected_base.base_wal_seq() {
             return Err(CatalogError::invalid_field(
                 "compacted_through",
                 "compaction must advance beyond the expected base checkpoint",

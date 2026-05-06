@@ -8,17 +8,9 @@ use nbd_control_plane::{
 use nbd_test_support::TestRuntime;
 use sqlx::Row;
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
-    include_str!(
-        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
-    ),
-    include_str!(
-        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
-    ),
-    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
-    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 #[tokio::test]
 async fn create_export_initializes_memory_head() {
@@ -37,7 +29,7 @@ async fn create_export_initializes_memory_head() {
     assert_eq!(created.head().layout_kind(), ExportLayoutKind::MemoryEmpty);
     assert!(created.head().root_node_id().is_none());
     assert_eq!(created.head().size_bytes(), 1024 * 1024);
-    assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().base_wal_seq(), WalSeq::zero());
 
     let inspected = catalog
         .inspect_export(InspectExport::new(export_name("disk-a")))
@@ -66,7 +58,7 @@ async fn create_export_initializes_simple_durable_head() {
         ExportLayoutKind::SimpleMutableTree,
     );
     assert!(created.head().root_node_id().is_none());
-    assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().base_wal_seq(), WalSeq::zero());
 
     let snapshot = catalog
         .load_simple_tree(created.id())
@@ -97,7 +89,7 @@ async fn create_export_initializes_wal_durable_head() {
         ExportLayoutKind::CowImmutableTree
     );
     assert!(created.head().root_node_id().is_none());
-    assert_eq!(created.head().checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().base_wal_seq(), WalSeq::zero());
 
     let snapshot = catalog
         .load_cow_tree(created.id())
@@ -105,7 +97,7 @@ async fn create_export_initializes_wal_durable_head() {
         .expect("load cow tree");
     assert_eq!(snapshot.export_id(), created.id());
     assert!(snapshot.root_node_id().is_none());
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
     assert!(snapshot.chunks().is_empty());
 }
 
@@ -193,6 +185,34 @@ async fn export_head_owns_serving_size() {
 }
 
 #[tokio::test]
+async fn load_export_head_rejects_layout_invalid_rows() {
+    let (_runtime, catalog) = migrated_catalog().await;
+
+    let created = catalog
+        .create_export(create_export("disk-a", 1024, 4096))
+        .await
+        .expect("create export");
+
+    sqlx::query(
+        r#"
+        UPDATE export_heads
+        SET base_wal_seq = 1
+        WHERE export_id = ?
+        "#,
+    )
+    .bind(created.id().as_str())
+    .execute(catalog.pool())
+    .await
+    .expect("corrupt head");
+
+    let error = catalog
+        .load_export_head(created.id())
+        .await
+        .expect_err("invalid memory head must fail to decode");
+    assert!(matches!(error, CatalogError::InvalidField { .. }));
+}
+
+#[tokio::test]
 async fn migration_does_not_create_export_generations() {
     let (_runtime, catalog) = migrated_catalog().await;
 
@@ -211,34 +231,13 @@ async fn migration_does_not_create_export_generations() {
 }
 
 #[tokio::test]
-async fn durable_engine_kind_migrations_preserve_existing_exports() {
-    let runtime = TestRuntime::new().expect("test runtime");
-    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
-        .await
-        .expect("connect catalog");
-
-    for migration in &MIGRATIONS[..2] {
-        sqlx::raw_sql(migration)
-            .execute(catalog.pool())
-            .await
-            .expect("apply base migration");
-    }
-
-    catalog
-        .create_export(create_export("disk-memory", 1024, 4096))
-        .await
-        .expect("create memory export before migration");
-
-    sqlx::raw_sql(MIGRATIONS[2])
-        .execute(catalog.pool())
-        .await
-        .expect("apply simple durable engine migration");
+async fn baseline_migration_supports_all_engine_kinds() {
+    let (_runtime, catalog) = migrated_catalog().await;
 
     let memory = catalog
-        .inspect_export(InspectExport::new(export_name("disk-memory")))
+        .create_export(create_export("disk-memory", 1024, 4096))
         .await
-        .expect("inspect migrated memory export");
+        .expect("create memory export");
     assert_eq!(memory.engine_kind(), ExportEngineKind::Memory);
     assert_eq!(memory.head().layout_kind(), ExportLayoutKind::MemoryEmpty);
 
@@ -250,29 +249,7 @@ async fn durable_engine_kind_migrations_preserve_existing_exports() {
             ExportEngineKind::SimpleDurable,
         ))
         .await
-        .expect("create simple durable after migration");
-    assert_eq!(durable.engine_kind(), ExportEngineKind::SimpleDurable);
-    assert_eq!(
-        durable.head().layout_kind(),
-        ExportLayoutKind::SimpleMutableTree,
-    );
-
-    sqlx::raw_sql(MIGRATIONS[3])
-        .execute(catalog.pool())
-        .await
-        .expect("apply wal durable engine migration");
-
-    let memory = catalog
-        .inspect_export(InspectExport::new(export_name("disk-memory")))
-        .await
-        .expect("inspect migrated memory export after wal migration");
-    assert_eq!(memory.engine_kind(), ExportEngineKind::Memory);
-    assert_eq!(memory.head().layout_kind(), ExportLayoutKind::MemoryEmpty);
-
-    let durable = catalog
-        .inspect_export(InspectExport::new(export_name("disk-durable")))
-        .await
-        .expect("inspect migrated simple durable export");
+        .expect("create simple durable export");
     assert_eq!(durable.engine_kind(), ExportEngineKind::SimpleDurable);
     assert_eq!(
         durable.head().layout_kind(),
@@ -287,19 +264,7 @@ async fn durable_engine_kind_migrations_preserve_existing_exports() {
             ExportEngineKind::WalDurable,
         ))
         .await
-        .expect("create wal durable after migration");
-    assert_eq!(wal.engine_kind(), ExportEngineKind::WalDurable);
-    assert_eq!(wal.head().layout_kind(), ExportLayoutKind::CowImmutableTree);
-
-    sqlx::raw_sql(MIGRATIONS[4])
-        .execute(catalog.pool())
-        .await
-        .expect("apply cow tree metadata migration");
-
-    let wal = catalog
-        .inspect_export(InspectExport::new(export_name("disk-wal")))
-        .await
-        .expect("inspect migrated wal export");
+        .expect("create wal durable export");
     assert_eq!(wal.engine_kind(), ExportEngineKind::WalDurable);
     assert_eq!(wal.head().layout_kind(), ExportLayoutKind::CowImmutableTree);
 }
@@ -400,7 +365,7 @@ async fn migration_rejects_zero_sized_heads() {
         r#"
         INSERT INTO export_heads (
           export_id, layout_kind, root_node_id, size_bytes,
-          checkpoint_wal_seq, updated_at
+          base_wal_seq, updated_at
         )
         VALUES (
           'export-zero', 'memory_empty', NULL, 0, 0, 'now'
@@ -603,7 +568,7 @@ async fn cow_tree_publish_creates_checkpoint_root() {
         PublishCompactionOutcome::Published(meta) => meta,
         outcome => panic!("expected Published, got {outcome:?}"),
     };
-    assert_eq!(published.head().checkpoint_wal_seq(), WalSeq::new(4));
+    assert_eq!(published.head().base_wal_seq(), WalSeq::new(4));
     assert!(published.head().root_node_id().is_some());
 
     let snapshot = catalog
@@ -611,7 +576,7 @@ async fn cow_tree_publish_creates_checkpoint_root() {
         .await
         .expect("load cow tree");
     assert_eq!(snapshot.root_node_id(), published.head().root_node_id());
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::new(4));
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(4));
     assert_eq!(snapshot.chunk(ChunkIndex::new(2)), Some(&chunk));
     assert!(snapshot.chunk(ChunkIndex::new(1)).is_none());
 }
@@ -672,7 +637,7 @@ async fn cow_tree_allows_shared_immutable_root() {
         .expect("load shared cow tree");
     assert_eq!(snapshot.export_id(), destination.id());
     assert_eq!(snapshot.root_node_id(), Some(source_root));
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
     assert_eq!(snapshot.chunk(ChunkIndex::new(2)), Some(&chunk));
 }
 
@@ -715,7 +680,7 @@ async fn clone_export_copies_root_and_reuses_unchanged_nodes() {
         ExportLayoutKind::CowImmutableTree
     );
     assert_eq!(destination.head().root_node_id(), Some(source_root));
-    assert_eq!(destination.head().checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(destination.head().base_wal_seq(), WalSeq::zero());
     assert_eq!(destination.size_bytes(), source.size_bytes());
     assert_eq!(destination.block_size(), source.block_size());
 
@@ -927,7 +892,7 @@ async fn cow_tree_publish_is_idempotent_for_covered_checkpoint() {
         PublishCompactionOutcome::AlreadyCovered(meta) => meta,
         outcome => panic!("expected AlreadyCovered, got {outcome:?}"),
     };
-    assert_eq!(covered.head().checkpoint_wal_seq(), WalSeq::new(4));
+    assert_eq!(covered.head().base_wal_seq(), WalSeq::new(4));
     let snapshot = catalog
         .load_cow_tree(created.id())
         .await
@@ -985,7 +950,7 @@ async fn cow_tree_publish_rejects_stale_base() {
         PublishCompactionOutcome::StalePlan(meta) => meta,
         outcome => panic!("expected StalePlan, got {outcome:?}"),
     };
-    assert_eq!(stale.head().checkpoint_wal_seq(), WalSeq::new(4));
+    assert_eq!(stale.head().base_wal_seq(), WalSeq::new(4));
     let snapshot = catalog
         .load_cow_tree(created.id())
         .await
@@ -1062,10 +1027,7 @@ async fn cow_tree_concurrent_publish_allows_only_one_winner() {
         .await
         .expect("load cow tree");
     assert_eq!(snapshot.root_node_id(), published[0].head().root_node_id());
-    assert_eq!(
-        snapshot.checkpoint_wal_seq(),
-        published[0].head().checkpoint_wal_seq(),
-    );
+    assert_eq!(snapshot.base_wal_seq(), published[0].head().base_wal_seq(),);
 }
 
 #[tokio::test]

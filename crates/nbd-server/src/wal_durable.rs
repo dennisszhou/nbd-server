@@ -41,7 +41,7 @@ pub struct RootSnapshot {
 enum RootBacking {
     Zero {
         root_node_id: Option<NodeId>,
-        checkpoint_wal_seq: WalSeq,
+        base_wal_seq: WalSeq,
         size_bytes: u64,
     },
     CowTree(Arc<CowTreeSnapshot>),
@@ -279,9 +279,9 @@ async fn replay_wal_after(
     read_view: &ExportReadView,
     root: &RootSnapshot,
 ) -> Result<WalReplaySummary> {
-    let mut replay = wal.replay_after(root.checkpoint_wal_seq()).await?;
+    let mut replay = wal.replay_after(root.base_wal_seq()).await?;
     let mut replayed_records = 0u64;
-    let mut replayed_through_wal_seq = root.checkpoint_wal_seq();
+    let mut replayed_through_wal_seq = root.base_wal_seq();
     while let Some(record) = replay.next_record().await? {
         replayed_records += 1;
         replayed_through_wal_seq = record.seq();
@@ -308,7 +308,7 @@ fn log_root_loaded(
         export_id = %export_id,
         export_name = %name,
         root_node_id = root_node_id_for_log(root),
-        base_wal_seq = root.checkpoint_wal_seq().get(),
+        base_wal_seq = root.base_wal_seq().get(),
         size_bytes = root.size_bytes(),
     );
 }
@@ -327,7 +327,7 @@ fn log_replay_completed(
         pid = observability::pid(),
         export_id = %export_id,
         export_name = %name,
-        base_wal_seq = root.checkpoint_wal_seq().get(),
+        base_wal_seq = root.base_wal_seq().get(),
         replayed_records = replay.replayed_records,
         replayed_through_wal_seq = replay.replayed_through_wal_seq.get(),
     );
@@ -342,7 +342,7 @@ impl RootSnapshot {
         Self {
             backing: RootBacking::Zero {
                 root_node_id: meta.head().root_node_id().cloned(),
-                checkpoint_wal_seq: meta.head().checkpoint_wal_seq(),
+                base_wal_seq: meta.head().base_wal_seq(),
                 size_bytes: meta.size_bytes(),
             },
         }
@@ -361,12 +361,10 @@ impl RootSnapshot {
         }
     }
 
-    pub fn checkpoint_wal_seq(&self) -> WalSeq {
+    pub fn base_wal_seq(&self) -> WalSeq {
         match &self.backing {
-            RootBacking::Zero {
-                checkpoint_wal_seq, ..
-            } => *checkpoint_wal_seq,
-            RootBacking::CowTree(snapshot) => snapshot.checkpoint_wal_seq(),
+            RootBacking::Zero { base_wal_seq, .. } => *base_wal_seq,
+            RootBacking::CowTree(snapshot) => snapshot.base_wal_seq(),
         }
     }
 
@@ -393,7 +391,7 @@ impl RootSnapshot {
             ExportLayoutKind::CowImmutableTree,
             self.root_node_id().cloned(),
             self.size_bytes(),
-            self.checkpoint_wal_seq(),
+            self.base_wal_seq(),
         )
         .map_err(ServerError::catalog)
     }
@@ -517,7 +515,7 @@ impl ExportReadView {
         tree_reader: Arc<dyn TreeReader<RootSnapshot>>,
         cache_bytes: usize,
     ) -> Self {
-        let last_applied_seq = root.checkpoint_wal_seq();
+        let last_applied_seq = root.base_wal_seq();
         Self {
             state: RwLock::new(ExportReadViewState {
                 root,
@@ -606,13 +604,13 @@ impl ExportReadView {
     pub async fn apply_wal_record(&self, record: WalRecord) -> Result<()> {
         let mut state = self.state.write().await;
         validate_range("write", record.range(), state.root.size_bytes())?;
-        if record.seq() <= state.root.checkpoint_wal_seq() {
+        if record.seq() <= state.root.base_wal_seq() {
             return Err(ServerError::wal(
                 "apply WAL record",
                 format!(
                     "record sequence {} is at or before checkpoint {}",
                     record.seq(),
-                    state.root.checkpoint_wal_seq()
+                    state.root.base_wal_seq()
                 ),
             ));
         }
@@ -649,8 +647,8 @@ impl ExportReadView {
             ));
         }
 
-        let current_checkpoint = state.root.checkpoint_wal_seq();
-        let new_checkpoint = new_root.checkpoint_wal_seq();
+        let current_checkpoint = state.root.base_wal_seq();
+        let new_checkpoint = new_root.base_wal_seq();
         if new_checkpoint < current_checkpoint {
             return Err(ServerError::wal(
                 "advance read-view root",
@@ -1232,7 +1230,7 @@ mod tests {
         let zero_root = RootSnapshot {
             backing: RootBacking::Zero {
                 root_node_id: None,
-                checkpoint_wal_seq: WalSeq::zero(),
+                base_wal_seq: WalSeq::zero(),
                 size_bytes: 4096,
             },
         };
@@ -1276,11 +1274,11 @@ mod tests {
         zero_root_at(size_bytes, WalSeq::zero())
     }
 
-    fn zero_root_at(size_bytes: u64, checkpoint_wal_seq: WalSeq) -> RootSnapshot {
+    fn zero_root_at(size_bytes: u64, base_wal_seq: WalSeq) -> RootSnapshot {
         RootSnapshot {
             backing: RootBacking::Zero {
                 root_node_id: None,
-                checkpoint_wal_seq,
+                base_wal_seq,
                 size_bytes,
             },
         }

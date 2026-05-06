@@ -76,7 +76,7 @@ struct BeginOpenExport {
 }
 
 struct OpenExportLease {
-    export: ExportMeta,
+    export: ExportRecord,
     lease: ExportLeaseSnapshot,
 }
 
@@ -105,7 +105,7 @@ NBD_OPT_GO(export_name)
        -> acquire per-export lease with purpose = Serve
        -> load export from ExportCatalog
        -> reject missing/deleted export
-       -> return ExportMeta + lease
+       -> return ExportRecord + lease
   -> LocalExportRegistry.register(..., lease, state = Opening)
   -> initialize Export components
   -> replay WAL into ExportReadView
@@ -148,7 +148,7 @@ marked deleted, later opens fail from catalog state.
 
 # Invariants
 
-- `ExportCatalog` remains durable export metadata truth.
+- `ExportCatalog` remains durable export recorddata truth.
 - `ExportLeaseStore` remains lifecycle exclusion truth.
 - Open and delete contend on the same per-export lease.
 - A delete operation marks the catalog deleted only while holding the lease.

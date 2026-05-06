@@ -119,11 +119,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 CloneExport::new(ExportName::new(source)?, ExportName::new(destination)?)?;
             let cloned = catalog.clone_export(request).await?;
             println!(
-                "cloned export {} from {} source_checkpoint_wal_seq={} destination_checkpoint_wal_seq={}",
+                "cloned export {} from {} source_base_wal_seq={} destination_base_wal_seq={}",
                 cloned.destination().name(),
                 cloned.source().name(),
-                cloned.source().head().checkpoint_wal_seq(),
-                cloned.destination().head().checkpoint_wal_seq(),
+                cloned.source().head().base_wal_seq(),
+                cloned.destination().head().base_wal_seq(),
             );
             println!("note: copied committed checkpoint only; source WAL was not cloned");
         }
@@ -168,7 +168,7 @@ fn print_export(export: &ExportRecord) {
     println!("block_size: {}", export.block_size());
     println!("engine: {}", export.engine_kind());
     println!("layout: {}", export.head().layout_kind());
-    println!("checkpoint_wal_seq: {}", export.head().checkpoint_wal_seq());
+    println!("base_wal_seq: {}", export.head().base_wal_seq());
     match export.head().root_node_id() {
         Some(root_node_id) => println!("root_node_id: {root_node_id}"),
         None => println!("root_node_id: <empty>"),

@@ -58,7 +58,7 @@ export_heads
   export_id primary key
   layout_kind
   root_node_id
-  checkpoint_wal_seq
+  base_wal_seq
   size_bytes
   updated_at
 
@@ -110,7 +110,7 @@ struct ExportDescriptor {
     deleted_at: Option<Timestamp>,
 }
 
-struct ExportMeta {
+struct ExportRecord {
     id: ExportId,
     name: ExportName,
     block_size: u64,
@@ -122,11 +122,25 @@ struct ExportMeta {
     deleted_at: Option<Timestamp>,
 }
 
-struct ExportHead {
-    layout_kind: ExportLayoutKind,
-    root_node_id: Option<NodeId>,
+enum ExportHead {
+    MemoryEmpty(MemoryExportHead),
+    SimpleMutableTree(SimpleMutableTreeHead),
+    CowImmutableTree(CowImmutableTreeHead),
+}
+
+struct MemoryExportHead {
     size_bytes: u64,
-    checkpoint_wal_seq: WalSeq,
+}
+
+struct SimpleMutableTreeHead {
+    size_bytes: u64,
+    root_node_id: Option<NodeId>,
+}
+
+struct CowImmutableTreeHead {
+    size_bytes: u64,
+    root_node_id: Option<NodeId>,
+    base_wal_seq: WalSeq,
 }
 
 enum ExportLayoutKind {
@@ -146,8 +160,12 @@ enum ExportState {
 head/tree snapshot separately so compaction can advance `export_heads` without
 invalidating an open already holding a descriptor.
 
-`ExportMeta` remains the operator-facing joined view used by create, inspect,
+`ExportRecord` remains the operator-facing joined view used by create, inspect,
 list, and publication outcomes.
+
+`ExportHead` is typed by layout so memory heads cannot carry root nodes or WAL
+state, simple mutable heads cannot carry WAL state, and COW immutable heads
+carry the committed `base_wal_seq`.
 
 Lifecycle request structs:
 
@@ -208,9 +226,9 @@ struct PublishCompaction {
 }
 
 enum PublishCompactionOutcome {
-    Published(ExportMeta),
-    AlreadyCovered(ExportMeta),
-    StalePlan(ExportMeta),
+    Published(ExportRecord),
+    AlreadyCovered(ExportRecord),
+    StalePlan(ExportRecord),
 }
 ```
 
@@ -221,16 +239,16 @@ Conceptual API:
 ```rust
 trait ExportCatalog {
     async fn create_export(&self, request: CreateExport)
-        -> Result<ExportMeta>;
+        -> Result<ExportRecord>;
 
     async fn clone_export(&self, request: CloneExport)
-        -> Result<ExportMeta>;
+        -> Result<ExportRecord>;
 
     async fn delete_export(&self, request: DeleteExport)
         -> Result<()>;
 
     async fn load_export(&self, name: ExportName)
-        -> Result<ExportMeta>;
+        -> Result<ExportRecord>;
 
     async fn load_export_descriptor(&self, name: ExportName)
         -> Result<ExportDescriptor>;
@@ -239,7 +257,7 @@ trait ExportCatalog {
         -> Result<ExportHead>;
 
     async fn list_exports(&self, filter: ExportListFilter)
-        -> Result<Vec<ExportMeta>>;
+        -> Result<Vec<ExportRecord>>;
 
     async fn publish_compaction(&self, update: PublishCompaction)
         -> Result<PublishCompactionOutcome>;
@@ -263,7 +281,7 @@ insert exports row:
 insert export_heads row:
   layout_kind = layout implied by engine_kind
   root_node_id = null
-  checkpoint_wal_seq = 0
+  base_wal_seq = 0
   size_bytes = requested size
 ```
 
@@ -289,7 +307,7 @@ insert destination exports row
 insert destination export_heads row:
   layout_kind = cow_immutable_tree
   root_node_id = source.root_node_id
-  checkpoint_wal_seq = 0
+  base_wal_seq = 0
 ```
 
 The destination has a new export identity and its own WAL. Future writes to the
@@ -339,14 +357,14 @@ begin transaction
   load latest export row
   load current export_heads row
   verify state = active
-  if current.checkpoint_wal_seq >= compacted_through:
+  if current.base_wal_seq >= compacted_through:
     return AlreadyCovered
   if current root/checkpoint/size/layout != expected_base:
     return StalePlan
   insert tree metadata batch
   update export_heads:
     root_node_id = new_root_node_id
-    checkpoint_wal_seq = compacted_through
+    base_wal_seq = compacted_through
     size_bytes = current.size_bytes
 commit
 ```
@@ -377,7 +395,7 @@ Close-time compaction goal:
 
 - reduce WAL replay work for the next open;
 - move recent writes into the committed copy-on-write tree;
-- advance `checkpoint_wal_seq` when compaction succeeds.
+- advance `base_wal_seq` when compaction succeeds.
 
 Close does not wait for compaction to finish. If close-time compaction fails,
 the export can stay closed as long as acknowledged writes remain durable in the
@@ -405,7 +423,7 @@ the write durability contract.
 - Root/checkpoint publication advances the current head.
 - `publish_compaction` inserts immutable tree metadata and advances the current
   head transactionally.
-- `checkpoint_wal_seq` advances monotonically.
+- `base_wal_seq` advances monotonically.
 - Clean export close enqueues background close-time compaction.
 - Delete race prevention belongs to `ExportLifecycleManager`.
 - Delete is logical; physical cleanup belongs to GC.

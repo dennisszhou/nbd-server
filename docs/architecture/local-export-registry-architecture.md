@@ -46,7 +46,7 @@ struct ActiveExportRecord {
     layout_kind: ExportLayoutKind,
     root_node_id: Option<NodeId>,
     size_bytes: u64,
-    checkpoint_wal_seq: WalSeq,
+    base_wal_seq: WalSeq,
     connection_id: ConnectionId,
     lease: ExportLeaseSnapshot,
     opened_at: Timestamp,
@@ -79,7 +79,7 @@ enum ActiveExportState {
 }
 
 struct RegisterExport {
-    export: ExportMeta,
+    export: ExportRecord,
     connection_id: ConnectionId,
     lease: ExportLeaseSnapshot,
 }
@@ -273,7 +273,7 @@ ActiveExportRecord -> lease renewal task
 unregister/close -> stop renewing lease
 ```
 
-Lease state is operational routing truth, not durable export metadata.
+Lease state is operational routing truth, not durable export recorddata.
 After each successful renewal, the lease snapshot in both
 `LocalExportRegistry` and the active `Export` must be updated.
 
@@ -294,7 +294,7 @@ that the export must not continue serving writes after its lease has expired.
 # Invariants
 
 - `LocalExportRegistry` is process-local active export lifecycle truth.
-- `ExportCatalog` remains durable export metadata truth.
+- `ExportCatalog` remains durable export recorddata truth.
 - Etcd per-export leases are cross-process lifecycle exclusion truth.
 - A local record may be registered as `Opening` after lease acquisition and
   before export initialization.

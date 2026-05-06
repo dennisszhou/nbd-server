@@ -157,7 +157,7 @@ wait_for_wal_compaction() {
 
     for _ in $(seq 1 500); do
         path="$(write_inspect_artifact "${label}" "${export_name}")"
-        wal_seq="$(inspect_field "${path}" "checkpoint_wal_seq")"
+        wal_seq="$(inspect_field "${path}" "base_wal_seq")"
         root="$(inspect_field "${path}" "root_node_id")"
         if [[ "${wal_seq}" =~ ^[0-9]+$ ]] &&
             [ "${wal_seq}" -ge "${target_wal_seq}" ] &&

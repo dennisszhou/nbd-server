@@ -1,7 +1,23 @@
+CREATE TABLE "exports" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "engine_kind" TEXT NOT NULL CHECK (
+        "engine_kind" IN ('memory', 'simple_durable', 'wal_durable')
+    ),
+    "block_size" INTEGER NOT NULL,
+    "state" TEXT NOT NULL CHECK ("state" IN ('active', 'deleted')),
+    "created_at" TEXT NOT NULL,
+    "updated_at" TEXT NOT NULL,
+    "deleted_at" TEXT,
+    CHECK ("block_size" > 0)
+);
+
+CREATE UNIQUE INDEX "exports_name_key" ON "exports"("name");
+
 CREATE TABLE "tree_nodes" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "layout_kind" TEXT NOT NULL CHECK (
-        "layout_kind" IN ('simple_mutable_tree')
+        "layout_kind" IN ('simple_mutable_tree', 'cow_immutable_tree')
     ),
     "owner_export_id" TEXT,
     "kind" TEXT NOT NULL CHECK ("kind" IN ('internal', 'leaf')),
@@ -39,7 +55,9 @@ CREATE TABLE "tree_edges" (
 
 CREATE TABLE "tree_leaf_refs" (
     "node_id" TEXT NOT NULL PRIMARY KEY,
-    "storage_kind" TEXT NOT NULL CHECK ("storage_kind" IN ('mutable_blob')),
+    "storage_kind" TEXT NOT NULL CHECK (
+        "storage_kind" IN ('mutable_blob', 'immutable_blob')
+    ),
     "storage_key" TEXT NOT NULL,
     "len_bytes" INTEGER NOT NULL,
     "created_at" TEXT NOT NULL,
@@ -55,14 +73,18 @@ CREATE TABLE "tree_leaf_refs" (
 CREATE TABLE "export_heads" (
     "export_id" TEXT NOT NULL PRIMARY KEY,
     "layout_kind" TEXT NOT NULL CHECK (
-        "layout_kind" IN ('memory_empty', 'simple_mutable_tree')
+        "layout_kind" IN (
+            'memory_empty',
+            'simple_mutable_tree',
+            'cow_immutable_tree'
+        )
     ),
     "root_node_id" TEXT,
     "size_bytes" INTEGER NOT NULL,
-    "checkpoint_wal_seq" INTEGER NOT NULL,
+    "base_wal_seq" INTEGER NOT NULL,
     "updated_at" TEXT NOT NULL,
     CHECK ("size_bytes" > 0),
-    CHECK ("checkpoint_wal_seq" >= 0),
+    CHECK ("base_wal_seq" >= 0),
     CONSTRAINT "export_heads_export_id_fkey"
         FOREIGN KEY ("export_id")
         REFERENCES "exports" ("id")

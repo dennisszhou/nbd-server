@@ -246,7 +246,7 @@ impl CompactionWorker {
         let wal = self.open_wal(job.export_id()).await?;
         let bounds = wal.bounds().await?;
         let target_wal_seq = job.through_wal_seq().min(bounds.last_durable);
-        let base_wal_seq = snapshot.checkpoint_wal_seq();
+        let base_wal_seq = snapshot.base_wal_seq();
 
         if target_wal_seq <= base_wal_seq {
             return Ok(CompactionResult {
@@ -397,7 +397,7 @@ fn snapshot_to_export_head(snapshot: &CowTreeSnapshot) -> Result<ExportHead> {
         ExportLayoutKind::CowImmutableTree,
         snapshot.root_node_id().cloned(),
         snapshot.size_bytes(),
-        snapshot.checkpoint_wal_seq(),
+        snapshot.base_wal_seq(),
     )
     .map_err(ServerError::catalog)
 }

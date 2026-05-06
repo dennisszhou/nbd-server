@@ -17,17 +17,9 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
-    include_str!(
-        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
-    ),
-    include_str!(
-        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
-    ),
-    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
-    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 #[tokio::test]
 async fn registry_rejects_second_unique_owner_until_close() {
@@ -409,7 +401,7 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
         .load_cow_tree(created.id())
         .await
         .expect("load cow tree after failed compaction");
-    assert_eq!(snapshot.checkpoint_wal_seq(), WalSeq::zero());
+    assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
     assert!(snapshot.root_node_id().is_none());
 
     let reopened_owner = ExportOwner::unique_connection();
@@ -586,7 +578,7 @@ async fn wait_for_checkpoint(
                 .load_cow_tree(export_id)
                 .await
                 .expect("load cow tree");
-            if snapshot.checkpoint_wal_seq() >= checkpoint && snapshot.root_node_id().is_some() {
+            if snapshot.base_wal_seq() >= checkpoint && snapshot.root_node_id().is_some() {
                 return;
             }
             sleep(Duration::from_millis(10)).await;

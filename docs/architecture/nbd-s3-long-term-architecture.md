@@ -304,8 +304,8 @@ Flush does not need to compact WAL records into committed leaf blobs.
 - Tree child pointers are immutable once published.
 - Publishing an export root/checkpoint advances the current head through
   `ExportCatalog`.
-- `checkpoint_wal_seq` is a global WAL prefix: the committed root represents
-  every WAL record with `seq <= checkpoint_wal_seq`.
+- `base_wal_seq` is a global WAL prefix: the committed root represents
+  every WAL record with `seq <= base_wal_seq`.
 - Read-view overlay retirement after compaction is driven by checkpoint/root
   advancement.
 - Untagged logical read caches are forbidden.

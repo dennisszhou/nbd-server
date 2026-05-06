@@ -52,7 +52,7 @@ struct ReadViewState {
 
 struct PublishedTree {
     root_node_id: Option<NodeId>,
-    checkpoint_wal_seq: WalSeq,
+    base_wal_seq: WalSeq,
 }
 
 struct WalEntry {
@@ -89,7 +89,7 @@ Optional cache state is separate:
 
 ```text
 required:
-  WAL overlay entries where seq > checkpoint_wal_seq
+  WAL overlay entries where seq > base_wal_seq
 
 optional:
   immutable blob cache entries keyed by BlobKey
@@ -105,13 +105,13 @@ on the WAL file.
 
 # Global WAL Prefix Checkpoint
 
-`checkpoint_wal_seq` is a global prefix checkpoint for one export.
+`base_wal_seq` is a global prefix checkpoint for one export.
 
 If the current export head says:
 
 ```text
 root_node_id = R
-checkpoint_wal_seq = S
+base_wal_seq = S
 ```
 
 then root `R` represents every WAL record with sequence `<= S`. Startup must
@@ -362,7 +362,7 @@ Startup recovery uses the catalog checkpoint:
 load export metadata from ExportCatalog
   -> load current export head
   -> root = root_node_id
-  -> checkpoint = checkpoint_wal_seq
+  -> checkpoint = base_wal_seq
   -> initialize ExportReadView at root/checkpoint
   -> replay WAL records where seq > checkpoint
   -> apply replayed records to ExportReadView
@@ -376,16 +376,16 @@ represented by the committed root.
 - `ExportReadView` is the authoritative in-process serving view for an active
   export.
 - `ExportReadView` is reconstructable from `ExportCatalog` plus durable WAL.
-- WAL overlay entries with `seq > checkpoint_wal_seq` are required state.
+- WAL overlay entries with `seq > base_wal_seq` are required state.
 - Required WAL overlay entries are not evicted for memory pressure.
-- WAL entries with `seq <= checkpoint_wal_seq` may be demoted from
+- WAL entries with `seq <= base_wal_seq` may be demoted from
   authoritative overlay state after active older read epochs drain.
 - Optional blob/read-through cache entries may be evicted for memory pressure.
 - Optional cache entries that reference WAL storage must be dropped or copied
   before the referenced WAL segment is pruned.
-- `checkpoint_wal_seq` is a global WAL prefix, not a per-range frontier.
+- `base_wal_seq` is a global WAL prefix, not a per-range frontier.
 - Root `R` at checkpoint `S` represents every WAL record with `seq <= S`.
-- Startup replays every durable WAL record with `seq > checkpoint_wal_seq`.
+- Startup replays every durable WAL record with `seq > base_wal_seq`.
 - Checkpoint installation never drops WAL overlay entries newer than the
   checkpoint.
 - Checkpoint installation does not retire older overlay entries until root

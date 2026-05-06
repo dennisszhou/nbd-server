@@ -65,7 +65,7 @@ export_heads
   export_id primary key
   layout_kind        -- memory_empty | simple_mutable_tree | cow_immutable_tree
   root_node_id
-  checkpoint_wal_seq
+  base_wal_seq
   size_bytes
   updated_at
 
@@ -128,7 +128,7 @@ Published nodes are immutable. Updating an export creates new nodes and moves
 the current head to a new immutable root/checkpoint.
 
 The export checkpoint is a global WAL prefix. If the current head has
-`root_node_id = R` and `checkpoint_wal_seq = S`, root `R` represents every WAL
+`root_node_id = R` and `base_wal_seq = S`, root `R` represents every WAL
 record with sequence `<= S`. Startup recovery must replay every durable WAL
 record with sequence `> S`.
 
@@ -188,11 +188,11 @@ clone src -> dst
   -> create dst export_head:
        layout_kind = cow_immutable_tree
        root_node_id = src.root_node_id
-       checkpoint_wal_seq = 0
+       base_wal_seq = 0
   -> copy no leaf blobs
 ```
 
-`checkpoint_wal_seq` is per export WAL state. The cloned root already contains
+`base_wal_seq` is per export WAL state. The cloned root already contains
 the source export's committed data as of the source's latest catalog
 checkpoint. The destination export has a new WAL, so it starts with checkpoint
 zero and replays only its own future WAL records. Clone does not include the
@@ -213,11 +213,11 @@ The identifying tuple for a committed export view is:
 
 ```text
 root_node_id
-checkpoint_wal_seq
+base_wal_seq
 size_bytes
 ```
 
-`root_node_id` identifies the immutable tree root. `checkpoint_wal_seq`
+`root_node_id` identifies the immutable tree root. `base_wal_seq`
 identifies which prefix of the export's WAL is represented by that root.
 `size_bytes` identifies the logical device size for that committed serving
 view.
@@ -250,7 +250,7 @@ success, it inserts the immutable tree metadata batch and advances
 `export_heads`. `new_root_node_id` must represent every WAL record with
 sequence `<= compacted_through`.
 
-If the current head already has `checkpoint_wal_seq >= compacted_through`,
+If the current head already has `base_wal_seq >= compacted_through`,
 publication is a successful no-op. If the current head no longer matches
 `expected_base`, publication is stale and the compactor must replan from the
 current database head before trying again. This makes duplicate and racing

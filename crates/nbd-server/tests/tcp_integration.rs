@@ -871,10 +871,7 @@ async fn wal_durable_protocol_clones_committed_snapshot() {
         cloned.destination().head().root_node_id(),
         cloned.source().head().root_node_id(),
     );
-    assert_eq!(
-        cloned.destination().head().checkpoint_wal_seq(),
-        WalSeq::zero(),
-    );
+    assert_eq!(cloned.destination().head().base_wal_seq(), WalSeq::zero(),);
 
     let mut clone = NbdClient::connect(server.addr(), "clone")
         .await
@@ -908,8 +905,8 @@ async fn wal_durable_protocol_clones_committed_snapshot() {
         source_after.head().root_node_id(),
         clone_after.head().root_node_id(),
     );
-    assert_eq!(source_after.head().checkpoint_wal_seq(), WalSeq::new(2));
-    assert_eq!(clone_after.head().checkpoint_wal_seq(), WalSeq::new(1));
+    assert_eq!(source_after.head().base_wal_seq(), WalSeq::new(2));
+    assert_eq!(clone_after.head().base_wal_seq(), WalSeq::new(1));
 
     let mut source = NbdClient::connect(server.addr(), "source")
         .await
@@ -943,9 +940,7 @@ async fn wait_for_compacted_head(fixture: &ServerFixture, name: &str, checkpoint
     timeout(Duration::from_secs(5), async {
         loop {
             let meta = fixture.inspect_export(name).await.expect("inspect export");
-            if meta.head().checkpoint_wal_seq() >= checkpoint
-                && meta.head().root_node_id().is_some()
-            {
+            if meta.head().base_wal_seq() >= checkpoint && meta.head().root_node_id().is_some() {
                 return;
             }
             sleep(Duration::from_millis(10)).await;

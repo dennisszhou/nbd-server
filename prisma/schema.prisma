@@ -19,14 +19,14 @@ model Export {
 }
 
 model ExportHead {
-  exportId         String    @id @map("export_id")
-  layoutKind       String    @map("layout_kind")
-  rootNodeId       String?   @map("root_node_id")
-  sizeBytes        BigInt    @map("size_bytes")
-  checkpointWalSeq BigInt    @map("checkpoint_wal_seq")
-  updatedAt        String    @map("updated_at")
-  export           Export    @relation(fields: [exportId], references: [id], onDelete: Restrict)
-  rootNode         TreeNode? @relation("ExportHeadRoot", fields: [rootNodeId], references: [id], onDelete: Restrict)
+  exportId   String    @id @map("export_id")
+  layoutKind String    @map("layout_kind")
+  rootNodeId String?   @map("root_node_id")
+  sizeBytes  BigInt    @map("size_bytes")
+  baseWalSeq BigInt    @map("base_wal_seq")
+  updatedAt  String    @map("updated_at")
+  export     Export    @relation(fields: [exportId], references: [id], onDelete: Restrict)
+  rootNode   TreeNode? @relation("ExportHeadRoot", fields: [rootNodeId], references: [id], onDelete: Restrict)
 
   @@map("export_heads")
 }

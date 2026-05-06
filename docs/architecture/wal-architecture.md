@@ -160,7 +160,7 @@ Startup recovery:
 ```text
 load export metadata and checkpoint
   -> initialize committed root snapshot
-  -> replay durable WAL records with seq > checkpoint_wal_seq
+  -> replay durable WAL records with seq > base_wal_seq
   -> apply records to ExportReadView in sequence order
   -> set next WAL sequence after highest durable record
 ```
@@ -169,7 +169,7 @@ Replay must tolerate a final partial or corrupt record by rejecting it and
 keeping only verified durable records.
 
 With `LocalExportWal`, startup scans the local per-export WAL. With a remote
-WAL service, startup asks the service for records after `checkpoint_wal_seq`.
+WAL service, startup asks the service for records after `base_wal_seq`.
 Both paths produce the same ordered `WalReplay`.
 
 # Compaction Checkpoints
@@ -180,11 +180,11 @@ state.
 After catalog publication succeeds:
 
 ```text
-export_heads.checkpoint_wal_seq = wal_seq
+export_heads.base_wal_seq = wal_seq
 ```
 
 The published root must represent every WAL record with sequence
-`<= export_heads.checkpoint_wal_seq`. WAL records at or below the checkpoint
+`<= export_heads.base_wal_seq`. WAL records at or below the checkpoint
 remain needed until active read views have installed the checkpoint and GC
 decides they are unreachable.
 
@@ -222,7 +222,7 @@ The first pruning policy can be time based:
 
 ```text
 WAL segment is prune-eligible when:
-  segment.max_seq <= published_checkpoint_wal_seq
+  segment.max_seq <= published_base_wal_seq
   AND segment.closed_at <= now - wal_retention_window
 ```
 

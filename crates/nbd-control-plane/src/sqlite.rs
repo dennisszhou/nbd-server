@@ -67,7 +67,7 @@ impl SQLiteExportCatalog {
               h.layout_kind,
               h.root_node_id,
               h.size_bytes,
-              h.checkpoint_wal_seq
+              h.base_wal_seq
             FROM exports e
             JOIN export_heads h
               ON h.export_id = e.id
@@ -156,7 +156,7 @@ impl ExportCatalog for SQLiteExportCatalog {
             r#"
             INSERT INTO export_heads (
               export_id, layout_kind, root_node_id, size_bytes,
-              checkpoint_wal_seq, updated_at
+              base_wal_seq, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?)
             "#,
@@ -165,10 +165,7 @@ impl ExportCatalog for SQLiteExportCatalog {
         .bind(head.layout_kind().to_string())
         .bind(head.root_node_id().map(NodeId::as_str))
         .bind(size_bytes)
-        .bind(u64_to_i64(
-            "checkpoint_wal_seq",
-            head.checkpoint_wal_seq().get(),
-        )?)
+        .bind(u64_to_i64("base_wal_seq", head.base_wal_seq().get())?)
         .bind(now.as_str())
         .execute(&mut *tx)
         .await
@@ -244,7 +241,7 @@ impl ExportCatalog for SQLiteExportCatalog {
             r#"
             INSERT INTO export_heads (
               export_id, layout_kind, root_node_id, size_bytes,
-              checkpoint_wal_seq, updated_at
+              base_wal_seq, updated_at
             )
             VALUES (?, 'cow_immutable_tree', ?, ?, 0, ?)
             "#,
@@ -340,7 +337,7 @@ impl ExportCatalog for SQLiteExportCatalog {
               h.layout_kind,
               h.root_node_id,
               h.size_bytes,
-              h.checkpoint_wal_seq
+              h.base_wal_seq
             FROM exports e
             JOIN export_heads h
               ON h.export_id = e.id
@@ -589,7 +586,7 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
             ));
         }
 
-        if current.head().checkpoint_wal_seq() >= request.compacted_through() {
+        if current.head().base_wal_seq() >= request.compacted_through() {
             tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(PublishCompactionOutcome::AlreadyCovered(current));
         }
@@ -713,7 +710,7 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
             r#"
             UPDATE export_heads
             SET root_node_id = ?,
-                checkpoint_wal_seq = ?,
+                base_wal_seq = ?,
                 updated_at = ?
             WHERE export_id = ?
               AND layout_kind = ?
@@ -722,12 +719,12 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
                 OR root_node_id = ?
               )
               AND size_bytes = ?
-              AND checkpoint_wal_seq = ?
+              AND base_wal_seq = ?
             "#,
         )
         .bind(root.as_str())
         .bind(u64_to_i64(
-            "checkpoint_wal_seq",
+            "base_wal_seq",
             request.compacted_through().get(),
         )?)
         .bind(now.as_str())
@@ -740,8 +737,8 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
             request.expected_base().size_bytes(),
         )?)
         .bind(u64_to_i64(
-            "checkpoint_wal_seq",
-            request.expected_base().checkpoint_wal_seq().get(),
+            "base_wal_seq",
+            request.expected_base().base_wal_seq().get(),
         )?)
         .execute(&mut *tx)
         .await
@@ -936,7 +933,7 @@ async fn load_cow_tree_snapshot(
 ) -> Result<CowTreeSnapshot> {
     let row = sqlx::query(
         r#"
-        SELECT layout_kind, root_node_id, size_bytes, checkpoint_wal_seq
+        SELECT layout_kind, root_node_id, size_bytes, base_wal_seq
         FROM export_heads
         WHERE export_id = ?
         "#,
@@ -960,9 +957,9 @@ async fn load_cow_tree_snapshot(
         "size_bytes",
         row.try_get("size_bytes").map_err(map_sqlx_error)?,
     )?;
-    let checkpoint_wal_seq = WalSeq::new(i64_to_u64(
-        "checkpoint_wal_seq",
-        row.try_get("checkpoint_wal_seq").map_err(map_sqlx_error)?,
+    let base_wal_seq = WalSeq::new(i64_to_u64(
+        "base_wal_seq",
+        row.try_get("base_wal_seq").map_err(map_sqlx_error)?,
     )?);
     let root_node_id = row
         .try_get::<Option<String>, _>("root_node_id")
@@ -1031,7 +1028,7 @@ async fn load_cow_tree_snapshot(
         export_id.clone(),
         size_bytes,
         root_node_id,
-        checkpoint_wal_seq,
+        base_wal_seq,
         chunks,
     )
 }
@@ -1275,7 +1272,7 @@ fn export_head_not_found(export_id: &ExportId) -> CatalogError {
 async fn load_export_head(pool: &SqlitePool, export_id: &ExportId) -> Result<ExportHead> {
     let row = sqlx::query(
         r#"
-        SELECT layout_kind, root_node_id, size_bytes, checkpoint_wal_seq
+        SELECT layout_kind, root_node_id, size_bytes, base_wal_seq
         FROM export_heads
         WHERE export_id = ?
         "#,
@@ -1307,7 +1304,7 @@ async fn fetch_export_record_by_id_in_tx(
           h.layout_kind,
           h.root_node_id,
           h.size_bytes,
-          h.checkpoint_wal_seq
+          h.base_wal_seq
         FROM exports e
         JOIN export_heads h
           ON h.export_id = e.id
@@ -1341,7 +1338,7 @@ async fn fetch_export_record_by_name_in_tx(
           h.layout_kind,
           h.root_node_id,
           h.size_bytes,
-          h.checkpoint_wal_seq
+          h.base_wal_seq
         FROM exports e
         JOIN export_heads h
           ON h.export_id = e.id
@@ -1375,7 +1372,7 @@ async fn fetch_export_record_by_id(
           h.layout_kind,
           h.root_node_id,
           h.size_bytes,
-          h.checkpoint_wal_seq
+          h.base_wal_seq
         FROM exports e
         JOIN export_heads h
           ON h.export_id = e.id
@@ -1429,8 +1426,8 @@ fn row_to_export_head(row: &SqliteRow) -> Result<ExportHead> {
             row.try_get("size_bytes").map_err(map_sqlx_error)?,
         )?,
         WalSeq::new(i64_to_u64(
-            "checkpoint_wal_seq",
-            row.try_get("checkpoint_wal_seq").map_err(map_sqlx_error)?,
+            "base_wal_seq",
+            row.try_get("base_wal_seq").map_err(map_sqlx_error)?,
         )?),
     )
 }

@@ -12,17 +12,9 @@ use nbd_server::{
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
-    include_str!(
-        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
-    ),
-    include_str!(
-        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
-    ),
-    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
-    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 #[tokio::test]
 async fn wal_durable_engine_reads_zeroes_then_written_overlay() {

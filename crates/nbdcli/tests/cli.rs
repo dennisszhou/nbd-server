@@ -6,17 +6,9 @@ use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::process::{Command, Output};
 
-const MIGRATIONS: &[&str] = &[
-    include_str!("../../../prisma/migrations/20260501000000_init/migration.sql"),
-    include_str!(
-        "../../../prisma/migrations/20260504000000_export_heads_tree_metadata/migration.sql"
-    ),
-    include_str!(
-        "../../../prisma/migrations/20260504010000_simple_durable_engine_kind/migration.sql"
-    ),
-    include_str!("../../../prisma/migrations/20260505000000_wal_durable_engine_kind/migration.sql"),
-    include_str!("../../../prisma/migrations/20260505010000_cow_tree_metadata/migration.sql"),
-];
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 #[tokio::test]
 async fn cli_creates_inspects_lists_and_deletes_exports() {
@@ -46,8 +38,8 @@ async fn cli_creates_inspects_lists_and_deletes_exports() {
     assert_eq!(inspected["engine_kind"], "memory");
     assert_eq!(inspected["head"]["layout_kind"], "memory_empty");
     assert_eq!(inspected["head"]["size_bytes"], 1048576);
-    assert_eq!(inspected["head"]["checkpoint_wal_seq"], 0);
-    assert!(inspected["head"]["root_node_id"].is_null());
+    assert!(inspected["head"].get("base_wal_seq").is_none());
+    assert!(inspected["head"].get("root_node_id").is_none());
 
     let list = nbdcli(&runtime, &["list", "--json"]);
     assert_success(&list);
@@ -136,7 +128,7 @@ async fn cli_creates_wal_durable_exports() {
     let inspected = json_stdout(&inspect);
     assert_eq!(inspected["engine_kind"], "wal_durable");
     assert_eq!(inspected["head"]["layout_kind"], "cow_immutable_tree");
-    assert_eq!(inspected["head"]["checkpoint_wal_seq"], 0);
+    assert_eq!(inspected["head"]["base_wal_seq"], 0);
     assert!(inspected["head"]["root_node_id"].is_null());
 }
 
@@ -163,8 +155,8 @@ async fn cli_clones_committed_wal_durable_exports() {
     let clone = nbdcli(&runtime, &["clone", "source", "destination"]);
     assert_success(&clone);
     assert!(stdout(&clone).contains("cloned export destination from source"));
-    assert!(stdout(&clone).contains("source_checkpoint_wal_seq=7"));
-    assert!(stdout(&clone).contains("destination_checkpoint_wal_seq=0"));
+    assert!(stdout(&clone).contains("source_base_wal_seq=7"));
+    assert!(stdout(&clone).contains("destination_base_wal_seq=0"));
     assert!(stdout(&clone).contains("source WAL was not cloned"));
 
     let inspect = nbdcli(&runtime, &["inspect", "destination", "--json"]);
@@ -173,7 +165,7 @@ async fn cli_clones_committed_wal_durable_exports() {
     assert_eq!(inspected["name"], "destination");
     assert_eq!(inspected["engine_kind"], "wal_durable");
     assert_eq!(inspected["head"]["layout_kind"], "cow_immutable_tree");
-    assert_eq!(inspected["head"]["checkpoint_wal_seq"], 0);
+    assert_eq!(inspected["head"]["base_wal_seq"], 0);
     assert_eq!(inspected["head"]["root_node_id"], source_root);
     assert_eq!(inspected["head"]["size_bytes"], TREE_CHUNK_BYTES);
 }
