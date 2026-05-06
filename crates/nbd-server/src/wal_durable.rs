@@ -9,7 +9,7 @@ use crate::{
 };
 use bytes::Bytes;
 use nbd_control_plane::{
-    CowTreeMetadataStore, CowTreeSnapshot, ExportDescriptor, ExportHead, ExportLayoutKind,
+    ActiveExportDescriptor, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportLayoutKind,
     ExportName, ExportRecord, NodeId, WalSeq, TREE_CHUNK_BYTES,
 };
 use std::fmt;
@@ -142,7 +142,7 @@ impl WalDurableEngine {
     }
 
     pub async fn open_with_cow_tree(
-        descriptor: &ExportDescriptor,
+        descriptor: &ActiveExportDescriptor,
         wal: ExportWalHandle,
         blob_store: LocalBlobStore,
         catalog: Arc<dyn CowTreeMetadataStore>,
@@ -759,7 +759,7 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
 }
 
 fn validate_snapshot_can_open(
-    descriptor: &ExportDescriptor,
+    descriptor: &ActiveExportDescriptor,
     snapshot: &CowTreeSnapshot,
 ) -> Result<()> {
     if snapshot.export_id() != descriptor.id() {

@@ -1,8 +1,8 @@
 use nbd_control_plane::{
-    BlobKey, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport, CowChunkRef, CowTreeSnapshot,
-    CreateExport, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
-    ExportState, ListExports, NodeId, PublishCompaction, SimpleChunkRef, WalSeq,
-    SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    ActiveExportDescriptor, BlobKey, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport,
+    CowChunkRef, CowTreeSnapshot, CreateExport, ExportDescriptor, ExportEngineKind, ExportHead,
+    ExportId, ExportLayoutKind, ExportName, ExportState, ListExports, NodeId, PublishCompaction,
+    SimpleChunkRef, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -66,6 +66,19 @@ fn clone_export_validates_distinct_names() {
         ExportName::new("same").expect("destination name"),
     )
     .is_err());
+}
+
+#[test]
+fn active_export_descriptors_reject_deleted_exports() {
+    let active = export_descriptor("disk-active", ExportState::Active, None);
+    let active = ActiveExportDescriptor::new(active).expect("active descriptor");
+
+    assert_eq!(active.name().as_str(), "disk-active");
+    assert_eq!(active.state(), ExportState::Active);
+
+    let deleted_at = Timestamp::new("unix_us:2").expect("deleted timestamp");
+    let deleted = export_descriptor("disk-deleted", ExportState::Deleted, Some(deleted_at));
+    assert!(ActiveExportDescriptor::new(deleted).is_err());
 }
 
 #[test]
@@ -329,4 +342,22 @@ fn export_layout_kind_round_trips_catalog_values() {
 fn list_exports_defaults_to_active_only() {
     assert!(!ListExports::active_only().includes_deleted());
     assert!(ListExports::include_deleted().includes_deleted());
+}
+
+fn export_descriptor(
+    name: &str,
+    state: ExportState,
+    deleted_at: Option<Timestamp>,
+) -> ExportDescriptor {
+    ExportDescriptor::new(
+        ExportId::new(format!("{name}-id")).expect("export id"),
+        ExportName::new(name).expect("export name"),
+        4096,
+        ExportEngineKind::Memory,
+        state,
+        Timestamp::new("unix_us:1").expect("created timestamp"),
+        Timestamp::new("unix_us:1").expect("updated timestamp"),
+        deleted_at,
+    )
+    .expect("descriptor")
 }

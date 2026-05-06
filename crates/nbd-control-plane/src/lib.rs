@@ -10,11 +10,11 @@ pub mod sqlite;
 pub use catalog_url::{CatalogProvider, CatalogUrl};
 pub use error::{CatalogError, Result};
 pub use model::{
-    BlobKey, ChunkIndex, CloneExport, CloneExportResult, CowChunkRef, CowTreeSnapshot,
-    CreateExport, DeleteExport, ExportDescriptor, ExportEngineKind, ExportHead, ExportId,
-    ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports, NodeId,
-    PublishCompaction, PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot, Timestamp,
-    WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    ActiveExportDescriptor, BlobKey, ChunkIndex, CloneExport, CloneExportResult, CowChunkRef,
+    CowTreeSnapshot, CreateExport, DeleteExport, ExportDescriptor, ExportEngineKind, ExportHead,
+    ExportId, ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports,
+    NodeId, PublishCompaction, PublishCompactionOutcome, SimpleChunkRef, SimpleTreeSnapshot,
+    Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
 };
 pub use sqlite::SQLiteExportCatalog;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ pub trait ExportCatalog: Send + Sync {
     ///
     /// Implementations must reject deleted exports. Storage engines must load
     /// the latest serving head or tree snapshot separately.
-    async fn load_export_descriptor(&self, name: ExportName) -> Result<ExportDescriptor>;
+    async fn load_export_descriptor(&self, name: ExportName) -> Result<ActiveExportDescriptor>;
 
     /// Load the latest serving head for an export.
     async fn load_export_head(&self, export_id: &ExportId) -> Result<ExportHead>;

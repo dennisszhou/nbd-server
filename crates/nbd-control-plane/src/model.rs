@@ -4,6 +4,7 @@ use crate::error::{CatalogError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Deref;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -136,6 +137,12 @@ pub struct ExportDescriptor {
     created_at: Timestamp,
     updated_at: Timestamp,
     deleted_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ActiveExportDescriptor {
+    descriptor: ExportDescriptor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -745,6 +752,38 @@ impl ExportDescriptor {
             self.updated_at,
             self.deleted_at,
         )
+    }
+}
+
+impl ActiveExportDescriptor {
+    pub fn new(descriptor: ExportDescriptor) -> Result<Self> {
+        if descriptor.state() != ExportState::Active {
+            return Err(CatalogError::ExportDeleted {
+                name: descriptor.name().clone(),
+            });
+        }
+
+        Ok(Self { descriptor })
+    }
+
+    pub fn as_descriptor(&self) -> &ExportDescriptor {
+        &self.descriptor
+    }
+
+    pub fn into_descriptor(self) -> ExportDescriptor {
+        self.descriptor
+    }
+
+    pub fn into_record(self, head: ExportHead) -> Result<ExportRecord> {
+        self.descriptor.into_record(head)
+    }
+}
+
+impl Deref for ActiveExportDescriptor {
+    type Target = ExportDescriptor;
+
+    fn deref(&self) -> &Self::Target {
+        &self.descriptor
     }
 }
 

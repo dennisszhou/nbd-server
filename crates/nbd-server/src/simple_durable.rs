@@ -7,7 +7,7 @@ use crate::{
 };
 use bytes::Bytes;
 use nbd_control_plane::{
-    BlobKey, ChunkIndex, ExportDescriptor, ExportHead, ExportLayoutKind, ExportName, NodeId,
+    ActiveExportDescriptor, BlobKey, ChunkIndex, ExportHead, ExportLayoutKind, ExportName, NodeId,
     SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot, WalSeq, SIMPLE_CHUNK_BYTES,
 };
 use std::collections::BTreeMap;
@@ -62,7 +62,7 @@ struct SimpleTreeReader {
 
 impl SimpleDurableEngine {
     pub async fn load(
-        descriptor: &ExportDescriptor,
+        descriptor: &ActiveExportDescriptor,
         blob_store: LocalBlobStore,
         catalog: Arc<dyn SimpleTreeMetadataStore>,
     ) -> Result<Self> {
@@ -71,7 +71,7 @@ impl SimpleDurableEngine {
     }
 
     async fn from_loaded_tree(
-        descriptor: &ExportDescriptor,
+        descriptor: &ActiveExportDescriptor,
         blob_store: LocalBlobStore,
         tree: SimpleMutableTree,
     ) -> Result<Self> {
@@ -484,7 +484,7 @@ impl LocalBlobStore {
 impl SimpleMutableTree {
     pub async fn load(
         catalog: Arc<dyn SimpleTreeMetadataStore>,
-        descriptor: &ExportDescriptor,
+        descriptor: &ActiveExportDescriptor,
     ) -> Result<Self> {
         tracing::debug!(
             target: target::CATALOG,

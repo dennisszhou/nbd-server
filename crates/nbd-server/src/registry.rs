@@ -7,8 +7,8 @@ use crate::{
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    CowTreeMetadataStore, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportId, ExportName,
-    ExportRecord, SimpleTreeMetadataStore,
+    ActiveExportDescriptor, CowTreeMetadataStore, ExportCatalog, ExportEngineKind, ExportId,
+    ExportName, ExportRecord, SimpleTreeMetadataStore,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -284,7 +284,10 @@ impl ExportFactory {
         self.config.export_queue_depth.get()
     }
 
-    pub async fn open_export(&self, descriptor: ExportDescriptor) -> Result<ExportRuntimeHandle> {
+    pub async fn open_export(
+        &self,
+        descriptor: ActiveExportDescriptor,
+    ) -> Result<ExportRuntimeHandle> {
         let opened = self.open_engine(&descriptor).await?;
         let meta = opened.meta;
         let engine = opened.engine;
@@ -315,7 +318,7 @@ impl ExportFactory {
         Ok(runtime)
     }
 
-    async fn open_engine(&self, descriptor: &ExportDescriptor) -> Result<OpenedEngine> {
+    async fn open_engine(&self, descriptor: &ActiveExportDescriptor) -> Result<OpenedEngine> {
         let opened = match descriptor.engine_kind() {
             ExportEngineKind::Memory => {
                 let head = self

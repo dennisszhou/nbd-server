@@ -3,7 +3,9 @@ use crate::{
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult, Result,
     ServerError,
 };
-use nbd_control_plane::{ExportDescriptor, ExportHead, ExportLayoutKind, ExportName, ExportRecord};
+use nbd_control_plane::{
+    ActiveExportDescriptor, ExportHead, ExportLayoutKind, ExportName, ExportRecord,
+};
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::ptr;
@@ -64,7 +66,7 @@ impl MemoryExportEngine {
         Self::from_export_head(meta.name().clone(), meta.block_size(), meta.head())
     }
 
-    pub fn from_descriptor(descriptor: &ExportDescriptor, head: &ExportHead) -> Result<Self> {
+    pub fn from_descriptor(descriptor: &ActiveExportDescriptor, head: &ExportHead) -> Result<Self> {
         Self::from_export_head(descriptor.name().clone(), descriptor.block_size(), head)
     }
 

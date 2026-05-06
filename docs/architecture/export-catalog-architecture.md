@@ -110,6 +110,8 @@ struct ExportDescriptor {
     deleted_at: Option<Timestamp>,
 }
 
+struct ActiveExportDescriptor(ExportDescriptor);
+
 struct ExportRecord {
     id: ExportId,
     name: ExportName,
@@ -155,10 +157,13 @@ enum ExportState {
 }
 ```
 
-`ExportDescriptor` is exports-only metadata for open paths. It must not carry
-`export_heads` root or checkpoint state. Durable engines load their current
-head/tree snapshot separately so compaction can advance `export_heads` without
-invalidating an open already holding a descriptor.
+`ExportDescriptor` is exports-only row metadata. It must not carry
+`export_heads` root or checkpoint state.
+
+`ActiveExportDescriptor` is the serving/open capability. It wraps an active
+descriptor after the catalog has rejected deleted exports. Durable engines load
+their current head/tree snapshot separately so compaction can advance
+`export_heads` without invalidating an open already holding a descriptor.
 
 `ExportRecord` remains the operator-facing joined view used by create, inspect,
 list, and publication outcomes.
@@ -180,6 +185,11 @@ struct CreateExport {
 struct CloneExport {
     source: ExportName,
     destination: ExportName,
+}
+
+struct CloneExportResult {
+    source: ExportRecord,
+    destination: ExportRecord,
 }
 
 struct DeleteExport {
@@ -242,7 +252,7 @@ trait ExportCatalog {
         -> Result<ExportRecord>;
 
     async fn clone_export(&self, request: CloneExport)
-        -> Result<ExportRecord>;
+        -> Result<CloneExportResult>;
 
     async fn delete_export(&self, request: DeleteExport)
         -> Result<()>;
@@ -251,7 +261,7 @@ trait ExportCatalog {
         -> Result<ExportRecord>;
 
     async fn load_export_descriptor(&self, name: ExportName)
-        -> Result<ExportDescriptor>;
+        -> Result<ActiveExportDescriptor>;
 
     async fn load_export_head(&self, export_id: &ExportId)
         -> Result<ExportHead>;

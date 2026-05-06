@@ -1,12 +1,13 @@
 //! SQLite implementation of the export catalog.
 
 use crate::{
-    BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex, CloneExport, CloneExportResult,
-    CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, DeleteExport, ExportCatalog,
-    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
-    ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-    PublishCompactionOutcome, Result, SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot,
-    Timestamp, WalSeq, SIMPLE_CHUNK_BYTES, TREE_CHUNK_BYTES,
+    ActiveExportDescriptor, BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex,
+    CloneExport, CloneExportResult, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot,
+    CreateExport, DeleteExport, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportHead,
+    ExportId, ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports,
+    NodeId, PublishCompaction, PublishCompactionOutcome, Result, SimpleChunkRef,
+    SimpleTreeMetadataStore, SimpleTreeSnapshot, Timestamp, WalSeq, SIMPLE_CHUNK_BYTES,
+    TREE_CHUNK_BYTES,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
@@ -300,13 +301,9 @@ impl ExportCatalog for SQLiteExportCatalog {
         }
     }
 
-    async fn load_export_descriptor(&self, name: ExportName) -> Result<ExportDescriptor> {
+    async fn load_export_descriptor(&self, name: ExportName) -> Result<ActiveExportDescriptor> {
         let descriptor = self.fetch_descriptor_by_name(&name).await?;
-        if descriptor.state() == ExportState::Deleted {
-            Err(CatalogError::ExportDeleted { name })
-        } else {
-            Ok(descriptor)
-        }
+        ActiveExportDescriptor::new(descriptor)
     }
 
     async fn load_export_head(&self, export_id: &ExportId) -> Result<ExportHead> {

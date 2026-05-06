@@ -40,13 +40,12 @@ boundaries.
 Use structured records instead of passing many loose fields.
 
 ```rust
-struct ActiveExportRecord {
-    export_id: ExportId,
-    name: ExportName,
-    layout_kind: ExportLayoutKind,
-    root_node_id: Option<NodeId>,
-    size_bytes: u64,
-    base_wal_seq: WalSeq,
+struct ActiveExportDescriptor {
+    descriptor: ExportDescriptor,
+}
+
+struct LocalActiveExport {
+    descriptor: ActiveExportDescriptor,
     connection_id: ConnectionId,
     lease: ExportLeaseSnapshot,
     opened_at: Timestamp,
@@ -79,7 +78,7 @@ enum ActiveExportState {
 }
 
 struct RegisterExport {
-    export: ExportRecord,
+    descriptor: ActiveExportDescriptor,
     connection_id: ConnectionId,
     lease: ExportLeaseSnapshot,
 }
@@ -115,9 +114,9 @@ impl LocalExportRegistry {
         -> Result<()>;
 
     async fn get_local_active(&self, name: ExportName)
-        -> Result<Option<ActiveExportRecord>>;
+        -> Result<Option<LocalActiveExport>>;
 
-    async fn list_local_active(&self) -> Result<Vec<ActiveExportRecord>>;
+    async fn list_local_active(&self) -> Result<Vec<LocalActiveExport>>;
 
     async fn current_local_lease(&self, name: ExportName)
         -> Result<Option<ExportLeaseSnapshot>>;
@@ -188,7 +187,7 @@ Recovery after lease loss is out of scope for this architecture pass.
 NBD_OPT_GO(export_name)
   -> ExportLifecycleManager.begin_open(export_name)
        -> acquire serving lease
-       -> load and validate exports-only descriptor
+       -> load ActiveExportDescriptor
   -> LocalExportRegistry.register(..., lease, state = Opening)
   -> initialize Export components from latest head/tree snapshot
   -> replay WAL into ExportReadView
@@ -201,7 +200,7 @@ lease while potentially slow recovery work is running. If initialization or WAL
 replay fails after `begin_open` succeeds, the open path must unregister the
 local record and release the lease before returning failure.
 
-The descriptor loaded during `begin_open` is stable export identity and
+The active descriptor loaded during `begin_open` is stable export identity and
 configuration from `exports`; it is not the current serving head. Engines that
 depend on durable state load the latest head/tree snapshot while constructing
 their serving state. This keeps background compaction or future resize work
@@ -269,11 +268,11 @@ registry every 30 seconds and refresh each serving lease.
 The lease layer should derive from active registry state:
 
 ```text
-ActiveExportRecord -> lease renewal task
+LocalActiveExport -> lease renewal task
 unregister/close -> stop renewing lease
 ```
 
-Lease state is operational routing truth, not durable export recorddata.
+Lease state is operational routing truth, not durable export record data.
 After each successful renewal, the lease snapshot in both
 `LocalExportRegistry` and the active `Export` must be updated.
 
