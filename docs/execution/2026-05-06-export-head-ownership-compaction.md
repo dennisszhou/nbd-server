@@ -1,11 +1,11 @@
 Title: Export Head Ownership And Compaction Execution
 Date: 2026-05-06
-Status: approved
+Status: finished
 Approval:
 - overall doc approved: yes
-- current state: Series 3 finished; Series 4 is approved and current
+- current state: complete
 Completion:
-- execution complete: no
+- execution complete: yes
 
 ## Goal
 
@@ -550,7 +550,7 @@ view, a successful full compaction resets WAL debt to zero, compaction failure
 after a durable write does not fail the write, and a second write waits behind
 compaction rather than racing against the base transition.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
@@ -565,6 +565,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Not included: write backoff, generational compaction, manual operator
 compaction, active read-view retention across processes, or orphan blob GC.
+
+Completed commits:
+
+- `4ff983f wal_durable: track WAL replay debt`
+- `f01d331 wal_durable: compact writes over debt threshold`
+
+Completed verification:
+
+```text
+cargo test -p nbd-server --test wal_durable --test compaction \
+  --test local_export_registry
+make test-protocol
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+Review: `$review-series` found no correctness findings. Remaining future work
+is outside this execution effort: write backoff, generational compaction,
+manual operator compaction, active read-view retention across processes, and
+orphan blob garbage collection.
 
 ### Series 4 Commit Plan
 
