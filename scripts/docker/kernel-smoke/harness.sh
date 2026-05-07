@@ -97,10 +97,32 @@ start_server() {
 
 stop_server() {
     if [ -n "${SERVER_PID}" ]; then
-        kill "${SERVER_PID}" >/dev/null 2>&1
+        kill -INT "${SERVER_PID}" >/dev/null 2>&1
+        if ! wait_for_process_exit "${SERVER_PID}"; then
+            echo "timed out waiting for graceful server stop; sending SIGTERM" >&2
+            kill "${SERVER_PID}" >/dev/null 2>&1
+        fi
         wait "${SERVER_PID}" >/dev/null 2>&1 || true
         SERVER_PID=""
     fi
+}
+
+wait_for_process_exit() {
+    local pid="$1"
+
+    for _ in $(seq 1 100); do
+        if ! kill -0 "${pid}" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ -r "/proc/${pid}/stat" ] &&
+            awk '$3 == "Z" { found = 1 } END { exit found ? 0 : 1 }' \
+                "/proc/${pid}/stat"; then
+            return 0
+        fi
+        sleep 0.05
+    done
+
+    return 1
 }
 
 connect_device() {
