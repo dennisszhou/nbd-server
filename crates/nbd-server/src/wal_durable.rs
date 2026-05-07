@@ -3,10 +3,10 @@ use crate::{
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
     ExportWalHandle, Result, ServerError, WalRecord, WalRequest,
     compaction::{CompactionOutcome, CompactionResult, CowCompactor},
+    engines::tree::{Block, BlockPart, TreeReader},
     extent_map::ExtentMap,
     observability::{self, event, target},
     read_cache::{CacheInsertPlacement, ReadCache},
-    tree_reader::{Block, BlockPart, TreeReader},
 };
 use bytes::Bytes;
 use nbd_control_plane::{

@@ -1,4 +1,5 @@
-use crate::{ByteRange, Result, ServerError};
+use crate::error::{Result, ServerError};
+use crate::range::ByteRange;
 use bytes::Bytes;
 use std::fmt;
 
