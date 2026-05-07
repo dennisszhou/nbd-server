@@ -5,12 +5,10 @@
 mod compaction;
 mod connection;
 
+mod engines;
 mod error;
 mod export;
 mod extent_map;
-// The memory module owns the admitted unsafe byte-storage boundary.
-#[allow(unsafe_code)]
-mod memory;
 pub mod observability;
 mod range;
 mod read_cache;
@@ -23,6 +21,7 @@ mod wal;
 mod wal_durable;
 
 pub use compaction::{CompactionOutcome, CompactionResult, CowCompactor};
+pub use engines::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
 pub use error::{Result, ServerError};
 pub use export::{
     AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, AdmittedExportRequest,
@@ -32,7 +31,6 @@ pub use export::{
     ExportResult, ExportRuntime, ExportRuntimeHandle, OwnedAdmittedExportRequest, RequestCookie,
     RequestSequence, SerialExportRuntime,
 };
-pub use memory::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
 pub use range::ByteRange;
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use server::NbdServer;

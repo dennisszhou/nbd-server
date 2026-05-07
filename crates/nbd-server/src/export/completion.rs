@@ -143,7 +143,7 @@ impl ExportJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExportReply, ExportRuntime, SerialExportRuntime, memory::MemoryExportEngine};
+    use crate::{ExportReply, ExportRuntime, MemoryExportEngine, SerialExportRuntime};
     use nbd_control_plane::{
         ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
     };
