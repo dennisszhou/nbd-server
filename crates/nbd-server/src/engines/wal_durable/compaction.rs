@@ -1,4 +1,6 @@
-use crate::{BlobStore, BlobStoreHandle, ExportWalHandle, Result, ServerError, put_random_blob};
+use crate::error::{Result, ServerError};
+use crate::storage::{BlobStore, BlobStoreHandle, put_random_blob};
+use crate::wal::ExportWalHandle;
 use nbd_control_plane::{
     ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportId,
     ExportLayoutKind, PublishCompaction, PublishCompactionOutcome, TREE_CHUNK_BYTES, WalSeq,

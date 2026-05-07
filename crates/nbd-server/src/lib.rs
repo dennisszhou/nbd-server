@@ -2,26 +2,22 @@
 
 #![deny(unsafe_code)]
 
-mod compaction;
 mod connection;
 
 mod engines;
 mod error;
 mod export;
-mod extent_map;
 pub mod observability;
 mod range;
-mod read_cache;
 mod registry;
 mod server;
 mod storage;
 mod wal;
-mod wal_durable;
 
-pub use compaction::{CompactionOutcome, CompactionResult, CowCompactor};
 pub use engines::{
-    MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine,
-    SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree,
+    CompactionOutcome, CompactionResult, CowCompactor, ExportReadView, MAX_MEMORY_EXPORT_BYTES,
+    MemoryAdmissionPolicy, MemoryExportEngine, RootSnapshot, SimpleDurableAdmissionPolicy,
+    SimpleDurableEngine, SimpleMutableTree, WalDurableAdmissionPolicy, WalDurableEngine,
 };
 pub use error::{Result, ServerError};
 pub use export::{
@@ -43,4 +39,3 @@ pub use wal::{
     ExportWal, ExportWalHandle, LocalExportWal, LocalWalProvider, OpenWal, WalBounds, WalDomain,
     WalProvider, WalPruneResult, WalRecord, WalReplay, WalRequest,
 };
-pub use wal_durable::{ExportReadView, RootSnapshot, WalDurableAdmissionPolicy, WalDurableEngine};

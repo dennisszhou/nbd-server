@@ -1,38 +1,21 @@
-use crate::{
-    AdmissionOp, AdmittedExportRequest, BlobStoreHandle, ByteRange, ExportAdmissionPolicy,
-    ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
-    ExportWalHandle, Result, ServerError, WalRecord, WalRequest,
-    compaction::{CompactionOutcome, CompactionResult, CowCompactor},
-    engines::tree::{Block, BlockPart, TreeReader},
-    extent_map::ExtentMap,
-    observability::{self, event, target},
+use super::{
+    overlay::{OverlayExtentMap, OverlayReadSlice},
     read_cache::{CacheInsertPlacement, ReadCache},
 };
+use crate::engines::tree::{Block, BlockPart, TreeReader};
+use crate::error::{Result, ServerError};
+use crate::range::ByteRange;
+use crate::storage::BlobStoreHandle;
+use crate::wal::WalRecord;
 use bytes::Bytes;
 use nbd_control_plane::{
-    ActiveExportDescriptor, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportId,
-    ExportLayoutKind, ExportName, ExportRecord, NodeId, TREE_CHUNK_BYTES, WalSeq,
+    CowTreeSnapshot, ExportHead, ExportLayoutKind, ExportRecord, NodeId, TREE_CHUNK_BYTES, WalSeq,
 };
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
-/// WAL-backed durable engine using a retained WAL overlay over committed state.
-pub struct WalDurableEngine {
-    name: ExportName,
-    size_bytes: u64,
-    block_size: u64,
-    wal: ExportWalHandle,
-    read_view: Arc<ExportReadView>,
-    compaction: Option<CompactionCoordinator>,
-    wal_debt_threshold_bytes: u64,
-    write_lock: Mutex<()>,
-}
-
-#[derive(Debug)]
-pub struct WalDurableAdmissionPolicy {
-    size_bytes: u64,
-}
+const DEFAULT_READ_CACHE_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Catalog head snapshot used as the committed read baseline.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,480 +48,16 @@ struct ExportReadViewState {
     cache: ReadCache,
 }
 
-/// Engine-local compaction lifecycle for one open WAL durable export.
-struct CompactionCoordinator {
-    export_id: ExportId,
-    export_name: ExportName,
-    catalog: Arc<dyn CowTreeMetadataStore>,
-    wal: ExportWalHandle,
-    compactor: CowCompactor,
-    read_view: Arc<ExportReadView>,
-    compaction_lock: Mutex<()>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OverlayExtentMap {
-    extents: ExtentMap<OverlayExtent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OverlayExtent {
-    seq: WalSeq,
-    record: Arc<WalRecord>,
-    record_offset: u64,
-}
-
-#[derive(Debug, Clone)]
-struct OverlayReadSlice {
-    start: u64,
-    end: u64,
-    record: Arc<WalRecord>,
-    record_offset: u64,
-}
-
-#[derive(Debug, Clone)]
-struct RetiredOverlayExtent {
-    start: u64,
-    end: u64,
-    seq: WalSeq,
-    record: Arc<WalRecord>,
-    record_offset: u64,
-}
-
-const DEFAULT_READ_CACHE_BYTES: usize = 1024 * 1024 * 1024;
-const DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct WalReplaySummary {
-    replayed_records: u64,
-    replayed_through_wal_seq: WalSeq,
-}
+#[derive(Debug)]
+pub(super) struct ZeroTreeReader;
 
 #[derive(Debug)]
-struct ZeroTreeReader;
-
-#[derive(Debug)]
-struct CowTreeReader {
-    blob_store: BlobStoreHandle,
-}
-
-impl WalDurableEngine {
-    pub async fn open(meta: &ExportRecord, wal: ExportWalHandle) -> Result<Self> {
-        if meta.head().layout_kind() != ExportLayoutKind::CowImmutableTree {
-            return Err(ServerError::Catalog {
-                message: format!(
-                    "export `{}` does not have a cow immutable tree head",
-                    meta.name()
-                ),
-                source: None,
-            });
-        }
-        if meta.head().root_node_id().is_some() {
-            return Err(ServerError::Catalog {
-                message: format!(
-                    "export `{}` has a committed COW root that is not readable yet",
-                    meta.name()
-                ),
-                source: None,
-            });
-        }
-
-        let root = RootSnapshot::from_meta(meta);
-        log_root_loaded(meta.id(), meta.name(), &root);
-        let read_view = Arc::new(ExportReadView::zero_filled(root.clone()));
-        let replay = replay_wal_after(&wal, read_view.as_ref(), &root).await?;
-        log_replay_completed(meta.id(), meta.name(), &root, replay);
-
-        Ok(Self {
-            name: meta.name().clone(),
-            size_bytes: meta.size_bytes(),
-            block_size: meta.block_size(),
-            wal,
-            read_view,
-            compaction: None,
-            wal_debt_threshold_bytes: DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
-            write_lock: Mutex::new(()),
-        })
-    }
-
-    pub async fn open_with_cow_tree(
-        descriptor: &ActiveExportDescriptor,
-        wal: ExportWalHandle,
-        blob_store: BlobStoreHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
-    ) -> Result<Self> {
-        Self::open_with_cow_tree_and_wal_debt_threshold(
-            descriptor,
-            wal,
-            blob_store,
-            catalog,
-            DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
-        )
-        .await
-    }
-
-    #[doc(hidden)]
-    pub async fn open_with_cow_tree_and_wal_debt_threshold(
-        descriptor: &ActiveExportDescriptor,
-        wal: ExportWalHandle,
-        blob_store: BlobStoreHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
-        wal_debt_threshold_bytes: u64,
-    ) -> Result<Self> {
-        if descriptor.engine_kind() != nbd_control_plane::ExportEngineKind::WalDurable {
-            return Err(ServerError::Catalog {
-                message: format!("export `{}` is not a wal_durable export", descriptor.name()),
-                source: None,
-            });
-        }
-
-        let snapshot = catalog
-            .load_cow_tree(descriptor.id())
-            .await
-            .map_err(ServerError::catalog)?;
-        validate_snapshot_can_open(descriptor, &snapshot)?;
-        let size_bytes = snapshot.size_bytes();
-        let root = RootSnapshot::from_cow_snapshot(snapshot);
-        log_root_loaded(descriptor.id(), descriptor.name(), &root);
-        let read_view = Arc::new(ExportReadView::new(
-            root.clone(),
-            Arc::new(CowTreeReader {
-                blob_store: blob_store.clone(),
-            }),
-        ));
-        let replay = replay_wal_after(&wal, read_view.as_ref(), &root).await?;
-        log_replay_completed(descriptor.id(), descriptor.name(), &root, replay);
-        let compaction = CompactionCoordinator::new(
-            descriptor.id().clone(),
-            descriptor.name().clone(),
-            wal.clone(),
-            catalog,
-            blob_store,
-            read_view.clone(),
-        );
-
-        Ok(Self {
-            name: descriptor.name().clone(),
-            size_bytes,
-            block_size: descriptor.block_size(),
-            wal,
-            read_view,
-            compaction: Some(compaction),
-            wal_debt_threshold_bytes,
-            write_lock: Mutex::new(()),
-        })
-    }
-
-    pub fn name(&self) -> &ExportName {
-        &self.name
-    }
-
-    pub fn size_bytes(&self) -> u64 {
-        self.size_bytes
-    }
-
-    pub fn block_size(&self) -> u64 {
-        self.block_size
-    }
-
-    pub async fn export_head(&self) -> Result<ExportHead> {
-        self.read_view.export_head().await
-    }
-
-    pub async fn wal_debt_bytes(&self) -> u64 {
-        self.read_view.wal_debt_bytes().await
-    }
-
-    async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
-        let range = ByteRange::new(offset, len);
-        validate_range("read", range, self.size_bytes)?;
-        self.read_view.read(range).await
-    }
-
-    async fn write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
-        validate_request_range("write", offset, data.len() as u64, self.size_bytes)?;
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        let len = u32::try_from(data.len()).map_err(|_| ServerError::OutOfBounds {
-            operation: "write",
-            offset,
-            length: data.len() as u64,
-            size_bytes: self.size_bytes,
-        })?;
-        let range = ByteRange::new(offset, len);
-        let request = WalRequest::new(range, data)?;
-        let _write = self.write_lock.lock().await;
-        let record = self.wal.append(request).await?;
-        self.read_view.apply_wal_record(record).await?;
-        self.compact_if_wal_debt_exceeds_threshold().await;
-        Ok(())
-    }
-
-    fn flush(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn compact_if_wal_debt_exceeds_threshold(&self) {
-        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
-        if wal_debt_bytes < self.wal_debt_threshold_bytes {
-            return;
-        }
-        let Some(compaction) = &self.compaction else {
-            return;
-        };
-
-        let target_wal_seq = self.read_view.last_applied_seq().await;
-        compaction
-            .compact_best_effort(target_wal_seq, wal_debt_bytes, "write_pressure")
-            .await;
-    }
-}
-
-impl WalDurableAdmissionPolicy {
-    pub fn new(size_bytes: u64) -> Self {
-        Self { size_bytes }
-    }
-}
-
-impl ExportAdmissionPolicy for WalDurableAdmissionPolicy {
-    fn operation_for(&self, request: &ExportRequest) -> Result<AdmissionOp> {
-        match request {
-            ExportRequest::Read { offset, len } => {
-                Ok(AdmissionOp::Read(ByteRange::new(*offset, *len)))
-            }
-            ExportRequest::Write { offset, data } => {
-                let len = u32::try_from(data.len()).map_err(|_| ServerError::OutOfBounds {
-                    operation: "write",
-                    offset: *offset,
-                    length: data.len() as u64,
-                    size_bytes: self.size_bytes,
-                })?;
-                Ok(AdmissionOp::Write(ByteRange::new(*offset, len)))
-            }
-            ExportRequest::Flush => Ok(AdmissionOp::Flush),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ExportEngine for WalDurableEngine {
-    fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
-        Arc::new(WalDurableAdmissionPolicy::new(self.size_bytes))
-    }
-
-    async fn execute_admitted(&self, request: AdmittedExportRequest) -> ExportResult {
-        match request.request() {
-            ExportRequest::Read { offset, len } => Ok(ExportReply::Read {
-                data: self.read(*offset, *len).await?,
-            }),
-            ExportRequest::Write { .. } => {
-                let mut owned = request.into_owned();
-                let ExportRequest::Write { offset, data } = owned.take_request() else {
-                    unreachable!("matched write request before taking ownership");
-                };
-                self.write(offset, data).await?;
-                Ok(ExportReply::Done)
-            }
-            ExportRequest::Flush => {
-                self.flush()?;
-                Ok(ExportReply::Done)
-            }
-        }
-    }
-
-    async fn close(&self) -> Result<()> {
-        if let Some(compaction) = &self.compaction {
-            compaction.compact_close_best_effort().await;
-        }
-        Ok(())
-    }
-}
-
-impl CompactionCoordinator {
-    fn new(
-        export_id: ExportId,
-        export_name: ExportName,
-        wal: ExportWalHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
-        blob_store: BlobStoreHandle,
-        read_view: Arc<ExportReadView>,
-    ) -> Self {
-        let compactor = CowCompactor::new(catalog.clone(), blob_store);
-        Self {
-            export_id,
-            export_name,
-            catalog,
-            wal,
-            compactor,
-            read_view,
-            compaction_lock: Mutex::new(()),
-        }
-    }
-
-    async fn compact_close_best_effort(&self) {
-        let target_wal_seq = self.read_view.last_applied_seq().await;
-        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
-        self.compact_best_effort(target_wal_seq, wal_debt_bytes, "engine_close")
-            .await;
-    }
-
-    async fn compact_best_effort(
-        &self,
-        target_wal_seq: WalSeq,
-        wal_debt_bytes: u64,
-        phase: &'static str,
-    ) {
-        match self.compact_through(target_wal_seq).await {
-            Ok(result) => log_compaction_completed(&self.export_name, &result, phase),
-            Err(error) => {
-                tracing::warn!(
-                    target: target::WAL,
-                    event = event::WAL_COMPACTION_FAILED,
-                    service = observability::SERVICE_NAME,
-                    server_instance_id = observability::server_instance_id(),
-                    pid = observability::pid(),
-                    export_id = %self.export_id,
-                    export_name = %self.export_name,
-                    target_wal_seq = target_wal_seq.get(),
-                    wal_debt_bytes,
-                    phase,
-                    error = %error,
-                );
-            }
-        }
-    }
-
-    async fn compact_through(&self, target_wal_seq: WalSeq) -> Result<CompactionResult> {
-        let _compaction = self.compaction_lock.lock().await;
-        let result = self
-            .compactor
-            .compact_export(&self.export_id, &self.wal, target_wal_seq)
-            .await?;
-        self.advance_after_compaction(&result).await?;
-        Ok(result)
-    }
-
-    async fn advance_after_compaction(&self, result: &CompactionResult) -> Result<()> {
-        match result.outcome() {
-            CompactionOutcome::Published | CompactionOutcome::AlreadyCovered => {
-                let snapshot = self
-                    .catalog
-                    .load_cow_tree(&self.export_id)
-                    .await
-                    .map_err(ServerError::catalog)?;
-                let root = RootSnapshot::from_cow_snapshot(snapshot);
-                let prune_through = root.base_wal_seq();
-                self.read_view.advance_root(root).await?;
-                self.prune_published_wal(prune_through).await;
-            }
-            CompactionOutcome::StalePlan | CompactionOutcome::NoRecords => {}
-        }
-        Ok(())
-    }
-
-    async fn prune_published_wal(&self, prune_through: WalSeq) {
-        if let Err(error) = self.wal.prune_through(prune_through).await {
-            tracing::warn!(
-                target: target::WAL,
-                event = event::WAL_COMPACTION_FAILED,
-                service = observability::SERVICE_NAME,
-                server_instance_id = observability::server_instance_id(),
-                pid = observability::pid(),
-                export_id = %self.export_id,
-                export_name = %self.export_name,
-                target_wal_seq = prune_through.get(),
-                phase = "wal_prune",
-                error = %error,
-            );
-        }
-    }
-}
-
-async fn replay_wal_after(
-    wal: &ExportWalHandle,
-    read_view: &ExportReadView,
-    root: &RootSnapshot,
-) -> Result<WalReplaySummary> {
-    let mut replay = wal.replay_after(root.base_wal_seq()).await?;
-    let mut replayed_records = 0u64;
-    let mut replayed_through_wal_seq = root.base_wal_seq();
-    while let Some(record) = replay.next_record().await? {
-        replayed_records += 1;
-        replayed_through_wal_seq = record.seq();
-        read_view.apply_wal_record(record).await?;
-    }
-
-    Ok(WalReplaySummary {
-        replayed_records,
-        replayed_through_wal_seq,
-    })
-}
-
-fn log_root_loaded(
-    export_id: &nbd_control_plane::ExportId,
-    name: &ExportName,
-    root: &RootSnapshot,
-) {
-    tracing::info!(
-        target: target::WAL,
-        event = event::WAL_ROOT_LOADED,
-        service = observability::SERVICE_NAME,
-        server_instance_id = observability::server_instance_id(),
-        pid = observability::pid(),
-        export_id = %export_id,
-        export_name = %name,
-        root_node_id = root_node_id_for_log(root),
-        base_wal_seq = root.base_wal_seq().get(),
-        size_bytes = root.size_bytes(),
-    );
-}
-
-fn log_replay_completed(
-    export_id: &nbd_control_plane::ExportId,
-    name: &ExportName,
-    root: &RootSnapshot,
-    replay: WalReplaySummary,
-) {
-    tracing::info!(
-        target: target::WAL,
-        event = event::WAL_REPLAY_COMPLETED,
-        service = observability::SERVICE_NAME,
-        server_instance_id = observability::server_instance_id(),
-        pid = observability::pid(),
-        export_id = %export_id,
-        export_name = %name,
-        base_wal_seq = root.base_wal_seq().get(),
-        replayed_records = replay.replayed_records,
-        replayed_through_wal_seq = replay.replayed_through_wal_seq.get(),
-    );
-}
-
-fn log_compaction_completed(name: &ExportName, result: &CompactionResult, phase: &'static str) {
-    tracing::info!(
-        target: target::WAL,
-        event = event::WAL_COMPACTION_COMPLETED,
-        service = observability::SERVICE_NAME,
-        server_instance_id = observability::server_instance_id(),
-        pid = observability::pid(),
-        export_id = %result.export_id(),
-        export_name = %name,
-        base_wal_seq = result.base_wal_seq().get(),
-        target_wal_seq = result.target_wal_seq().get(),
-        compacted_records = result.compacted_records(),
-        written_leaf_blobs = result.written_leaf_blobs(),
-        outcome = ?result.outcome(),
-        phase,
-    );
-}
-
-fn root_node_id_for_log(root: &RootSnapshot) -> &str {
-    root.root_node_id().map(NodeId::as_str).unwrap_or("<empty>")
+pub(super) struct CowTreeReader {
+    pub(super) blob_store: BlobStoreHandle,
 }
 
 impl RootSnapshot {
-    fn from_meta(meta: &ExportRecord) -> Self {
+    pub(super) fn from_meta(meta: &ExportRecord) -> Self {
         Self {
             backing: RootBacking::Zero {
                 root_node_id: meta.head().root_node_id().cloned(),
@@ -548,7 +67,7 @@ impl RootSnapshot {
         }
     }
 
-    fn from_cow_snapshot(snapshot: CowTreeSnapshot) -> Self {
+    pub(super) fn from_cow_snapshot(snapshot: CowTreeSnapshot) -> Self {
         Self {
             backing: RootBacking::CowTree(Arc::new(snapshot)),
         }
@@ -586,7 +105,7 @@ impl RootSnapshot {
         }
     }
 
-    fn to_export_head(&self) -> Result<ExportHead> {
+    pub(super) fn to_export_head(&self) -> Result<ExportHead> {
         ExportHead::new(
             ExportLayoutKind::CowImmutableTree,
             self.root_node_id().cloned(),
@@ -597,116 +116,12 @@ impl RootSnapshot {
     }
 }
 
-impl OverlayExtentMap {
-    fn new() -> Self {
-        Self {
-            extents: ExtentMap::new(),
-        }
-    }
-
-    fn insert_record(&mut self, record: Arc<WalRecord>) -> Result<()> {
-        let range = record.range();
-        let start = range.start();
-        let end = range_end(range);
-        self.extents.insert_overwrite_with_split(
-            start,
-            end,
-            OverlayExtent {
-                seq: record.seq(),
-                record,
-                record_offset: 0,
-            },
-            |extent, delta| extent.split_at(delta),
-        )?;
-        Ok(())
-    }
-
-    fn read_slices(&self, range: ByteRange) -> Result<Vec<OverlayReadSlice>> {
-        let read_start = range.start();
-        let read_end = range_end(range);
-        self.extents
-            .overlapping(read_start, read_end)?
-            .into_iter()
-            .map(|extent| {
-                let start = read_start.max(extent.start());
-                let end = read_end.min(extent.end());
-                let record_offset = extent
-                    .value()
-                    .record_offset
-                    .checked_add(start - extent.start())
-                    .ok_or_else(|| {
-                        ServerError::wal("read overlay extent", "record offset overflowed")
-                    })?;
-                Ok(OverlayReadSlice {
-                    start,
-                    end,
-                    record: extent.value().record.clone(),
-                    record_offset,
-                })
-            })
-            .collect()
-    }
-
-    fn visible_through(&self, seq: WalSeq) -> Vec<RetiredOverlayExtent> {
-        let mut retired = self
-            .extents
-            .iter()
-            .filter_map(|extent| {
-                (extent.value().seq <= seq).then(|| RetiredOverlayExtent {
-                    start: extent.start(),
-                    end: extent.end(),
-                    seq: extent.value().seq,
-                    record: extent.value().record.clone(),
-                    record_offset: extent.value().record_offset,
-                })
-            })
-            .collect::<Vec<_>>();
-        retired.sort_by_key(|extent| (extent.seq, extent.start));
-        retired
-    }
-
-    fn remove_retired(&mut self, retired: &[RetiredOverlayExtent]) -> Result<()> {
-        for extent in retired {
-            self.extents
-                .remove_range_with_split(extent.start, extent.end, |overlay, delta| {
-                    overlay.split_at(delta)
-                })?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn debug_extents(&self) -> Vec<(u64, u64, WalSeq, u64)> {
-        self.extents
-            .iter()
-            .map(|extent| {
-                (
-                    extent.start(),
-                    extent.end(),
-                    extent.value().seq,
-                    extent.value().record_offset,
-                )
-            })
-            .collect()
-    }
-}
-
-impl OverlayExtent {
-    fn split_at(&self, delta: u64) -> Self {
-        Self {
-            seq: self.seq,
-            record: self.record.clone(),
-            record_offset: self.record_offset + delta,
-        }
-    }
-}
-
 impl ExportReadView {
-    fn zero_filled(root: RootSnapshot) -> Self {
+    pub(super) fn zero_filled(root: RootSnapshot) -> Self {
         Self::new(root, Arc::new(ZeroTreeReader))
     }
 
-    fn new(root: RootSnapshot, tree_reader: Arc<dyn TreeReader<RootSnapshot>>) -> Self {
+    pub(super) fn new(root: RootSnapshot, tree_reader: Arc<dyn TreeReader<RootSnapshot>>) -> Self {
         Self::new_with_cache_budget(root, tree_reader, DEFAULT_READ_CACHE_BYTES)
     }
 
@@ -728,15 +143,15 @@ impl ExportReadView {
         }
     }
 
-    async fn export_head(&self) -> Result<ExportHead> {
+    pub(super) async fn export_head(&self) -> Result<ExportHead> {
         self.state.read().await.root.to_export_head()
     }
 
-    async fn last_applied_seq(&self) -> WalSeq {
+    pub(super) async fn last_applied_seq(&self) -> WalSeq {
         self.state.read().await.last_applied_seq
     }
 
-    async fn wal_debt_bytes(&self) -> u64 {
+    pub(super) async fn wal_debt_bytes(&self) -> u64 {
         self.state.read().await.wal_debt_bytes
     }
 
@@ -903,16 +318,6 @@ impl ExportReadView {
     }
 }
 
-impl fmt::Debug for WalDurableEngine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WalDurableEngine")
-            .field("name", &self.name)
-            .field("size_bytes", &self.size_bytes)
-            .field("block_size", &self.block_size)
-            .finish_non_exhaustive()
-    }
-}
-
 impl fmt::Debug for ExportReadView {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExportReadView").finish_non_exhaustive()
@@ -977,28 +382,15 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
     }
 }
 
-fn validate_snapshot_can_open(
-    descriptor: &ActiveExportDescriptor,
-    snapshot: &CowTreeSnapshot,
+pub(super) fn validate_range(
+    operation: &'static str,
+    range: ByteRange,
+    size_bytes: u64,
 ) -> Result<()> {
-    if snapshot.export_id() != descriptor.id() {
-        return Err(ServerError::Catalog {
-            message: format!(
-                "COW snapshot export id `{}` does not match export `{}`",
-                snapshot.export_id(),
-                descriptor.id()
-            ),
-            source: None,
-        });
-    }
-    Ok(())
-}
-
-fn validate_range(operation: &'static str, range: ByteRange, size_bytes: u64) -> Result<()> {
     validate_request_range(operation, range.start(), range.len(), size_bytes)
 }
 
-fn validate_request_range(
+pub(super) fn validate_request_range(
     operation: &'static str,
     offset: u64,
     length: u64,
@@ -1022,7 +414,7 @@ fn validate_request_range(
     Ok(())
 }
 
-fn range_end(range: ByteRange) -> u64 {
+pub(super) fn range_end(range: ByteRange) -> u64 {
     range.start().saturating_add(range.len())
 }
 
@@ -1152,7 +544,7 @@ fn gaps_in_range(range: ByteRange, mut spans: Vec<(u64, u64)>) -> Result<Vec<Byt
     Ok(gaps)
 }
 
-fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> {
+pub(super) fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> {
     let len = end
         .checked_sub(start)
         .ok_or_else(|| ServerError::wal("build byte range", "range end before start"))?;
@@ -1541,7 +933,7 @@ mod tests {
     impl TreeReader<RootSnapshot> for CountingTreeReader {
         async fn read_committed(&self, _root: &RootSnapshot, range: ByteRange) -> Result<Block> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            let start = usize::try_from(range.start()).expect("range start fits usize");
+            let start = range.start() as usize;
             let end = start + range.len() as usize;
             Block::new(
                 range,

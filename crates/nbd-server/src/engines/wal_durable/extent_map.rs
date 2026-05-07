@@ -1,4 +1,4 @@
-use crate::{Result, ServerError};
+use crate::error::{Result, ServerError};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

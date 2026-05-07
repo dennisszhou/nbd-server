@@ -1,4 +1,8 @@
-use crate::{ByteRange, Result, ServerError, WalRecord, extent_map::ExtentMap};
+use crate::error::{Result, ServerError};
+use crate::range::ByteRange;
+use crate::wal::WalRecord;
+
+use super::extent_map::ExtentMap;
 use bytes::Bytes;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
