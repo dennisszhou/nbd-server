@@ -147,7 +147,7 @@ impl ExportReadView {
 }
 ```
 
-`BackingReader` is intentionally above `StorageEngine`. `ExportReadView`
+`BackingReader` is intentionally above `BlobStore`. `ExportReadView`
 should not know how to walk sparse tree nodes, but it may own the current
 `RootSnapshot` and pass that snapshot to the backing reader.
 

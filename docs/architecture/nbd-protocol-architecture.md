@@ -163,12 +163,13 @@ reply queue.
 This is a logical ownership boundary. It does not require one OS thread per
 export.
 
-## StorageEngine Runtime
+## BlobStore Runtime
 
-Storage object I/O should be isolated behind a storage runtime or queue with
-bounded concurrency. S3-compatible backends should reuse client/config objects
-so HTTP connection pools, credentials, retries, and timeouts are shared rather
-than recreated per request.
+Blob-store I/O may eventually be isolated behind a storage runtime or queue
+with bounded concurrency. S3-compatible backends should reuse client/config
+objects so HTTP connection pools, credentials, retries, and timeouts are shared
+rather than recreated per request. The current S3 path shares one process-level
+backend object; a queue can wrap that boundary later if needed.
 
 ## Reply Queues
 

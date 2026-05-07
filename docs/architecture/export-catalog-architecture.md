@@ -92,7 +92,9 @@ This avoids creating malformed empty internal nodes.
 writes do not append root history, and future COW checkpoint publication
 should advance the current head rather than reintroducing a generation table.
 
-The catalog stores blob references. Blob bytes live behind `StorageEngine`.
+The catalog stores one-component blob references. Blob bytes live behind the
+configured `BlobStore`, which resolves those ids to local files or S3 objects
+from process config.
 
 # Data Structures
 
@@ -438,7 +440,7 @@ the write durability contract.
 - Delete race prevention belongs to `ExportLifecycleManager`.
 - Delete is logical; physical cleanup belongs to GC.
 - The catalog stores blob references, not blob bytes.
-- Blob bytes live behind `StorageEngine`.
+- Blob bytes live behind the configured `BlobStore`.
 
 # Open Questions
 

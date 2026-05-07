@@ -207,7 +207,7 @@ receive CompactExport(export_id, requested target)
   -> for each affected leaf:
        read committed leaf through base_root only, or zero buffer
        apply WAL records in sequence order
-       write new immutable leaf blob through StorageEngine
+       write new immutable leaf blob through BlobStore
        create new leaf node metadata
   -> create new internal nodes along affected paths
   -> ExportCatalog.publish_compaction(plan base, new tree batch, S)
@@ -251,7 +251,7 @@ Active export:
 Inactive export:
 
 - compaction uses `ExportCatalog`, `WalProvider`, `CommittedTreeReader`, and
-  `StorageEngine`;
+  `BlobStore`;
 - no read-view notification is needed;
 - the next open loads the new root/checkpoint from `ExportCatalog`.
 

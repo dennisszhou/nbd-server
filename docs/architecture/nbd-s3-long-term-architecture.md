@@ -52,7 +52,7 @@ deep discussion:
   - `ExportReadView`, read-through behavior, backing readers, and
     compaction/checkpoint invalidation
 - `docs/architecture/storage-engine-architecture.md`
-  - blobstore API, immutable blobs, local/S3 backend contract, and corruption
+  - `BlobStore` API, immutable blobs, local/S3 backend contract, and corruption
     boundaries
 - `docs/architecture/export-catalog-architecture.md`
   - export lifecycle, catalog data structures, clone/delete behavior, and
@@ -77,7 +77,7 @@ The mature system has three planes:
 
 ```text
 data plane:
-  NBDServer -> Export -> admission/WAL/cache/tree/storage
+  NBDServer -> Export -> admission/WAL/cache/tree/blob store
 
 management plane:
   nbdcli -> ExportLifecycleManager -> ExportCatalog / ExportLeaseStore
@@ -97,7 +97,7 @@ The architecture separates durable truth from serving truth.
 Durable truth:
 
 - durable WAL records that have not been compacted;
-- committed tree/blob state in object storage;
+- committed tree/blob state in configured blob storage;
 - export root, checkpoint, and lifecycle metadata in `ExportCatalog`.
 
 Serving truth:
@@ -193,15 +193,18 @@ nodes, reads immutable 32 MiB leaf blobs, and zero-fills holes. Clone/fork is
 represented by shared immutable tree nodes, not parent-root fallback during
 reads.
 
-## StorageEngine
+## BlobStore
 
-Owns blob I/O only: create, read, ranged read, and delete. It never overwrites
-keys. It does not own export lifecycle, WAL sequencing, compaction policy, tree
-semantics, or metadata interpretation.
+Owns blob I/O only: create and ranged read. The base `BlobStore` contract never
+overwrites keys. Existing-key replacement is a separate `MutableBlobStore`
+capability used only by local mutable storage paths.
 
-The storage runtime owns backend resource pooling and concurrency limits. S3
-backends should reuse client/config objects rather than create per-request
-clients.
+Blob storage does not own export lifecycle, WAL sequencing, compaction policy,
+tree semantics, or metadata interpretation. S3 backends should reuse
+client/config objects rather than create per-request clients. The current
+implementation shares one process-level `S3BlobStore` through `ExportFactory`;
+a future storage runtime can wrap that backend if explicit worker queues or
+backend-wide scheduling become necessary.
 
 ## ExportCatalog
 
@@ -293,7 +296,7 @@ Flush does not need to compact WAL records into committed leaf blobs.
   admission are WAL-durable and read-view-visible.
 - WAL sequence numbers are assigned by `ExportWal`, not admission.
 - Admission tickets are volatile and never used for recovery.
-- `StorageEngine` does not own export semantics.
+- `BlobStore` does not own export semantics.
 - `ExportCatalog` is the durable export metadata source.
 - Open and delete contend on the same per-export lease through
   `ExportLifecycleManager`.
@@ -311,10 +314,10 @@ Flush does not need to compact WAL records into committed leaf blobs.
 - Untagged logical read caches are forbidden.
 - Workqueue admission, completion, cancellation, and shutdown are explicit.
 
-# Prototype Boundary
+# Current Prototype Boundary
 
-Early local prototypes should prove the central data-path invariant without
-requiring the full long-term storage system or distributed lease machinery.
+The current prototype proves the central data-path invariant without requiring
+the full long-term distributed lease machinery.
 
 Include:
 
@@ -325,15 +328,16 @@ Include:
 - `WalProvider` / `ExportWal` with durable local WAL;
 - `WalDurableEngine` read serving from committed COW tree plus retained WAL;
 - local `LocalBlobStore`;
+- feature-gated `S3BlobStore` for WAL durable committed COW blobs;
 - SQLite `ExportCatalog` with `exports`, `export_heads`, simple mutable tree,
   and COW tree metadata;
-- basic `nbdcli` create/list/delete/inspect.
+- basic `nbdcli` create/list/clone/delete/inspect;
+- Docker kernel smoke coverage for local WAL durable and S3/RustFS WAL durable
+  lifecycle paths.
 
 Defer:
 
 - external WAL service;
-- clone/fork;
-- S3/MinIO backend;
 - garbage collection;
 - physical WAL pruning;
 - serving read-view refresh workers;

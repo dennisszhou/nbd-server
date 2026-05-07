@@ -9,7 +9,7 @@ The system needs durable metadata for two related but different tree layouts:
 - `simple_mutable_tree`, the current direct-commit local layout used by
   `SimpleDurableEngine`;
 - `cow_immutable_tree`, the WAL/compaction layout used for clone, checkpoints,
-  and immutable S3-friendly blobs.
+  and immutable local/S3-compatible blobs.
 
 The old version of this document described only the future immutable COW model.
 That made it too easy to read immutable-node and generation rules as if they
@@ -87,7 +87,7 @@ tree_edges
 tree_leaf_refs
   node_id
   storage_kind       -- mutable_blob | immutable_blob
-  storage_key
+  storage_key        -- one-component BlobKey
   len_bytes
   created_at
 ```
@@ -133,6 +133,10 @@ record with sequence `<= S`. Startup recovery must replay every durable WAL
 record with sequence `> S`.
 
 `root_node_id = null` means the current tree is all zeroes.
+
+Leaf refs store blob ids only. They do not store local roots, S3 buckets,
+prefixes, endpoints, credentials, or full object URIs. The configured
+`BlobStore` resolves each `storage_key` to the active backend location.
 
 # Sparse Tree Shape
 
