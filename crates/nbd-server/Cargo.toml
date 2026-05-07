@@ -15,7 +15,7 @@ s3 = ["dep:aws-sdk-s3"]
 
 [dependencies]
 async-trait = "0.1"
-aws-sdk-s3 = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true, features = ["behavior-version-latest"] }
 bytes = "1"
 crc = "3.4"
 nbd-config = { path = "../nbd-config" }
