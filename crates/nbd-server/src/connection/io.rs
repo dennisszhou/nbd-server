@@ -1,4 +1,4 @@
-use super::{ConnectionReply, shutdown::ConnectionShutdown, write_connection_reply};
+use super::shutdown::ConnectionShutdown;
 use crate::{Result, ServerError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -44,24 +44,6 @@ where
                 .map_err(|source| ServerError::io(context, source))
                 .map(|()| true)
         }
-        () = shutdown.cancelled() => Ok(false),
-    }
-}
-
-pub(super) async fn write_connection_reply_or_shutdown<W>(
-    writer: &mut W,
-    reply: ConnectionReply,
-    shutdown: &mut ConnectionShutdown,
-) -> Result<bool>
-where
-    W: AsyncWrite + Unpin,
-{
-    if shutdown.is_cancelled() {
-        return Ok(false);
-    }
-
-    tokio::select! {
-        result = write_connection_reply(writer, reply) => result.map(|()| true),
         () = shutdown.cancelled() => Ok(false),
     }
 }

@@ -1,19 +1,8 @@
-use crate::export::{ExportCompletionSink, RequestSequenceGenerator};
 use crate::observability::{self, event, target};
-use crate::{
-    CompletedExport, ConnectionId, ExportCompletion, ExportJob, ExportJobContext, ExportQueueSlot,
-    ExportReply, ExportRequest, ExportResult, ExportRuntimeHandle, LocalExportRegistry,
-    RequestCookie, Result, ServerError,
-};
-use nbd_protocol::constants::{NBD_CMD_DISC, NBD_EINVAL};
-use nbd_protocol::transmission::{
-    MAX_IO_BYTES, REQUEST_HEADER_BYTES, RequestHeader, TransmissionRequest, encode_read_reply,
-    encode_simple_reply, parse_request, parse_request_header,
-};
-use nbd_protocol::wire::NbdCookie;
+use crate::{ConnectionId, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -21,111 +10,21 @@ use tokio::task::JoinHandle;
 mod handshake;
 mod io;
 mod options;
+mod replies;
 mod shutdown;
+mod transmission;
 
 use handshake::write_handshake;
-use io::write_connection_reply_or_shutdown;
 use options::negotiate_options;
+use replies::write_replies;
 use shutdown::ConnectionShutdown;
 pub(crate) use shutdown::ServerConnectionShutdown;
+use transmission::{ConnectionReplyDrain, RequestReaderExit, read_requests};
 
 struct ConnectionRuntime {
     connection_id: ConnectionId,
     runtime: ExportRuntimeHandle,
     reply_capacity: usize,
-}
-
-struct RequestReaderExit {
-    result: Result<()>,
-    reply_drain: ConnectionReplyDrain,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConnectionReplyDrain {
-    DropPending,
-    DrainQueued,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReplyKind {
-    Read,
-    Simple,
-}
-
-#[derive(Debug)]
-pub(crate) struct ConnectionReply {
-    cookie: NbdCookie,
-    payload: ConnectionReplyPayload,
-}
-
-#[derive(Debug)]
-enum ConnectionReplyPayload {
-    Export {
-        context: ExportJobContext,
-        kind: ReplyKind,
-        result: ExportResult,
-        _queue_slot: ExportQueueSlot,
-    },
-    SimpleError {
-        error: u32,
-    },
-}
-
-#[derive(Debug)]
-struct ConnectionExportCompletion {
-    context: ExportJobContext,
-    kind: ReplyKind,
-    replies: mpsc::Sender<ConnectionReply>,
-}
-
-impl ConnectionReply {
-    pub(crate) fn export_result(
-        context: ExportJobContext,
-        kind: ReplyKind,
-        result: ExportResult,
-        queue_slot: ExportQueueSlot,
-    ) -> Self {
-        let cookie = nbd_cookie(context.cookie());
-        Self {
-            cookie,
-            payload: ConnectionReplyPayload::Export {
-                context,
-                kind,
-                result,
-                _queue_slot: queue_slot,
-            },
-        }
-    }
-
-    fn simple_error(cookie: NbdCookie, error: u32) -> Self {
-        Self {
-            cookie,
-            payload: ConnectionReplyPayload::SimpleError { error },
-        }
-    }
-}
-
-impl ConnectionExportCompletion {
-    fn new(
-        context: ExportJobContext,
-        kind: ReplyKind,
-        replies: mpsc::Sender<ConnectionReply>,
-    ) -> Self {
-        Self {
-            context,
-            kind,
-            replies,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ExportCompletionSink for ConnectionExportCompletion {
-    async fn complete(self: Box<Self>, completed: CompletedExport) {
-        let (result, queue_slot) = completed.into_parts();
-        let reply = ConnectionReply::export_result(self.context, self.kind, result, queue_slot);
-        let _ = self.replies.send(reply).await;
-    }
 }
 
 impl ConnectionRuntime {
@@ -237,248 +136,6 @@ pub(crate) async fn serve_with_shutdown(
     }
 }
 
-async fn read_requests<R>(
-    mut reader: R,
-    connection_id: ConnectionId,
-    runtime: ExportRuntimeHandle,
-    replies: mpsc::Sender<ConnectionReply>,
-    mut shutdown: ConnectionShutdown,
-) -> RequestReaderExit
-where
-    R: AsyncRead + Unpin,
-{
-    let mut request_sequences = RequestSequenceGenerator::new();
-    loop {
-        let mut bytes = vec![0; REQUEST_HEADER_BYTES];
-        let read_header = tokio::select! {
-            result = reader.read_exact(&mut bytes) => result,
-            () = shutdown.cancelled() => return RequestReaderExit::close(Ok(())),
-        };
-        match read_header {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return RequestReaderExit::close(Ok(()));
-            }
-            Err(source) => {
-                return RequestReaderExit::close(Err(ServerError::io(
-                    "read NBD transmission header",
-                    source,
-                )));
-            }
-        }
-
-        let header = match parse_request_header(&bytes) {
-            Ok(header) => header,
-            Err(error) => {
-                let error = ServerError::from(error);
-                trace_decode_request_failed(connection_id, &error);
-                return RequestReaderExit::close(Err(error));
-            }
-        };
-        let payload_len = match header.payload_len(MAX_IO_BYTES) {
-            Ok(payload_len) => payload_len,
-            Err(error) => {
-                let error = ServerError::from(error);
-                trace_header_request_failed(connection_id, &header, "decode", &error);
-                return RequestReaderExit::drain(
-                    send_error_then_return(&replies, header.cookie, error).await,
-                );
-            }
-        };
-
-        if header.command.raw() == NBD_CMD_DISC {
-            tracing::info!(
-                target: target::CONNECTION,
-                event = event::CONNECTION_DISCONNECT_RECEIVED,
-                service = observability::SERVICE_NAME,
-                server_instance_id = observability::server_instance_id(),
-                pid = observability::pid(),
-                connection_id = connection_id.raw(),
-                cookie = header.cookie.raw(),
-            );
-            return RequestReaderExit::close(Ok(()));
-        }
-
-        tracing::trace!(
-            target: target::RUNTIME,
-            event = event::QUEUE_RESERVE_WAIT,
-            service = observability::SERVICE_NAME,
-            server_instance_id = observability::server_instance_id(),
-            pid = observability::pid(),
-            connection_id = connection_id.raw(),
-            cookie = header.cookie.raw(),
-            command_raw = header.command.raw(),
-            offset = header.offset,
-            length = header.length,
-        );
-        let reserve_result = tokio::select! {
-            result = runtime.reserve() => result,
-            () = shutdown.cancelled() => return RequestReaderExit::close(Ok(())),
-        };
-        let queue_slot = match reserve_result {
-            Ok(queue_slot) => {
-                tracing::trace!(
-                    target: target::RUNTIME,
-                    event = event::QUEUE_RESERVE_ACQUIRED,
-                    service = observability::SERVICE_NAME,
-                    server_instance_id = observability::server_instance_id(),
-                    pid = observability::pid(),
-                    connection_id = connection_id.raw(),
-                    cookie = header.cookie.raw(),
-                    command_raw = header.command.raw(),
-                    offset = header.offset,
-                    length = header.length,
-                );
-                queue_slot
-            }
-            Err(error) => {
-                trace_header_request_failed(connection_id, &header, "queue_reserve", &error);
-                return RequestReaderExit::drain(
-                    send_simple_error(&replies, header.cookie)
-                        .await
-                        .and(Err(error)),
-                );
-            }
-        };
-
-        let mut payload = vec![0; payload_len];
-        let read_payload = tokio::select! {
-            result = reader.read_exact(&mut payload) => result,
-            () = shutdown.cancelled() => {
-                drop(queue_slot);
-                return RequestReaderExit::close(Ok(()));
-            }
-        };
-        if let Err(source) = read_payload {
-            drop(queue_slot);
-            return RequestReaderExit::close(Err(ServerError::io(
-                "read NBD transmission payload",
-                source,
-            )));
-        }
-        bytes.extend_from_slice(&payload);
-
-        let request = match parse_request(&bytes, MAX_IO_BYTES) {
-            Ok(request) => request,
-            Err(error) => {
-                let error = ServerError::from(error);
-                trace_header_request_failed(connection_id, &header, "decode", &error);
-                drop(queue_slot);
-                return RequestReaderExit::drain(
-                    send_error_then_return(&replies, header.cookie, error).await,
-                );
-            }
-        };
-
-        let (cookie, kind, request, offset, length) = match request {
-            TransmissionRequest::Read {
-                cookie,
-                offset,
-                length,
-            } => (
-                cookie,
-                ReplyKind::Read,
-                ExportRequest::Read {
-                    offset,
-                    len: length,
-                },
-                Some(offset),
-                Some(u64::from(length)),
-            ),
-            TransmissionRequest::Write {
-                cookie,
-                offset,
-                data,
-            } => (
-                cookie,
-                ReplyKind::Simple,
-                ExportRequest::Write { offset, data },
-                Some(offset),
-                Some(payload_len as u64),
-            ),
-            TransmissionRequest::Flush { cookie } => {
-                (cookie, ReplyKind::Simple, ExportRequest::Flush, None, None)
-            }
-            TransmissionRequest::Disconnect { .. } => {
-                drop(queue_slot);
-                return RequestReaderExit::close(Ok(()));
-            }
-        };
-
-        let context = ExportJobContext::new(
-            connection_id,
-            request_sequences.next(),
-            request_cookie(cookie),
-            request.command_name(),
-            offset,
-            length,
-            kind.as_str(),
-        );
-        tracing::trace!(
-            target: target::REQUEST,
-            event = event::REQUEST_DECODED,
-            service = observability::SERVICE_NAME,
-            server_instance_id = observability::server_instance_id(),
-            pid = observability::pid(),
-            connection_id = context.connection_id().raw(),
-            request_sequence = context.request_sequence().raw(),
-            cookie = context.cookie().raw(),
-            command = context.command(),
-            offset = ?context.offset(),
-            length = ?context.length(),
-            reply_kind = context.reply_kind(),
-        );
-        let completion = ExportCompletion::sink(ConnectionExportCompletion::new(
-            context.clone(),
-            kind,
-            replies.clone(),
-        ));
-        let job = ExportJob::with_context(context, request, completion, queue_slot);
-        tracing::trace!(
-            target: target::REQUEST,
-            event = event::REQUEST_SUBMITTED,
-            service = observability::SERVICE_NAME,
-            server_instance_id = observability::server_instance_id(),
-            pid = observability::pid(),
-            connection_id = job.context().connection_id().raw(),
-            request_sequence = job.context().request_sequence().raw(),
-            cookie = job.context().cookie().raw(),
-            command = job.context().command(),
-            offset = ?job.context().offset(),
-            length = ?job.context().length(),
-        );
-        let submit_context = job.context().clone();
-        if let Err(error) = runtime.submit(job).await {
-            trace_context_request_failed(&submit_context, "runtime_submit", &error);
-            return RequestReaderExit::drain(
-                send_simple_error(&replies, cookie).await.and(Err(error)),
-            );
-        }
-    }
-}
-
-async fn write_replies<W>(
-    mut writer: W,
-    mut replies: mpsc::Receiver<ConnectionReply>,
-    mut shutdown: ConnectionShutdown,
-) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    loop {
-        let reply = tokio::select! {
-            reply = replies.recv() => reply,
-            () = shutdown.cancelled() => return Ok(()),
-        };
-        let Some(reply) = reply else {
-            return Ok(());
-        };
-        if !write_connection_reply_or_shutdown(&mut writer, reply, &mut shutdown).await? {
-            return Ok(());
-        }
-    }
-}
-
 async fn run_connection_tasks(
     mut reader_task: JoinHandle<RequestReaderExit>,
     mut writer_task: JoinHandle<Result<()>>,
@@ -525,217 +182,17 @@ async fn run_connection_tasks(
     }
 }
 
-impl RequestReaderExit {
-    fn close(result: Result<()>) -> Self {
-        Self {
-            result,
-            reply_drain: ConnectionReplyDrain::DropPending,
-        }
-    }
-
-    fn drain(result: Result<()>) -> Self {
-        Self {
-            result,
-            reply_drain: ConnectionReplyDrain::DrainQueued,
-        }
-    }
-}
-
-fn request_cookie(cookie: NbdCookie) -> RequestCookie {
-    RequestCookie::new(cookie.raw())
-}
-
-fn nbd_cookie(cookie: RequestCookie) -> NbdCookie {
-    NbdCookie::new(cookie.raw())
-}
-
-async fn send_error_then_return(
-    replies: &mpsc::Sender<ConnectionReply>,
-    cookie: NbdCookie,
-    error: ServerError,
-) -> Result<()> {
-    send_simple_error(replies, cookie).await?;
-    Err(error)
-}
-
-async fn send_simple_error(
-    replies: &mpsc::Sender<ConnectionReply>,
-    cookie: NbdCookie,
-) -> Result<()> {
-    replies
-        .send(ConnectionReply::simple_error(cookie, NBD_EINVAL))
-        .await
-        .map_err(|_| ServerError::RuntimeClosed {
-            resource: "connection reply queue",
-        })
-}
-
-fn trace_header_request_failed(
-    connection_id: ConnectionId,
-    header: &RequestHeader,
-    phase: &'static str,
-    error: &ServerError,
-) {
-    observability::request_failure_event!(
-        target: target::REQUEST,
-        error: error,
-        event = event::REQUEST_FAILED,
-        service = observability::SERVICE_NAME,
-        server_instance_id = observability::server_instance_id(),
-        pid = observability::pid(),
-        connection_id = connection_id.raw(),
-        cookie = header.cookie.raw(),
-        command_raw = header.command.raw(),
-        offset = header.offset,
-        length = header.length,
-        phase = phase,
-    );
-}
-
-fn trace_decode_request_failed(connection_id: ConnectionId, error: &ServerError) {
-    observability::request_failure_event!(
-        target: target::REQUEST,
-        error: error,
-        event = event::REQUEST_FAILED,
-        service = observability::SERVICE_NAME,
-        server_instance_id = observability::server_instance_id(),
-        pid = observability::pid(),
-        connection_id = connection_id.raw(),
-        phase = "decode",
-    );
-}
-
-fn trace_context_request_failed(
-    context: &ExportJobContext,
-    phase: &'static str,
-    error: &ServerError,
-) {
-    observability::request_failure_event!(
-        target: target::REQUEST,
-        error: error,
-        event = event::REQUEST_FAILED,
-        service = observability::SERVICE_NAME,
-        server_instance_id = observability::server_instance_id(),
-        pid = observability::pid(),
-        connection_id = context.connection_id().raw(),
-        request_sequence = context.request_sequence().raw(),
-        cookie = context.cookie().raw(),
-        command = context.command(),
-        offset = ?context.offset(),
-        length = ?context.length(),
-        phase = phase,
-        duration_ms = observability::duration_ms(context.elapsed()),
-    );
-}
-
-pub(crate) async fn write_connection_reply<W>(writer: &mut W, reply: ConnectionReply) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    match reply.payload {
-        ConnectionReplyPayload::Export {
-            context,
-            kind,
-            result,
-            _queue_slot: queue_slot,
-        } => {
-            let write_result = match (kind, result) {
-                (ReplyKind::Read, Ok(ExportReply::Read { data })) => writer
-                    .write_all(&encode_read_reply(reply.cookie, &data))
-                    .await
-                    .map_err(|source| ServerError::io("write NBD read reply", source))
-                    .map(|()| "ok"),
-                (ReplyKind::Simple, Ok(ExportReply::Done)) => writer
-                    .write_all(&encode_simple_reply(reply.cookie, 0))
-                    .await
-                    .map_err(|source| ServerError::io("write NBD simple reply", source))
-                    .map(|()| "ok"),
-                _ => writer
-                    .write_all(&encode_simple_reply(reply.cookie, NBD_EINVAL))
-                    .await
-                    .map_err(|source| ServerError::io("write NBD error reply", source))
-                    .map(|()| "error"),
-            };
-            match &write_result {
-                Ok(status) => {
-                    tracing::trace!(
-                        target: target::REQUEST,
-                        event = event::REQUEST_REPLY_WRITTEN,
-                        service = observability::SERVICE_NAME,
-                        server_instance_id = observability::server_instance_id(),
-                        pid = observability::pid(),
-                        connection_id = context.connection_id().raw(),
-                        request_sequence = context.request_sequence().raw(),
-                        cookie = context.cookie().raw(),
-                        command = context.command(),
-                        offset = ?context.offset(),
-                        length = ?context.length(),
-                        reply_kind = context.reply_kind(),
-                        status = *status,
-                        duration_ms = observability::duration_ms(context.elapsed()),
-                    );
-                    tracing::debug!(
-                        target: target::REQUEST,
-                        event = event::REQUEST_COMPLETED,
-                        service = observability::SERVICE_NAME,
-                        server_instance_id = observability::server_instance_id(),
-                        pid = observability::pid(),
-                        connection_id = context.connection_id().raw(),
-                        request_sequence = context.request_sequence().raw(),
-                        cookie = context.cookie().raw(),
-                        command = context.command(),
-                        offset = ?context.offset(),
-                        length = ?context.length(),
-                        reply_kind = context.reply_kind(),
-                        status = *status,
-                        duration_ms = observability::duration_ms(context.elapsed()),
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: target::REQUEST,
-                        event = event::REQUEST_FAILED,
-                        service = observability::SERVICE_NAME,
-                        server_instance_id = observability::server_instance_id(),
-                        pid = observability::pid(),
-                        connection_id = context.connection_id().raw(),
-                        request_sequence = context.request_sequence().raw(),
-                        cookie = context.cookie().raw(),
-                        command = context.command(),
-                        offset = ?context.offset(),
-                        length = ?context.length(),
-                        reply_kind = context.reply_kind(),
-                        phase = "reply_write",
-                        duration_ms = observability::duration_ms(context.elapsed()),
-                        error = %error,
-                    );
-                }
-            }
-            drop(queue_slot);
-            write_result.map(|_| ())
-        }
-        ConnectionReplyPayload::SimpleError { error } => writer
-            .write_all(&encode_simple_reply(reply.cookie, error))
-            .await
-            .map_err(|source| ServerError::io("write NBD error reply", source)),
-    }
-}
-
-impl ReplyKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Simple => "simple",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::{
+        replies::{ConnectionReply, ReplyKind, write_connection_reply},
+        transmission::{ConnectionReplyDrain, read_requests},
+    };
     use crate::{
-        AdmittedExportRequest, ExportAdmissionPolicyHandle, ExportEngine, ExportRuntime,
-        MemoryAdmissionPolicy, SerialExportRuntime,
+        AdmittedExportRequest, ExportAdmissionPolicyHandle, ExportEngine, ExportJob,
+        ExportJobContext, ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntime,
+        ExportRuntimeHandle, MemoryAdmissionPolicy, RequestCookie, SerialExportRuntime,
     };
     use nbd_control_plane::{
         ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
@@ -745,9 +202,9 @@ mod tests {
         RequestHeader, SIMPLE_REPLY_BYTES, encode_disconnect_request, encode_read_request,
         encode_request_header, parse_simple_reply,
     };
-    use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType};
+    use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType, NbdCookie};
     use std::sync::Arc;
-    use tokio::io::{DuplexStream, duplex, split};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex, split};
     use tokio::sync::{
         mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
         watch,
@@ -771,11 +228,17 @@ mod tests {
 
         let first_job = submitted.recv().await.expect("first job");
         let second_job = submitted.recv().await.expect("second job");
-        assert_eq!(first_job.context().cookie(), request_cookie(first_cookie));
+        assert_eq!(
+            first_job.context().cookie(),
+            RequestCookie::new(first_cookie.raw()),
+        );
         assert_eq!(first_job.context().request_sequence().raw(), 1);
         assert_eq!(first_job.context().offset(), Some(0));
         assert_eq!(first_job.context().length(), Some(4));
-        assert_eq!(second_job.context().cookie(), request_cookie(second_cookie));
+        assert_eq!(
+            second_job.context().cookie(),
+            RequestCookie::new(second_cookie.raw()),
+        );
         assert_eq!(second_job.context().request_sequence().raw(), 2);
         assert_eq!(second_job.context().offset(), Some(4));
         assert_eq!(second_job.context().length(), Some(4));
