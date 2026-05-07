@@ -294,7 +294,8 @@ fn release_admission_permit(permit: &mut Option<AdmissionPermit>, context: &Expo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdmissionOp, ByteRange, ExportAdmissionCtl};
+    use crate::export::{AdmissionOp, ExportAdmissionCtl};
+    use crate::range::ByteRange;
 
     #[test]
     fn request_sequence_generator_starts_at_one() {

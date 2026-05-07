@@ -222,7 +222,8 @@ impl LocalExportRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExportJob, ExportQueueSlot, ExportRuntime, ExportWalHandle, OpenWal, WalProvider};
+    use crate::export::{ExportJob, ExportQueueSlot, ExportRuntime};
+    use crate::wal::{ExportWalHandle, OpenWal, WalProvider};
     use nbd_config::ServerConfig;
     use nbd_control_plane::{
         ActiveExportDescriptor, CatalogError, CloneExport, CloneExportResult, CowTreeMetadataStore,

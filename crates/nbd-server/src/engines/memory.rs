@@ -217,7 +217,7 @@ impl ExportEngine for MemoryExportEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
+    use crate::export::{
         AdmissionPermit, ExportAdmissionCtl, ExportEngine, ExportJobContext, RequestCookie,
     };
     use nbd_control_plane::{ExportEngineKind, ExportHead, ExportId, ExportState, Timestamp};

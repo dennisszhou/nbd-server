@@ -556,7 +556,7 @@ pub(super) fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LocalBlobStore, put_random_blob};
+    use crate::storage::{LocalBlobStore, put_random_blob};
     use nbd_control_plane::{ChunkIndex, CowChunkRef, ExportId};
     use nbd_test_support::TestRuntime;
     use std::collections::BTreeMap;

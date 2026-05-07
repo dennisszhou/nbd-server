@@ -191,10 +191,11 @@ mod tests {
         replies::{ConnectionReply, ReplyKind, write_connection_reply},
         transmission::{ConnectionReplyDrain, read_requests},
     };
-    use crate::{
+    use crate::engines::MemoryAdmissionPolicy;
+    use crate::export::{
         AdmittedExportRequest, ExportAdmissionPolicyHandle, ExportEngine, ExportJob,
         ExportJobContext, ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntime,
-        ExportRuntimeHandle, MemoryAdmissionPolicy, RequestCookie, SerialExportRuntime,
+        ExportRuntimeHandle, RequestCookie, SerialExportRuntime,
     };
     use nbd_control_plane::{
         ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,

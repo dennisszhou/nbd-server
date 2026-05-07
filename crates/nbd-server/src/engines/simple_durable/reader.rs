@@ -55,7 +55,7 @@ impl TreeReader<SimpleTreeSnapshot> for SimpleTreeReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{LocalBlobStore, put_random_blob};
+    use crate::storage::{LocalBlobStore, put_random_blob};
     use nbd_control_plane::{ExportId, NodeId, SimpleChunkRef};
     use nbd_test_support::TestRuntime;
     use std::collections::BTreeMap;

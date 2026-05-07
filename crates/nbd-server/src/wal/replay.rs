@@ -38,7 +38,7 @@ impl WalReplay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ByteRange;
+    use crate::range::ByteRange;
 
     #[tokio::test]
     async fn replay_yields_records_in_order() {
