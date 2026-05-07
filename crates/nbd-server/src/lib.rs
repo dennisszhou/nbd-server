@@ -18,6 +18,7 @@ mod registry;
 mod runtime;
 mod server;
 mod simple_durable;
+mod storage;
 mod tree_reader;
 mod wal;
 mod wal_durable;
@@ -40,9 +41,8 @@ pub use runtime::{
     SerialExportRuntime,
 };
 pub use server::NbdServer;
-pub use simple_durable::{
-    LocalBlobStore, SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree,
-};
+pub use simple_durable::{SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree};
+pub use storage::LocalBlobStore;
 pub use wal::{
     ExportWal, ExportWalHandle, LocalExportWal, LocalWalProvider, OpenWal, WalBounds, WalDomain,
     WalProvider, WalPruneResult, WalRecord, WalReplay, WalRequest,
