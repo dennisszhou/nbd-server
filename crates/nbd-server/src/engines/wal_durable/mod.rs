@@ -226,9 +226,8 @@ impl WalDurableEngine {
             return;
         };
 
-        let target_wal_seq = self.read_view.last_applied_seq().await;
         compaction
-            .compact_best_effort(target_wal_seq, wal_debt_bytes, "write_pressure")
+            .compact_write_pressure_best_effort(self.wal_debt_threshold_bytes)
             .await;
     }
 }
@@ -319,20 +318,6 @@ impl CompactionCoordinator {
             .await;
     }
 
-    async fn compact_best_effort(
-        &self,
-        target_wal_seq: WalSeq,
-        wal_debt_bytes: u64,
-        phase: &'static str,
-    ) {
-        match self.compact_through(target_wal_seq).await {
-            Ok(result) => log_compaction_completed(&self.export_name, &result, phase),
-            Err(error) => {
-                self.log_compaction_failed(target_wal_seq, wal_debt_bytes, phase, &error);
-            }
-        }
-    }
-
     async fn compact_snapshot_best_effort(
         &self,
         snapshot: read_view::ReadViewCompactionSnapshot,
@@ -348,14 +333,39 @@ impl CompactionCoordinator {
         }
     }
 
-    async fn compact_through(&self, target_wal_seq: WalSeq) -> Result<CompactionResult> {
+    async fn compact_write_pressure_best_effort(&self, hard_threshold_bytes: u64) {
         let _compaction = self.compaction_lock.lock().await;
-        let result = self
-            .compactor
-            .compact_export(&self.export_id, &self.wal, target_wal_seq)
-            .await?;
-        self.advance_after_compaction(&result).await?;
-        Ok(result)
+        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
+        if wal_debt_bytes < hard_threshold_bytes {
+            return;
+        }
+
+        let snapshot = match self.read_view.capture_compaction_snapshot().await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return,
+            Err(error) => {
+                self.log_compaction_failed(
+                    WalSeq::zero(),
+                    wal_debt_bytes,
+                    "write_pressure",
+                    &error,
+                );
+                return;
+            }
+        };
+        let target_wal_seq = snapshot.target_wal_seq;
+        let snapshot_wal_debt_bytes = snapshot.wal_debt_bytes;
+        match self.compact_snapshot_locked(snapshot).await {
+            Ok(result) => log_compaction_completed(&self.export_name, &result, "write_pressure"),
+            Err(error) => {
+                self.log_compaction_failed(
+                    target_wal_seq,
+                    snapshot_wal_debt_bytes,
+                    "write_pressure",
+                    &error,
+                );
+            }
+        }
     }
 
     async fn compact_snapshot(
@@ -363,6 +373,13 @@ impl CompactionCoordinator {
         snapshot: read_view::ReadViewCompactionSnapshot,
     ) -> Result<CompactionResult> {
         let _compaction = self.compaction_lock.lock().await;
+        self.compact_snapshot_locked(snapshot).await
+    }
+
+    async fn compact_snapshot_locked(
+        &self,
+        snapshot: read_view::ReadViewCompactionSnapshot,
+    ) -> Result<CompactionResult> {
         let result = self
             .compactor
             .compact_snapshot(&self.export_id, &snapshot)
@@ -370,24 +387,6 @@ impl CompactionCoordinator {
         self.advance_after_snapshot_compaction(&result, &snapshot)
             .await?;
         Ok(result)
-    }
-
-    async fn advance_after_compaction(&self, result: &CompactionResult) -> Result<()> {
-        match result.outcome() {
-            CompactionOutcome::Published | CompactionOutcome::AlreadyCovered => {
-                let snapshot = self
-                    .catalog
-                    .load_cow_tree(&self.export_id)
-                    .await
-                    .map_err(ServerError::catalog)?;
-                let root = RootSnapshot::from_cow_snapshot(snapshot);
-                let prune_through = root.base_wal_seq();
-                self.read_view.advance_root(root).await?;
-                self.prune_published_wal(prune_through).await;
-            }
-            CompactionOutcome::StalePlan | CompactionOutcome::NoRecords => {}
-        }
-        Ok(())
     }
 
     async fn advance_after_snapshot_compaction(

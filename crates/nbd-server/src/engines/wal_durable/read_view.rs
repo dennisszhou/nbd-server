@@ -155,10 +155,6 @@ impl ExportReadView {
         self.state.read().await.root.to_export_head()
     }
 
-    pub(super) async fn last_applied_seq(&self) -> WalSeq {
-        self.state.read().await.last_applied_seq
-    }
-
     pub(super) async fn wal_debt_bytes(&self) -> u64 {
         self.state.read().await.wal_debt_bytes
     }
