@@ -29,7 +29,7 @@ impl LocalExportRegistry {
         }
     }
 
-    pub fn blob_dir(&self) -> &Path {
+    pub fn blob_dir(&self) -> Option<&Path> {
         self.factory.blob_dir()
     }
 
@@ -223,6 +223,7 @@ impl LocalExportRegistry {
 mod tests {
     use super::*;
     use crate::export::{ExportJob, ExportQueueSlot, ExportRuntime};
+    use crate::storage::ConfiguredBlobStore;
     use crate::wal::{ExportWalHandle, OpenWal, WalProvider};
     use nbd_config::ServerConfig;
     use nbd_control_plane::{
@@ -266,7 +267,7 @@ mod tests {
         let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
         let factory = Arc::new(ExportFactory::new(
             ServerConfig::default(),
-            PathBuf::from("."),
+            ConfiguredBlobStore::local(PathBuf::from(".")),
             export_catalog.clone(),
             simple_tree_store,
             cow_tree_store,

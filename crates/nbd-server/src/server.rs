@@ -3,6 +3,7 @@ use crate::error::{Result, ServerError};
 use crate::export::ConnectionId;
 use crate::observability::{self, event, target};
 use crate::registry::{ExportFactory, LocalExportRegistry};
+use crate::storage::ConfiguredBlobStore;
 use crate::wal::LocalWalProvider;
 use nbd_config::NbdConfig;
 use nbd_control_plane::{CatalogProvider, CatalogUrl, open_catalog};
@@ -54,10 +55,11 @@ impl NbdServer {
         let export_catalog = catalog.export_catalog();
         let simple_tree_store = catalog.simple_tree_store();
         let cow_tree_store = catalog.cow_tree_store();
+        let blob_store = ConfiguredBlobStore::open(&config).await?;
         let wal_provider = Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone()));
         let factory = Arc::new(ExportFactory::new(
             config.server.clone(),
-            config.runtime.blob_dir.clone(),
+            blob_store,
             export_catalog.clone(),
             simple_tree_store,
             cow_tree_store,

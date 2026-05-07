@@ -32,8 +32,8 @@ pub use range::ByteRange;
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use server::NbdServer;
 pub use storage::{
-    BlobStore, BlobStoreHandle, LocalBlobStore, MutableBlobStore, MutableBlobStoreHandle,
-    put_random_blob,
+    BlobStore, BlobStoreHandle, ConfiguredBlobStore, LocalBlobStore, MutableBlobStore,
+    MutableBlobStoreHandle, put_random_blob,
 };
 pub use wal::{
     ExportWal, ExportWalHandle, LocalExportWal, LocalWalProvider, OpenWal, WalBounds, WalDomain,

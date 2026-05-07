@@ -4,21 +4,20 @@ use crate::export::{
     ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, SerialExportRuntime,
 };
 use crate::observability::{self, event, target};
-use crate::storage::{BlobStoreHandle, LocalBlobStore, MutableBlobStoreHandle};
+use crate::storage::{BlobStoreHandle, ConfiguredBlobStore};
 use crate::wal::{ExportWalHandle, OpenWal, WalDomain, WalProvider};
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     ActiveExportDescriptor, CowTreeMetadataStore, ExportCatalog, ExportEngineKind, ExportId,
     ExportRecord, SimpleTreeMetadataStore,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Concrete factory for active export runtimes and their backing engines.
 pub struct ExportFactory {
     config: ServerConfig,
-    blob_dir: PathBuf,
-    local_blob_store: Arc<LocalBlobStore>,
+    blob_store: ConfiguredBlobStore,
     catalog: Arc<dyn ExportCatalog>,
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
@@ -33,18 +32,15 @@ struct OpenedEngine {
 impl ExportFactory {
     pub fn new(
         config: ServerConfig,
-        blob_dir: impl Into<PathBuf>,
+        blob_store: ConfiguredBlobStore,
         catalog: Arc<dyn ExportCatalog>,
         simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
     ) -> Self {
-        let blob_dir = blob_dir.into();
-        let local_blob_store = Arc::new(LocalBlobStore::new(blob_dir.clone()));
         Self {
             config,
-            blob_dir,
-            local_blob_store,
+            blob_store,
             catalog,
             simple_tree_store,
             cow_tree_store,
@@ -52,8 +48,8 @@ impl ExportFactory {
         }
     }
 
-    pub fn blob_dir(&self) -> &Path {
-        &self.blob_dir
+    pub fn blob_dir(&self) -> Option<&Path> {
+        self.blob_store.local_root()
     }
 
     pub(super) fn export_runtime_kind(&self) -> ExportRuntimeKind {
@@ -117,7 +113,15 @@ impl ExportFactory {
                 }
             }
             ExportEngineKind::SimpleDurable => {
-                let blob_store: MutableBlobStoreHandle = self.local_blob_store.clone();
+                let blob_store =
+                    self.blob_store
+                        .mutable_blob_store()
+                        .ok_or_else(|| ServerError::Io {
+                            context: "open simple_durable export",
+                            message: "configured blob store does not support mutable blobs"
+                                .to_owned(),
+                            source: None,
+                        })?;
                 let engine = SimpleDurableEngine::load(
                     descriptor,
                     blob_store,
@@ -136,7 +140,7 @@ impl ExportFactory {
             }
             ExportEngineKind::WalDurable => {
                 let wal = self.open_wal(descriptor.id()).await?;
-                let blob_store: BlobStoreHandle = self.local_blob_store.clone();
+                let blob_store: BlobStoreHandle = self.blob_store.blob_store();
                 let engine = WalDurableEngine::open_with_cow_tree(
                     descriptor,
                     wal,

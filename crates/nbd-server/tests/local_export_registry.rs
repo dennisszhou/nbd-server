@@ -5,8 +5,8 @@ use nbd_control_plane::{
     SimpleTreeMetadataStore, WalSeq,
 };
 use nbd_server::{
-    ExportFactory, ExportOwner, ExportReply, LocalExportRegistry, LocalWalProvider,
-    MAX_MEMORY_EXPORT_BYTES, ServerError,
+    ConfiguredBlobStore, ExportFactory, ExportOwner, ExportReply, LocalExportRegistry,
+    LocalWalProvider, MAX_MEMORY_EXPORT_BYTES, ServerError,
 };
 use nbd_test_support::TestRuntime;
 use std::num::NonZeroUsize;
@@ -30,7 +30,7 @@ async fn registry_rejects_second_unique_owner_until_close() {
         .await
         .expect("create export");
     let registry = local_registry(catalog, &runtime, ServerConfig::default());
-    runtime.assert_path_inside(registry.blob_dir());
+    runtime.assert_path_inside(registry.blob_dir().expect("local blob directory"));
     let owner_a = ExportOwner::unique_connection();
     let owner_b = ExportOwner::unique_connection();
 
@@ -474,7 +474,7 @@ fn local_registry_with_compaction_store(
     let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
     let factory = Arc::new(ExportFactory::new(
         config,
-        blob_dir(runtime),
+        ConfiguredBlobStore::local(blob_dir(runtime)),
         export_catalog,
         simple_tree_store,
         cow_tree_store,
