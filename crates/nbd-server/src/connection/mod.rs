@@ -18,25 +18,21 @@ use nbd_protocol::transmission::{
     encode_simple_reply, parse_request, parse_request_header,
 };
 use nbd_protocol::wire::{NbdCookie, NbdOptionCode};
-use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+mod io;
+mod shutdown;
+
+use io::{read_exact_or_shutdown, write_all_or_shutdown, write_connection_reply_or_shutdown};
+use shutdown::ConnectionShutdown;
+pub(crate) use shutdown::ServerConnectionShutdown;
+
 const SUPPORTED_TRANSMISSION_FLAGS: u16 = NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH;
-
-#[derive(Clone)]
-pub(crate) struct ServerConnectionShutdown {
-    tx: watch::Sender<bool>,
-}
-
-#[derive(Clone)]
-pub(crate) struct ConnectionShutdown {
-    rx: Option<watch::Receiver<bool>>,
-}
 
 struct ConnectionExport {
     name: ExportName,
@@ -140,55 +136,6 @@ impl ExportCompletionSink for ConnectionExportCompletion {
         let (result, queue_slot) = completed.into_parts();
         let reply = ConnectionReply::export_result(self.context, self.kind, result, queue_slot);
         let _ = self.replies.send(reply).await;
-    }
-}
-
-impl ServerConnectionShutdown {
-    pub(crate) fn new() -> Self {
-        let (tx, _rx) = watch::channel(false);
-        Self { tx }
-    }
-
-    pub(crate) fn subscribe(&self) -> ConnectionShutdown {
-        ConnectionShutdown {
-            rx: Some(self.tx.subscribe()),
-        }
-    }
-
-    pub(crate) fn shutdown(&self) {
-        let _ = self.tx.send(true);
-    }
-}
-
-impl ConnectionShutdown {
-    #[cfg(test)]
-    fn not_cancelled() -> Self {
-        Self { rx: None }
-    }
-
-    #[cfg(test)]
-    fn from_receiver(rx: watch::Receiver<bool>) -> Self {
-        Self { rx: Some(rx) }
-    }
-
-    async fn cancelled(&mut self) {
-        let Some(rx) = &mut self.rx else {
-            future::pending::<()>().await;
-            return;
-        };
-
-        loop {
-            if *rx.borrow() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                future::pending::<()>().await;
-            }
-        }
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.rx.as_ref().is_some_and(|rx| *rx.borrow())
     }
 }
 
@@ -825,70 +772,6 @@ impl RequestReaderExit {
     }
 }
 
-async fn read_exact_or_shutdown<R>(
-    reader: &mut R,
-    bytes: &mut [u8],
-    shutdown: &mut ConnectionShutdown,
-    context: &'static str,
-) -> Result<bool>
-where
-    R: AsyncRead + Unpin,
-{
-    if shutdown.is_cancelled() {
-        return Ok(false);
-    }
-
-    tokio::select! {
-        result = reader.read_exact(bytes) => {
-            result
-                .map_err(|source| ServerError::io(context, source))
-                .map(|_| true)
-        }
-        () = shutdown.cancelled() => Ok(false),
-    }
-}
-
-async fn write_all_or_shutdown<W>(
-    writer: &mut W,
-    bytes: &[u8],
-    shutdown: &mut ConnectionShutdown,
-    context: &'static str,
-) -> Result<bool>
-where
-    W: AsyncWrite + Unpin,
-{
-    if shutdown.is_cancelled() {
-        return Ok(false);
-    }
-
-    tokio::select! {
-        result = writer.write_all(bytes) => {
-            result
-                .map_err(|source| ServerError::io(context, source))
-                .map(|()| true)
-        }
-        () = shutdown.cancelled() => Ok(false),
-    }
-}
-
-async fn write_connection_reply_or_shutdown<W>(
-    writer: &mut W,
-    reply: ConnectionReply,
-    shutdown: &mut ConnectionShutdown,
-) -> Result<bool>
-where
-    W: AsyncWrite + Unpin,
-{
-    if shutdown.is_cancelled() {
-        return Ok(false);
-    }
-
-    tokio::select! {
-        result = write_connection_reply(writer, reply) => result.map(|()| true),
-        () = shutdown.cancelled() => Ok(false),
-    }
-}
-
 fn request_cookie(cookie: NbdCookie) -> RequestCookie {
     RequestCookie::new(cookie.raw())
 }
@@ -1096,7 +979,10 @@ mod tests {
     use nbd_protocol::wire::{NbdCommandFlags, NbdCommandType};
     use std::sync::Arc;
     use tokio::io::{DuplexStream, duplex, split};
-    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+    use tokio::sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+        watch,
+    };
 
     #[tokio::test]
     async fn connection_runtime_writes_out_of_order_completions_by_cookie() {
@@ -1116,11 +1002,11 @@ mod tests {
 
         let first_job = submitted.recv().await.expect("first job");
         let second_job = submitted.recv().await.expect("second job");
-        assert_eq!(first_job.context().cookie(), first_cookie);
+        assert_eq!(first_job.context().cookie(), request_cookie(first_cookie));
         assert_eq!(first_job.context().request_sequence().raw(), 1);
         assert_eq!(first_job.context().offset(), Some(0));
         assert_eq!(first_job.context().length(), Some(4));
-        assert_eq!(second_job.context().cookie(), second_cookie);
+        assert_eq!(second_job.context().cookie(), request_cookie(second_cookie));
         assert_eq!(second_job.context().request_sequence().raw(), 2);
         assert_eq!(second_job.context().offset(), Some(4));
         assert_eq!(second_job.context().length(), Some(4));
