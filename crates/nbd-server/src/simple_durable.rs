@@ -1,8 +1,9 @@
 use crate::{
     AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
-    LocalBlobStore, Result, ServerError,
+    MutableBlobStoreHandle, Result, ServerError,
     observability::{self, event, target},
+    put_random_blob,
     tree_reader::{Block, BlockPart, TreeReader},
 };
 use bytes::Bytes;
@@ -22,7 +23,7 @@ pub struct SimpleDurableEngine {
     name: ExportName,
     size_bytes: u64,
     block_size: u64,
-    blob_store: LocalBlobStore,
+    blob_store: MutableBlobStoreHandle,
     tree_reader: Arc<dyn TreeReader<SimpleTreeSnapshot>>,
     tree: SimpleMutableTree,
 }
@@ -48,13 +49,13 @@ struct SimpleTreeState {
 
 #[derive(Debug)]
 struct SimpleTreeReader {
-    blob_store: LocalBlobStore,
+    blob_store: MutableBlobStoreHandle,
 }
 
 impl SimpleDurableEngine {
     pub async fn load(
         descriptor: &ActiveExportDescriptor,
-        blob_store: LocalBlobStore,
+        blob_store: MutableBlobStoreHandle,
         catalog: Arc<dyn SimpleTreeMetadataStore>,
     ) -> Result<Self> {
         let tree = SimpleMutableTree::load(catalog, descriptor).await?;
@@ -63,7 +64,7 @@ impl SimpleDurableEngine {
 
     async fn from_loaded_tree(
         descriptor: &ActiveExportDescriptor,
-        blob_store: LocalBlobStore,
+        blob_store: MutableBlobStoreHandle,
         tree: SimpleMutableTree,
     ) -> Result<Self> {
         Ok(Self {
@@ -133,17 +134,17 @@ impl SimpleDurableEngine {
                 Some(key) => {
                     let mut chunk = self
                         .blob_store
-                        .read_blob(&key, 0, SIMPLE_CHUNK_BYTES)
+                        .get_blob(&key, 0, SIMPLE_CHUNK_BYTES)
                         .await?;
                     chunk[chunk_offset..chunk_offset + copy_len]
                         .copy_from_slice(&data[copied..copied + copy_len]);
-                    self.blob_store.replace_blob(&key, &chunk).await?;
+                    self.blob_store.overwrite_blob(&key, &chunk).await?;
                 }
                 None => {
                     let mut chunk = vec![0; SIMPLE_CHUNK_BYTES_USIZE];
                     chunk[chunk_offset..chunk_offset + copy_len]
                         .copy_from_slice(&data[copied..copied + copy_len]);
-                    let key = self.blob_store.create_blob(&chunk).await?;
+                    let key = put_random_blob(self.blob_store.as_ref(), &chunk).await?;
                     new_chunks.push(
                         SimpleChunkRef::new(chunk_index, key, SIMPLE_CHUNK_BYTES)
                             .map_err(ServerError::catalog)?,
@@ -180,7 +181,7 @@ impl TreeReader<SimpleTreeSnapshot> for SimpleTreeReader {
             if let Some(chunk) = root.chunk(chunk_index) {
                 let chunk_data = self
                     .blob_store
-                    .read_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
+                    .get_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
                     .await?;
                 parts.push(BlockPart::Data {
                     range: part_range,
@@ -484,17 +485,18 @@ impl SimpleTreeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LocalBlobStore;
     use nbd_control_plane::ExportId;
     use nbd_test_support::TestRuntime;
 
     #[tokio::test]
     async fn simple_tree_reader_reads_from_snapshot() {
         let runtime = TestRuntime::new().expect("test runtime");
-        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let blob_store: MutableBlobStoreHandle =
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
         let mut chunk_data = vec![0; 4096];
         chunk_data[8..12].copy_from_slice(b"tree");
-        let key = blob_store
-            .create_blob(&chunk_data)
+        let key = put_random_blob(blob_store.as_ref(), &chunk_data)
             .await
             .expect("create blob");
         let chunk =
@@ -526,7 +528,8 @@ mod tests {
     #[tokio::test]
     async fn simple_tree_reader_splits_large_sparse_reads_on_chunk_boundaries() {
         let runtime = TestRuntime::new().expect("test runtime");
-        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let blob_store: MutableBlobStoreHandle =
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
         let snapshot = SimpleTreeSnapshot::new(
             ExportId::new("simple-tree-reader-sparse").expect("export id"),
             SIMPLE_CHUNK_BYTES * 2,

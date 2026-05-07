@@ -1,7 +1,8 @@
 use crate::{
-    ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle, ExportWalHandle,
-    LocalBlobStore, MemoryExportEngine, OpenWal, Result, SerialExportRuntime, ServerError,
-    SimpleDurableEngine, WalDomain, WalDurableEngine, WalProvider,
+    BlobStoreHandle, ConcurrentExportRuntime, ExportEngineHandle, ExportRuntimeHandle,
+    ExportWalHandle, LocalBlobStore, MemoryExportEngine, MutableBlobStoreHandle, OpenWal, Result,
+    SerialExportRuntime, ServerError, SimpleDurableEngine, WalDomain, WalDurableEngine,
+    WalProvider,
     observability::{self, event, target},
 };
 use nbd_config::{ExportRuntimeKind, ServerConfig};
@@ -359,9 +360,11 @@ impl ExportFactory {
                 }
             }
             ExportEngineKind::SimpleDurable => {
+                let blob_store: MutableBlobStoreHandle =
+                    Arc::new(LocalBlobStore::new(self.blob_dir.clone()));
                 let engine = SimpleDurableEngine::load(
                     descriptor,
-                    LocalBlobStore::new(self.blob_dir.clone()),
+                    blob_store,
                     self.simple_tree_store.clone(),
                 )
                 .await?;
@@ -377,10 +380,12 @@ impl ExportFactory {
             }
             ExportEngineKind::WalDurable => {
                 let wal = self.open_wal(descriptor.id()).await?;
+                let blob_store: BlobStoreHandle =
+                    Arc::new(LocalBlobStore::new(self.blob_dir.clone()));
                 let engine = WalDurableEngine::open_with_cow_tree(
                     descriptor,
                     wal,
-                    LocalBlobStore::new(self.blob_dir.clone()),
+                    blob_store,
                     self.cow_tree_store.clone(),
                 )
                 .await?;

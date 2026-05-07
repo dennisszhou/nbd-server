@@ -4,9 +4,9 @@ use nbd_control_plane::{
     SimpleTreeMetadataStore,
 };
 use nbd_server::{
-    AdmissionOp, ByteRange, ConcurrentExportRuntime, ExportAdmissionPolicy, ExportJob, ExportReply,
-    ExportRequest, ExportRuntime, LocalBlobStore, ServerError, SimpleDurableAdmissionPolicy,
-    SimpleDurableEngine, SimpleMutableTree,
+    AdmissionOp, BlobStore, ByteRange, ConcurrentExportRuntime, ExportAdmissionPolicy, ExportJob,
+    ExportReply, ExportRequest, ExportRuntime, LocalBlobStore, MutableBlobStore, ServerError,
+    SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree,
 };
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
@@ -21,15 +21,16 @@ async fn local_blob_store_creates_and_reads_blob_ranges() {
     let runtime = TestRuntime::new().expect("test runtime");
     let blob_dir = runtime.root_path().join("blobs");
     let store = LocalBlobStore::new(&blob_dir);
+    let key = BlobKey::new("blob-a").expect("valid blob key");
 
-    let key = store
-        .create_blob(b"abcdefghijklmnop")
+    store
+        .put_blob(&key, b"abcdefghijklmnop")
         .await
-        .expect("create blob");
+        .expect("put blob");
 
     runtime.assert_path_inside(blob_dir.join(key.as_str()));
     assert_eq!(
-        store.read_blob(&key, 4, 6).await.expect("read blob range"),
+        store.get_blob(&key, 4, 6).await.expect("get blob range"),
         b"efghij",
     );
     assert_eq!(
@@ -41,29 +42,52 @@ async fn local_blob_store_creates_and_reads_blob_ranges() {
 }
 
 #[tokio::test]
-async fn local_blob_store_replaces_full_blob_contents() {
+async fn local_blob_store_put_rejects_existing_blob() {
     let runtime = TestRuntime::new().expect("test runtime");
     let blob_dir = runtime.root_path().join("blobs");
     let store = LocalBlobStore::new(&blob_dir);
-    let key = store
-        .create_blob(b"old-contents")
-        .await
-        .expect("create blob");
+    let key = BlobKey::new("blob-a").expect("valid blob key");
 
     store
-        .replace_blob(&key, b"new")
+        .put_blob(&key, b"first")
         .await
-        .expect("replace blob");
+        .expect("put first blob");
+
+    assert!(matches!(
+        store.put_blob(&key, b"second").await,
+        Err(ServerError::Io {
+            context: "put blob",
+            ..
+        }),
+    ));
+}
+
+#[tokio::test]
+async fn local_blob_store_overwrites_full_blob_contents() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    let blob_dir = runtime.root_path().join("blobs");
+    let store = LocalBlobStore::new(&blob_dir);
+    let key = BlobKey::new("blob-a").expect("valid blob key");
+
+    store
+        .put_blob(&key, b"old-contents")
+        .await
+        .expect("put blob");
+
+    store
+        .overwrite_blob(&key, b"new")
+        .await
+        .expect("overwrite blob");
 
     assert_eq!(
         store
-            .read_blob(&key, 0, 3)
+            .get_blob(&key, 0, 3)
             .await
-            .expect("read replaced blob"),
+            .expect("get overwritten blob"),
         b"new",
     );
     assert!(matches!(
-        store.read_blob(&key, 0, 4).await,
+        store.get_blob(&key, 0, 4).await,
         Err(ServerError::Io {
             context: "read blob",
             ..
@@ -72,16 +96,16 @@ async fn local_blob_store_replaces_full_blob_contents() {
 }
 
 #[tokio::test]
-async fn local_blob_store_requires_existing_blob_for_replace() {
+async fn local_blob_store_requires_existing_blob_for_overwrite() {
     let runtime = TestRuntime::new().expect("test runtime");
     let blob_dir = runtime.root_path().join("blobs");
     let store = LocalBlobStore::new(&blob_dir);
     let key = BlobKey::new("missing").expect("valid blob key");
 
     assert!(matches!(
-        store.replace_blob(&key, b"data").await,
+        store.overwrite_blob(&key, b"data").await,
         Err(ServerError::Io {
-            context: "stat blob before replace",
+            context: "stat blob before overwrite",
             ..
         }),
     ));
@@ -397,7 +421,7 @@ async fn simple_durable_runtime(
         .expect("load descriptor");
     let engine = SimpleDurableEngine::load(
         &descriptor,
-        LocalBlobStore::new(runtime.state_dir().join("blobs")),
+        Arc::new(LocalBlobStore::new(runtime.state_dir().join("blobs"))),
         Arc::new(catalog.clone()),
     )
     .await

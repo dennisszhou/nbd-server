@@ -1,7 +1,7 @@
 use crate::{
-    AdmissionOp, AdmittedExportRequest, ByteRange, ExportAdmissionPolicy,
+    AdmissionOp, AdmittedExportRequest, BlobStoreHandle, ByteRange, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportEngine, ExportReply, ExportRequest, ExportResult,
-    ExportWalHandle, LocalBlobStore, Result, ServerError, WalRecord, WalRequest,
+    ExportWalHandle, Result, ServerError, WalRecord, WalRequest,
     compaction::{CompactionOutcome, CompactionResult, CowCompactor},
     extent_map::ExtentMap,
     observability::{self, event, target},
@@ -119,7 +119,7 @@ struct ZeroTreeReader;
 
 #[derive(Debug)]
 struct CowTreeReader {
-    blob_store: LocalBlobStore,
+    blob_store: BlobStoreHandle,
 }
 
 impl WalDurableEngine {
@@ -164,7 +164,7 @@ impl WalDurableEngine {
     pub async fn open_with_cow_tree(
         descriptor: &ActiveExportDescriptor,
         wal: ExportWalHandle,
-        blob_store: LocalBlobStore,
+        blob_store: BlobStoreHandle,
         catalog: Arc<dyn CowTreeMetadataStore>,
     ) -> Result<Self> {
         Self::open_with_cow_tree_and_wal_debt_threshold(
@@ -181,7 +181,7 @@ impl WalDurableEngine {
     pub async fn open_with_cow_tree_and_wal_debt_threshold(
         descriptor: &ActiveExportDescriptor,
         wal: ExportWalHandle,
-        blob_store: LocalBlobStore,
+        blob_store: BlobStoreHandle,
         catalog: Arc<dyn CowTreeMetadataStore>,
         wal_debt_threshold_bytes: u64,
     ) -> Result<Self> {
@@ -362,7 +362,7 @@ impl CompactionCoordinator {
         export_name: ExportName,
         wal: ExportWalHandle,
         catalog: Arc<dyn CowTreeMetadataStore>,
-        blob_store: LocalBlobStore,
+        blob_store: BlobStoreHandle,
         read_view: Arc<ExportReadView>,
     ) -> Self {
         let compactor = CowCompactor::new(catalog.clone(), blob_store);
@@ -960,7 +960,7 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
             if let Some(chunk) = snapshot.chunk(chunk_index) {
                 let chunk_data = self
                     .blob_store
-                    .read_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
+                    .get_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
                     .await?;
                 parts.push(BlockPart::Data {
                     range: part_range,
@@ -1164,10 +1164,14 @@ fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{LocalBlobStore, put_random_blob};
     use nbd_control_plane::{ChunkIndex, CowChunkRef, ExportId};
     use nbd_test_support::TestRuntime;
     use std::collections::BTreeMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[tokio::test]
     async fn read_view_overlay_keeps_only_latest_repeated_write() {
@@ -1375,11 +1379,11 @@ mod tests {
     #[tokio::test]
     async fn cow_tree_reader_reads_from_root_snapshot() {
         let runtime = TestRuntime::new().expect("test runtime");
-        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let blob_store: BlobStoreHandle =
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
         let mut chunk_data = vec![0; 4096];
         chunk_data[8..12].copy_from_slice(b"root");
-        let key = blob_store
-            .create_blob(&chunk_data)
+        let key = put_random_blob(blob_store.as_ref(), &chunk_data)
             .await
             .expect("create blob");
         let chunk = CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk");
@@ -1412,7 +1416,8 @@ mod tests {
     #[tokio::test]
     async fn cow_tree_reader_splits_large_sparse_reads_on_chunk_boundaries() {
         let runtime = TestRuntime::new().expect("test runtime");
-        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let blob_store: BlobStoreHandle =
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
         let snapshot = CowTreeSnapshot::new(
             ExportId::new("export-root-sparse").expect("export id"),
             TREE_CHUNK_BYTES * 2,
@@ -1446,7 +1451,8 @@ mod tests {
     #[tokio::test]
     async fn tree_readers_reject_wrong_root_kind() {
         let runtime = TestRuntime::new().expect("test runtime");
-        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let blob_store: BlobStoreHandle =
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
         let zero_root = RootSnapshot {
             backing: RootBacking::Zero {
                 root_node_id: None,
@@ -1466,8 +1472,7 @@ mod tests {
         ));
 
         let empty_chunk = vec![0; 4096];
-        let key = blob_store
-            .create_blob(&empty_chunk)
+        let key = put_random_blob(blob_store.as_ref(), &empty_chunk)
             .await
             .expect("create blob");
         let chunk = CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk");

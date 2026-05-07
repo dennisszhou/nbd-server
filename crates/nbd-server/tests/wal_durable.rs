@@ -5,9 +5,9 @@ use nbd_control_plane::{
     SQLiteExportCatalog, TREE_CHUNK_BYTES, Timestamp, WalSeq,
 };
 use nbd_server::{
-    ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime, ExportWalHandle,
-    LocalBlobStore, LocalWalProvider, OpenWal, Result, ServerError, WalDomain, WalDurableEngine,
-    WalProvider, WalRequest,
+    BlobStoreHandle, ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime,
+    ExportWalHandle, LocalBlobStore, LocalWalProvider, OpenWal, Result, ServerError, WalDomain,
+    WalDurableEngine, WalProvider, WalRequest, put_random_blob,
 };
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
@@ -205,14 +205,17 @@ async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
         )
         .await
         .expect("create wal export");
-    let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+    let blob_store: BlobStoreHandle =
+        Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
     let descriptor = catalog
         .load_export_descriptor(created.name().clone())
         .await
         .expect("load descriptor");
     let mut chunk = vec![0; TREE_CHUNK_BYTES as usize];
     chunk[4..8].copy_from_slice(b"base");
-    let key = blob_store.create_blob(&chunk).await.expect("create blob");
+    let key = put_random_blob(blob_store.as_ref(), &chunk)
+        .await
+        .expect("create blob");
     let wal = open_wal(&runtime, created.id().as_str()).await;
     wal.append(
         WalRequest::new(nbd_server::ByteRange::new(4, 2), b"ba".to_vec())
@@ -297,7 +300,7 @@ async fn wal_durable_engine_close_compacts_applied_writes_and_advances_read_view
         WalDurableEngine::open_with_cow_tree(
             &descriptor,
             wal.clone(),
-            LocalBlobStore::new(runtime.root_path().join("blobs")),
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
             Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
         )
         .await
@@ -362,7 +365,7 @@ async fn wal_durable_engine_close_compacts_applied_writes_and_advances_read_view
         WalDurableEngine::open_with_cow_tree(
             &reopened_descriptor,
             open_wal(&runtime, created.id().as_str()).await,
-            LocalBlobStore::new(runtime.root_path().join("blobs")),
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
             Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
         )
         .await
@@ -709,7 +712,7 @@ async fn wal_durable_cow_runtime(
         WalDurableEngine::open_with_cow_tree_and_wal_debt_threshold(
             &descriptor,
             wal.clone(),
-            LocalBlobStore::new(runtime.root_path().join("blobs")),
+            Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
             cow_tree_store,
             wal_debt_threshold_bytes,
         )

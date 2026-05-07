@@ -42,7 +42,10 @@ pub use runtime::{
 };
 pub use server::NbdServer;
 pub use simple_durable::{SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree};
-pub use storage::LocalBlobStore;
+pub use storage::{
+    BlobStore, BlobStoreHandle, LocalBlobStore, MutableBlobStore, MutableBlobStoreHandle,
+    put_random_blob,
+};
 pub use wal::{
     ExportWal, ExportWalHandle, LocalExportWal, LocalWalProvider, OpenWal, WalBounds, WalDomain,
     WalProvider, WalPruneResult, WalRecord, WalReplay, WalRequest,

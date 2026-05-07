@@ -3,8 +3,8 @@ use nbd_control_plane::{
     ExportId, ExportName, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
 };
 use nbd_server::{
-    ByteRange, CompactionOutcome, CowCompactor, ExportWalHandle, LocalBlobStore, LocalWalProvider,
-    OpenWal, WalDomain, WalProvider, WalRequest,
+    BlobStore, BlobStoreHandle, ByteRange, CompactionOutcome, CowCompactor, ExportWalHandle,
+    LocalBlobStore, LocalWalProvider, OpenWal, WalDomain, WalProvider, WalRequest,
 };
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ async fn compaction_publishes_checkpoint_from_wal_records() {
     assert_eq!(
         fixture
             .blob_store
-            .read_blob(chunk.blob_key(), 0, 4)
+            .get_blob(chunk.blob_key(), 0, 4)
             .await
             .expect("read compacted blob"),
         b"abZZ",
@@ -135,7 +135,7 @@ async fn compaction_clamps_target_to_durable_wal_bounds() {
 struct CompactionFixture {
     _runtime: TestRuntime,
     catalog: SQLiteExportCatalog,
-    blob_store: LocalBlobStore,
+    blob_store: Arc<LocalBlobStore>,
     wal_provider: Arc<LocalWalProvider>,
     compactor: CowCompactor,
 }
@@ -144,11 +144,12 @@ impl CompactionFixture {
     async fn new() -> Self {
         let runtime = TestRuntime::new().expect("test runtime");
         let catalog = migrated_catalog(&runtime).await;
-        let blob_store = LocalBlobStore::new(runtime.root_path().join("blobs"));
+        let blob_store = Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
         let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
+        let compactor_blob_store: BlobStoreHandle = blob_store.clone();
         let compactor = CowCompactor::new(
             Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
-            blob_store.clone(),
+            compactor_blob_store,
         );
 
         Self {

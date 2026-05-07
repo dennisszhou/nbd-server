@@ -1,4 +1,4 @@
-use crate::{ExportWalHandle, LocalBlobStore, Result, ServerError};
+use crate::{BlobStore, BlobStoreHandle, ExportWalHandle, Result, ServerError, put_random_blob};
 use nbd_control_plane::{
     ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportId,
     ExportLayoutKind, PublishCompaction, PublishCompactionOutcome, TREE_CHUNK_BYTES, WalSeq,
@@ -28,7 +28,7 @@ pub enum CompactionOutcome {
 #[derive(Clone)]
 pub struct CowCompactor {
     catalog: Arc<dyn CowTreeMetadataStore>,
-    blob_store: LocalBlobStore,
+    blob_store: BlobStoreHandle,
 }
 
 impl CompactionResult {
@@ -58,7 +58,7 @@ impl CompactionResult {
 }
 
 impl CowCompactor {
-    pub fn new(catalog: Arc<dyn CowTreeMetadataStore>, blob_store: LocalBlobStore) -> Self {
+    pub fn new(catalog: Arc<dyn CowTreeMetadataStore>, blob_store: BlobStoreHandle) -> Self {
         Self {
             catalog,
             blob_store,
@@ -96,7 +96,13 @@ impl CowCompactor {
         let mut compacted_records = 0u64;
         while let Some(record) = replay.next_record().await? {
             compacted_records += 1;
-            apply_record_to_chunks(&self.blob_store, &snapshot, &mut chunk_images, &record).await?;
+            apply_record_to_chunks(
+                self.blob_store.as_ref(),
+                &snapshot,
+                &mut chunk_images,
+                &record,
+            )
+            .await?;
         }
 
         if compacted_records == 0 {
@@ -113,7 +119,7 @@ impl CowCompactor {
         let mut chunks = snapshot.chunks().clone();
         let mut written_leaf_blobs = 0u64;
         for (chunk_index, data) in chunk_images {
-            let key = self.blob_store.create_blob(&data).await?;
+            let key = put_random_blob(self.blob_store.as_ref(), &data).await?;
             let chunk = CowChunkRef::new(chunk_index, key, TREE_CHUNK_BYTES)
                 .map_err(ServerError::catalog)?;
             chunks.insert(chunk_index, chunk);
@@ -152,7 +158,7 @@ impl CowCompactor {
 }
 
 async fn apply_record_to_chunks(
-    blob_store: &LocalBlobStore,
+    blob_store: &dyn BlobStore,
     snapshot: &CowTreeSnapshot,
     chunk_images: &mut BTreeMap<ChunkIndex, Vec<u8>>,
     record: &crate::WalRecord,
@@ -175,7 +181,7 @@ async fn apply_record_to_chunks(
 }
 
 async fn load_or_create_chunk<'a>(
-    blob_store: &LocalBlobStore,
+    blob_store: &dyn BlobStore,
     snapshot: &CowTreeSnapshot,
     chunk_images: &'a mut BTreeMap<ChunkIndex, Vec<u8>>,
     chunk_index: ChunkIndex,
@@ -186,7 +192,7 @@ async fn load_or_create_chunk<'a>(
             let data = match snapshot.chunk(chunk_index) {
                 Some(chunk) => {
                     blob_store
-                        .read_blob(chunk.blob_key(), 0, TREE_CHUNK_BYTES)
+                        .get_blob(chunk.blob_key(), 0, TREE_CHUNK_BYTES)
                         .await?
                 }
                 None => vec![0; TREE_CHUNK_BYTES as usize],
