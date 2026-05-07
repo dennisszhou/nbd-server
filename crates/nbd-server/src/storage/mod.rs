@@ -1,14 +1,17 @@
 mod local;
+#[cfg(feature = "s3")]
+mod s3;
 
 use crate::error::{Result, ServerError};
 use nbd_config::{BlobStoreConfig, NbdConfig};
 use nbd_control_plane::BlobKey;
 use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use local::LocalBlobStore;
+#[cfg(feature = "s3")]
+pub use s3::S3BlobStore;
 
 pub type BlobStoreHandle = Arc<dyn BlobStore>;
 pub type MutableBlobStoreHandle = Arc<dyn MutableBlobStore>;
@@ -16,12 +19,19 @@ pub type MutableBlobStoreHandle = Arc<dyn MutableBlobStore>;
 #[derive(Debug, Clone)]
 pub enum ConfiguredBlobStore {
     Local(Arc<LocalBlobStore>),
+    #[cfg(feature = "s3")]
+    S3(Arc<S3BlobStore>),
 }
 
 impl ConfiguredBlobStore {
     pub async fn open(config: &NbdConfig) -> Result<Self> {
         match &config.blob_store {
             BlobStoreConfig::Local => Ok(Self::local(config.runtime.blob_dir.clone())),
+            #[cfg(feature = "s3")]
+            BlobStoreConfig::S3 { .. } => Ok(Self::S3(Arc::new(
+                S3BlobStore::open(&config.blob_store).await?,
+            ))),
+            #[cfg(not(feature = "s3"))]
             BlobStoreConfig::S3 { .. } => Err(ServerError::Io {
                 context: "open blob store",
                 message: "S3 blob store backend is not available in this build".to_owned(),
@@ -37,18 +47,24 @@ impl ConfiguredBlobStore {
     pub fn blob_store(&self) -> BlobStoreHandle {
         match self {
             Self::Local(store) => store.clone(),
+            #[cfg(feature = "s3")]
+            Self::S3(store) => store.clone(),
         }
     }
 
     pub fn mutable_blob_store(&self) -> Option<MutableBlobStoreHandle> {
         match self {
             Self::Local(store) => Some(store.clone()),
+            #[cfg(feature = "s3")]
+            Self::S3(_) => None,
         }
     }
 
     pub fn local_root(&self) -> Option<&Path> {
         match self {
             Self::Local(store) => Some(store.root()),
+            #[cfg(feature = "s3")]
+            Self::S3(_) => None,
         }
     }
 }
@@ -70,7 +86,7 @@ pub async fn put_random_blob<S: BlobStore + ?Sized>(store: &S, data: &[u8]) -> R
         let key = BlobKey::random();
         match store.put_blob(&key, data).await {
             Ok(()) => return Ok(key),
-            Err(error) if is_already_exists(&error) => continue,
+            Err(error) if is_blob_already_exists(&error) => continue,
             Err(error) => return Err(error),
         }
     }
@@ -82,14 +98,15 @@ pub async fn put_random_blob<S: BlobStore + ?Sized>(store: &S, data: &[u8]) -> R
     })
 }
 
-fn is_already_exists(error: &ServerError) -> bool {
-    matches!(
-        error,
-        ServerError::Io {
-            source: Some(source),
-            ..
-        } if source.kind() == io::ErrorKind::AlreadyExists
-    )
+pub(crate) fn blob_already_exists(context: &'static str, key: &BlobKey) -> ServerError {
+    ServerError::BlobAlreadyExists {
+        context,
+        key: key.clone(),
+    }
+}
+
+pub(crate) fn is_blob_already_exists(error: &ServerError) -> bool {
+    matches!(error, ServerError::BlobAlreadyExists { .. })
 }
 
 #[cfg(test)]
@@ -112,6 +129,7 @@ mod tests {
         assert!(store.mutable_blob_store().is_some());
     }
 
+    #[cfg(not(feature = "s3"))]
     #[tokio::test]
     async fn configured_s3_store_fails_until_backend_exists() {
         let config = test_config(BlobStoreConfig::S3 {

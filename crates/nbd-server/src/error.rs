@@ -1,4 +1,4 @@
-use nbd_control_plane::ExportName;
+use nbd_control_plane::{BlobKey, ExportName};
 use nbd_protocol::ProtocolError;
 use std::sync::Arc;
 use thiserror::Error;
@@ -30,6 +30,8 @@ pub enum ServerError {
     LockPoisoned { resource: &'static str },
     #[error("{resource} is closed")]
     RuntimeClosed { resource: &'static str },
+    #[error("{context}: blob `{key}` already exists")]
+    BlobAlreadyExists { context: &'static str, key: BlobKey },
     #[error("{context}: {message}")]
     Io {
         context: &'static str,
@@ -92,6 +94,7 @@ impl ServerError {
             | Self::ExportOwnerMismatch { .. }
             | Self::LockPoisoned { .. }
             | Self::RuntimeClosed { .. }
+            | Self::BlobAlreadyExists { .. }
             | Self::Io { .. }
             | Self::Catalog { .. }
             | Self::Wal { .. } => RequestFailureLogLevel::Warn,

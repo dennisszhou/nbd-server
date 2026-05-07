@@ -55,7 +55,7 @@ async fn local_blob_store_put_rejects_existing_blob() {
 
     assert!(matches!(
         store.put_blob(&key, b"second").await,
-        Err(ServerError::Io {
+        Err(ServerError::BlobAlreadyExists {
             context: "put blob",
             ..
         }),

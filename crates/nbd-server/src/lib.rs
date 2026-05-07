@@ -31,6 +31,8 @@ pub use export::{
 pub use range::ByteRange;
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use server::NbdServer;
+#[cfg(feature = "s3")]
+pub use storage::S3BlobStore;
 pub use storage::{
     BlobStore, BlobStoreHandle, ConfiguredBlobStore, LocalBlobStore, MutableBlobStore,
     MutableBlobStoreHandle, put_random_blob,

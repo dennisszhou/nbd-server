@@ -1,4 +1,4 @@
-use super::{BlobStore, MutableBlobStore};
+use super::{BlobStore, MutableBlobStore, blob_already_exists};
 use crate::error::{Result, ServerError};
 use crate::observability::{self, event, target};
 use nbd_control_plane::BlobKey;
@@ -62,7 +62,7 @@ impl BlobStore for LocalBlobStore {
                 Ok(())
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                Err(ServerError::io("put blob", error))
+                Err(blob_already_exists("put blob", key))
             }
             Err(error) => {
                 let _ = fs::remove_file(&path).await;
