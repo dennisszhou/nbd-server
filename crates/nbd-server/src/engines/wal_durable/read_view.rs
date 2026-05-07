@@ -380,6 +380,15 @@ impl ExportReadView {
                 ),
             ));
         }
+        if new_checkpoint > snapshot_target {
+            return Err(ServerError::wal(
+                "advance read-view root after compaction",
+                format!(
+                    "new checkpoint {} is after snapshot target {}",
+                    new_checkpoint, snapshot_target
+                ),
+            ));
+        }
         if new_checkpoint > state.last_applied_seq {
             return Err(ServerError::wal(
                 "advance read-view root after compaction",
@@ -1016,6 +1025,38 @@ mod tests {
         assert_eq!(
             state.overlay.debug_extents(),
             vec![(8, 12, WalSeq::new(2), 0)],
+        );
+    }
+
+    #[tokio::test]
+    async fn read_view_compaction_advance_rejects_root_beyond_snapshot_target() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply snapshot record");
+        let snapshot = read_view
+            .capture_compaction_snapshot()
+            .await
+            .expect("capture snapshot")
+            .expect("snapshot present");
+        read_view
+            .apply_wal_record(wal_record(2, 8, b"bbbb"))
+            .await
+            .expect("apply later record");
+
+        let error = read_view
+            .advance_after_compaction(zero_root_at(4096, WalSeq::new(2)), &snapshot)
+            .await
+            .expect_err("reject root beyond snapshot target");
+
+        assert!(matches!(error, ServerError::Wal { .. }));
+        let state = read_view.state.read().await;
+        assert_eq!(state.root.base_wal_seq(), WalSeq::zero());
+        assert_eq!(state.wal_debt_bytes, 8);
+        assert_eq!(
+            state.overlay.debug_extents(),
+            vec![(0, 4, WalSeq::new(1), 0), (8, 12, WalSeq::new(2), 0),],
         );
     }
 
