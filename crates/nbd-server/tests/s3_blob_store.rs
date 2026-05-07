@@ -1,5 +1,7 @@
 #![cfg(feature = "s3")]
 
+use aws_sdk_s3::Client;
+use aws_sdk_s3::config::{Credentials, Region};
 use nbd_config::BlobStoreConfig;
 use nbd_control_plane::BlobKey;
 use nbd_server::{BlobStore, S3BlobStore, ServerError};
@@ -42,6 +44,49 @@ async fn s3_blob_store_exercises_configured_endpoint_when_available() {
     ));
 }
 
+#[tokio::test]
+async fn s3_configured_prefix_contains_objects_when_required() {
+    if !required_env_flag("NBD_TEST_S3_REQUIRE_NONEMPTY_PREFIX") {
+        return;
+    }
+
+    let config = configured_s3_blob_store().expect("required S3 blob store config");
+    let (client, bucket, key_prefix) = s3_client_and_location(&config);
+    let output = client
+        .list_objects_v2()
+        .bucket(bucket.clone())
+        .prefix(key_prefix.clone())
+        .max_keys(10)
+        .send()
+        .await
+        .expect("list configured S3 prefix");
+
+    let object = output
+        .contents()
+        .iter()
+        .find(|object| object.size().unwrap_or_default() > 0)
+        .expect("expected at least one non-empty object under configured S3 prefix");
+    let key = object
+        .key()
+        .expect("listed S3 object should include a key")
+        .to_owned();
+
+    let body = client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .range("bytes=0-0")
+        .send()
+        .await
+        .expect("get one byte from configured S3 prefix object")
+        .body
+        .collect()
+        .await
+        .expect("read configured S3 prefix object body")
+        .into_bytes();
+    assert_eq!(body.len(), 1);
+}
+
 fn configured_s3_blob_store() -> Option<BlobStoreConfig> {
     let endpoint_url = optional_env("NBD_TEST_S3_ENDPOINT_URL")?;
     let bucket = optional_env("NBD_TEST_S3_BUCKET").unwrap_or_else(|| "everstore".to_owned());
@@ -65,6 +110,47 @@ fn configured_s3_blob_store() -> Option<BlobStoreConfig> {
     })
 }
 
+fn s3_client_and_location(config: &BlobStoreConfig) -> (Client, String, String) {
+    let BlobStoreConfig::S3 {
+        endpoint_url,
+        region,
+        bucket,
+        access_key_id,
+        secret_access_key,
+        force_path_style,
+        key_prefix,
+        auto_create_bucket: _,
+    } = config
+    else {
+        panic!("expected S3 blob store config");
+    };
+
+    let mut builder = aws_sdk_s3::config::Builder::new()
+        .region(Region::new(region.clone()))
+        .credentials_provider(Credentials::new(
+            access_key_id.clone(),
+            secret_access_key.clone(),
+            None,
+            None,
+            "nbd-test",
+        ))
+        .force_path_style(*force_path_style);
+
+    if let Some(endpoint_url) = endpoint_url {
+        builder = builder.endpoint_url(endpoint_url.clone());
+    }
+
+    (
+        Client::from_conf(builder.build()),
+        bucket.clone(),
+        key_prefix.clone().unwrap_or_default(),
+    )
+}
+
 fn optional_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+fn required_env_flag(key: &str) -> bool {
+    optional_env(key).is_some_and(|value| value != "0")
 }

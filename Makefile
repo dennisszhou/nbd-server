@@ -252,6 +252,18 @@ docker-smoke-s3: docker-build
 			fi; \
 			exit 1; \
 		}
+	$(DOCKER_RUN_WORKSPACE_READONLY) --network $(DOCKER_SMOKE_S3_NETWORK) \
+		$(DOCKER_SMOKE_S3_ENV) \
+		-e NBD_TEST_S3_REQUIRE_NONEMPTY_PREFIX=1 \
+		$(DOCKER_IMAGE) cargo test -p nbd-server --features s3 \
+			--test s3_blob_store \
+			s3_configured_prefix_contains_objects_when_required -- --exact || { \
+			docker logs $(DOCKER_SMOKE_S3_RUSTFS_CONTAINER) >"$(DOCKER_SMOKE_S3_ARTIFACT_DIR)/rustfs.log" 2>&1 || true; \
+			if [ "$${KEEP_RUSTFS:-0}" != "1" ]; then \
+				$(MAKE) docker-smoke-s3-down >/dev/null; \
+			fi; \
+			exit 1; \
+		}
 	docker logs $(DOCKER_SMOKE_S3_RUSTFS_CONTAINER) >"$(DOCKER_SMOKE_S3_ARTIFACT_DIR)/rustfs.log" 2>&1
 	@if [ "$${KEEP_RUSTFS:-0}" = "1" ]; then \
 		echo "kept RustFS sidecar running"; \
