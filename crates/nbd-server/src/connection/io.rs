@@ -1,5 +1,5 @@
 use super::shutdown::ConnectionShutdown;
-use crate::{Result, ServerError};
+use crate::error::{Result, ServerError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub(super) async fn read_exact_or_shutdown<R>(

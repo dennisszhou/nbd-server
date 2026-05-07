@@ -1,5 +1,7 @@
+use crate::error::{Result, ServerError};
+use crate::export::{ConnectionId, ExportRuntimeHandle};
 use crate::observability::{self, event, target};
-use crate::{ConnectionId, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError};
+use crate::registry::LocalExportRegistry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -517,7 +519,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::runtime::ExportRuntime for ControllableRuntime {
+    impl crate::ExportRuntime for ControllableRuntime {
         fn export_record(&self) -> ExportRecord {
             self.meta.clone()
         }

@@ -2,7 +2,6 @@
 
 #![deny(unsafe_code)]
 
-mod admission;
 mod compaction;
 mod connection;
 
@@ -16,7 +15,6 @@ pub mod observability;
 mod range;
 mod read_cache;
 mod registry;
-mod runtime;
 mod server;
 mod simple_durable;
 mod storage;
@@ -24,24 +22,19 @@ mod tree_reader;
 mod wal;
 mod wal_durable;
 
-pub use admission::{
-    AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ExportAdmissionCtl,
-};
 pub use compaction::{CompactionOutcome, CompactionResult, CowCompactor};
 pub use error::{Result, ServerError};
 pub use export::{
-    AdmittedExportRequest, CompletedExport, ConnectionId, ExportAdmissionPolicy,
-    ExportAdmissionPolicyHandle, ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob,
-    ExportJobContext, ExportReply, ExportRequest, ExportResult, OwnedAdmittedExportRequest,
-    RequestCookie, RequestSequence,
+    AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, AdmittedExportRequest,
+    CompletedExport, ConcurrentExportRuntime, ConnectionId, ExportAdmissionCtl,
+    ExportAdmissionPolicy, ExportAdmissionPolicyHandle, ExportCompletion, ExportEngine,
+    ExportEngineHandle, ExportJob, ExportJobContext, ExportQueueSlot, ExportReply, ExportRequest,
+    ExportResult, ExportRuntime, ExportRuntimeHandle, OwnedAdmittedExportRequest, RequestCookie,
+    RequestSequence, SerialExportRuntime,
 };
 pub use memory::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
 pub use range::ByteRange;
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
-pub use runtime::{
-    ConcurrentExportRuntime, ExportQueueSlot, ExportRuntime, ExportRuntimeHandle,
-    SerialExportRuntime,
-};
 pub use server::NbdServer;
 pub use simple_durable::{SimpleDurableAdmissionPolicy, SimpleDurableEngine, SimpleMutableTree};
 pub use storage::{

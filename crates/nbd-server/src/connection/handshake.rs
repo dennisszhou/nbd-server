@@ -2,7 +2,7 @@ use super::{
     io::{read_exact_or_shutdown, write_all_or_shutdown},
     shutdown::ConnectionShutdown,
 };
-use crate::Result;
+use crate::error::Result;
 use nbd_protocol::handshake::{decode_client_flags, encode_server_handshake};
 use tokio::net::TcpStream;
 

@@ -2,10 +2,10 @@ use super::{
     io::{read_exact_or_shutdown, write_all_or_shutdown},
     shutdown::ConnectionShutdown,
 };
-use crate::{
-    ConnectionId, ExportOwner, ExportRuntimeHandle, LocalExportRegistry, Result, ServerError,
-    observability::{self, event, target},
-};
+use crate::error::{Result, ServerError};
+use crate::export::{ConnectionId, ExportRuntimeHandle};
+use crate::observability::{self, event, target};
+use crate::registry::{ExportOwner, LocalExportRegistry};
 use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
 use nbd_protocol::option::{

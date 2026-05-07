@@ -1,10 +1,10 @@
 use super::shutdown::ConnectionShutdown;
-use crate::export::ExportCompletionSink;
-use crate::observability::{self, event, target};
-use crate::{
-    CompletedExport, ExportCompletion, ExportJobContext, ExportQueueSlot, ExportReply,
-    ExportResult, RequestCookie, Result, ServerError,
+use crate::error::{Result, ServerError};
+use crate::export::{
+    CompletedExport, ExportCompletion, ExportCompletionSink, ExportJobContext, ExportQueueSlot,
+    ExportReply, ExportResult, RequestCookie,
 };
+use crate::observability::{self, event, target};
 use nbd_protocol::constants::NBD_EINVAL;
 use nbd_protocol::transmission::{encode_read_reply, encode_simple_reply};
 use nbd_protocol::wire::NbdCookie;

@@ -1,8 +1,6 @@
-use crate::{
-    Result,
-    admission::AdmissionPermit,
-    observability::{self, event, target},
-};
+use super::admission::AdmissionPermit;
+use crate::error::Result;
+use crate::observability::{self, event, target};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -296,10 +294,7 @@ fn release_admission_permit(permit: &mut Option<AdmissionPermit>, context: &Expo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ByteRange,
-        admission::{AdmissionOp, ExportAdmissionCtl},
-    };
+    use crate::{AdmissionOp, ByteRange, ExportAdmissionCtl};
 
     #[test]
     fn request_sequence_generator_starts_at_one() {

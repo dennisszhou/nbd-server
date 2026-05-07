@@ -1,5 +1,6 @@
+use super::admission::AdmissionOp;
 use super::request::{AdmittedExportRequest, ExportRequest, ExportResult};
-use crate::{Result, admission::AdmissionOp};
+use crate::error::Result;
 use std::sync::Arc;
 
 /// Backing-store-specific mapping from export requests to admission operations.

@@ -1,5 +1,5 @@
 use super::request::{ExportJobContext, ExportRequest, ExportResult, RequestCookie};
-use crate::runtime::ExportQueueSlot;
+use super::runtime::ExportQueueSlot;
 use std::fmt;
 use tokio::sync::oneshot;
 
@@ -143,11 +143,7 @@ impl ExportJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        ExportReply,
-        memory::MemoryExportEngine,
-        runtime::{ExportRuntime, SerialExportRuntime},
-    };
+    use crate::{ExportReply, ExportRuntime, SerialExportRuntime, memory::MemoryExportEngine};
     use nbd_control_plane::{
         ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
     };

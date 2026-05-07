@@ -1,7 +1,6 @@
-use crate::{
-    ByteRange, Result, ServerError,
-    observability::{self, event, target},
-};
+use crate::error::{Result, ServerError};
+use crate::observability::{self, event, target};
+use crate::range::ByteRange;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;

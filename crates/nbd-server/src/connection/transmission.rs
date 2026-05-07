@@ -4,12 +4,12 @@ use super::{
     },
     shutdown::ConnectionShutdown,
 };
-use crate::export::RequestSequenceGenerator;
-use crate::observability::{self, event, target};
-use crate::{
+use crate::error::{Result, ServerError};
+use crate::export::{
     ConnectionId, ExportJob, ExportJobContext, ExportRequest, ExportRuntimeHandle, RequestCookie,
-    Result, ServerError,
+    RequestSequenceGenerator,
 };
+use crate::observability::{self, event, target};
 use nbd_protocol::constants::NBD_CMD_DISC;
 use nbd_protocol::transmission::{
     MAX_IO_BYTES, REQUEST_HEADER_BYTES, RequestHeader, TransmissionRequest, parse_request,
