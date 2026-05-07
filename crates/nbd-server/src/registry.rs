@@ -54,6 +54,7 @@ pub struct LocalExportRegistry {
 pub struct ExportFactory {
     config: ServerConfig,
     blob_dir: PathBuf,
+    local_blob_store: Arc<LocalBlobStore>,
     catalog: Arc<dyn ExportCatalog>,
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
@@ -285,9 +286,12 @@ impl ExportFactory {
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
     ) -> Self {
+        let blob_dir = blob_dir.into();
+        let local_blob_store = Arc::new(LocalBlobStore::new(blob_dir.clone()));
         Self {
             config,
-            blob_dir: blob_dir.into(),
+            blob_dir,
+            local_blob_store,
             catalog,
             simple_tree_store,
             cow_tree_store,
@@ -360,8 +364,7 @@ impl ExportFactory {
                 }
             }
             ExportEngineKind::SimpleDurable => {
-                let blob_store: MutableBlobStoreHandle =
-                    Arc::new(LocalBlobStore::new(self.blob_dir.clone()));
+                let blob_store: MutableBlobStoreHandle = self.local_blob_store.clone();
                 let engine = SimpleDurableEngine::load(
                     descriptor,
                     blob_store,
@@ -380,8 +383,7 @@ impl ExportFactory {
             }
             ExportEngineKind::WalDurable => {
                 let wal = self.open_wal(descriptor.id()).await?;
-                let blob_store: BlobStoreHandle =
-                    Arc::new(LocalBlobStore::new(self.blob_dir.clone()));
+                let blob_store: BlobStoreHandle = self.local_blob_store.clone();
                 let engine = WalDurableEngine::open_with_cow_tree(
                     descriptor,
                     wal,
