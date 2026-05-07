@@ -8,6 +8,12 @@ DEVICE="${KERNEL_SMOKE_DEVICE:-/dev/nbd0}"
 ARTIFACT_DIR="${KERNEL_SMOKE_ARTIFACT_DIR:-}"
 RUST_LOG_FILTER="${KERNEL_SMOKE_RUST_LOG:-info,nbd_server::storage=info}"
 COMPACTION_SETTLE_SECONDS="${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-0.2}"
+S3_ENDPOINT_URL="${KERNEL_SMOKE_S3_ENDPOINT_URL:-http://rustfs:9000}"
+S3_REGION="${KERNEL_SMOKE_S3_REGION:-us-east-1}"
+S3_BUCKET="${KERNEL_SMOKE_S3_BUCKET:-everstore}"
+S3_ACCESS_KEY_ID="${KERNEL_SMOKE_S3_ACCESS_KEY_ID:-rustfsadmin}"
+S3_SECRET_ACCESS_KEY="${KERNEL_SMOKE_S3_SECRET_ACCESS_KEY:-rustfsadmin}"
+S3_KEY_PREFIX="${KERNEL_SMOKE_S3_KEY_PREFIX:-v0.1/blobs/}"
 LISTEN="127.0.0.1:${PORT}"
 ROOT="$(mktemp -d /tmp/nbd-smoke.XXXXXX)"
 SMOKE_HOME="${ROOT}/home"
@@ -186,7 +192,6 @@ const [, , logFile, exportName, expectedRaw] = process.argv;
 const expected = Number(expectedRaw);
 const contents = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "";
 const lines = contents.split(/\n/).filter(Boolean);
-let compactionLine = -1;
 let rootLine = -1;
 
 for (let i = 0; i < lines.length; i++) {
@@ -198,15 +203,6 @@ for (let i = 0; i < lines.length; i++) {
     }
 
     if (
-        fields.event === "wal.compaction.completed" &&
-        Number(fields.target_wal_seq) === expected
-    ) {
-        compactionLine = i;
-    }
-
-    if (
-        compactionLine >= 0 &&
-        i > compactionLine &&
         fields.event === "wal.root.loaded" &&
         fields.export_name === exportName &&
         Number(fields.base_wal_seq) === expected &&
@@ -349,9 +345,19 @@ prepare_kernel_smoke() {
 
     mkdir -p "$(dirname "${CATALOG}")"
     DATABASE_URL="file:${CATALOG}" make -C prisma db-migrate
-    make build
+    build_smoke_binaries
     require_executable "${NBDCLI}"
     require_executable "${NBD_SERVER}"
+}
+
+build_smoke_binaries() {
+    if [ -n "${KERNEL_SMOKE_CARGO_FEATURES:-}" ]; then
+        cargo build -p nbd-server --features "${KERNEL_SMOKE_CARGO_FEATURES}"
+        cargo build -p nbdcli
+        return 0
+    fi
+
+    make build
 }
 
 create_export() {
@@ -363,6 +369,48 @@ create_export() {
         --block-size 4096 \
         --engine "${engine}"
     test -f "${CONFIG}"
+}
+
+configure_s3_blob_store() {
+    require_s3_smoke_config
+    local config_without_blob_store="${ROOT}/config-without-blob-store.toml"
+
+    awk '
+        /^\[blob_store\]$/ { skip = 1; next }
+        /^\[/ { skip = 0 }
+        skip != 1 { print }
+    ' "${CONFIG}" >"${config_without_blob_store}"
+
+    cat >>"${config_without_blob_store}" <<EOF
+
+[blob_store]
+kind = "s3"
+endpoint_url = "${S3_ENDPOINT_URL}"
+region = "${S3_REGION}"
+bucket = "${S3_BUCKET}"
+access_key_id = "${S3_ACCESS_KEY_ID}"
+secret_access_key = "${S3_SECRET_ACCESS_KEY}"
+force_path_style = true
+key_prefix = "${S3_KEY_PREFIX}"
+auto_create_bucket = true
+EOF
+    mv "${config_without_blob_store}" "${CONFIG}"
+}
+
+require_s3_smoke_config() {
+    for name in \
+        S3_ENDPOINT_URL \
+        S3_REGION \
+        S3_BUCKET \
+        S3_ACCESS_KEY_ID \
+        S3_SECRET_ACCESS_KEY \
+        S3_KEY_PREFIX
+    do
+        if [ -z "${!name}" ]; then
+            echo "missing required S3 smoke config: ${name}" >&2
+            return 1
+        fi
+    done
 }
 
 clone_export() {

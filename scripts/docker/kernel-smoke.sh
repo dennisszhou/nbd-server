@@ -31,12 +31,13 @@ SCENARIO="$(resolve_scenario)"
 SCENARIO_FILE="${SCRIPT_DIR}/kernel-smoke/scenarios/${SCENARIO}.sh"
 
 case "${SCENARIO}" in
-    memory-basic | simple-durable-basic | wal-durable-basic)
+    memory-basic | simple-durable-basic | wal-durable-basic | \
+        wal-durable-s3-basic)
         ;;
     *)
         echo "unknown kernel smoke scenario: ${SCENARIO}" >&2
         echo "available scenarios: memory-basic, simple-durable-basic," \
-            "wal-durable-basic" >&2
+            "wal-durable-basic, wal-durable-s3-basic" >&2
         exit 1
         ;;
 esac
