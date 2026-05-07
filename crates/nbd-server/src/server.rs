@@ -1,8 +1,9 @@
-use crate::{
-    ConnectionId, ExportFactory, LocalExportRegistry, LocalWalProvider, Result, ServerError,
-    connection,
-    observability::{self, event, target},
-};
+use crate::connection;
+use crate::error::{Result, ServerError};
+use crate::export::ConnectionId;
+use crate::observability::{self, event, target};
+use crate::registry::{ExportFactory, LocalExportRegistry};
+use crate::wal::LocalWalProvider;
 use nbd_config::NbdConfig;
 use nbd_control_plane::{CatalogProvider, CatalogUrl, open_catalog};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
