@@ -36,7 +36,7 @@ pub struct WalDurableEngine {
     wal: ExportWalHandle,
     read_view: Arc<ExportReadView>,
     compaction: Option<CompactionCoordinator>,
-    wal_debt_threshold_bytes: u64,
+    compaction_policy: CompactionPolicy,
     write_lock: Mutex<()>,
 }
 
@@ -51,6 +51,23 @@ struct CompactionCoordinator {
     compaction_lock: Mutex<()>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactionPolicy {
+    background_wal_debt_threshold_bytes: u64,
+    hard_wal_debt_threshold_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundCompactionTick {
+    SkippedBelowSoftThreshold,
+    SkippedAtHardThreshold,
+    SkippedBusy,
+    SkippedNoSnapshot,
+    Compacted(CompactionOutcome),
+    Failed,
+}
+
+const DEFAULT_BACKGROUND_WAL_DEBT_COMPACTION_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
 const DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +110,7 @@ impl WalDurableEngine {
             wal,
             read_view,
             compaction: None,
-            wal_debt_threshold_bytes: DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
+            compaction_policy: CompactionPolicy::default(),
             write_lock: Mutex::new(()),
         })
     }
@@ -161,7 +178,7 @@ impl WalDurableEngine {
             wal,
             read_view,
             compaction: Some(compaction),
-            wal_debt_threshold_bytes,
+            compaction_policy: CompactionPolicy::with_hard_threshold(wal_debt_threshold_bytes),
             write_lock: Mutex::new(()),
         })
     }
@@ -219,7 +236,7 @@ impl WalDurableEngine {
 
     async fn compact_if_wal_debt_exceeds_threshold(&self) {
         let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
-        if wal_debt_bytes < self.wal_debt_threshold_bytes {
+        if wal_debt_bytes < self.compaction_policy.hard_wal_debt_threshold_bytes {
             return;
         }
         let Some(compaction) = &self.compaction else {
@@ -227,8 +244,26 @@ impl WalDurableEngine {
         };
 
         compaction
-            .compact_write_pressure_best_effort(self.wal_debt_threshold_bytes)
+            .compact_write_pressure_best_effort(
+                self.compaction_policy.hard_wal_debt_threshold_bytes,
+            )
             .await;
+    }
+}
+
+impl CompactionPolicy {
+    fn with_hard_threshold(hard_wal_debt_threshold_bytes: u64) -> Self {
+        Self {
+            background_wal_debt_threshold_bytes:
+                DEFAULT_BACKGROUND_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
+            hard_wal_debt_threshold_bytes,
+        }
+    }
+}
+
+impl Default for CompactionPolicy {
+    fn default() -> Self {
+        Self::with_hard_threshold(DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES)
     }
 }
 
@@ -329,6 +364,54 @@ impl CompactionCoordinator {
             Ok(result) => log_compaction_completed(&self.export_name, &result, phase),
             Err(error) => {
                 self.log_compaction_failed(target_wal_seq, wal_debt_bytes, phase, &error);
+            }
+        }
+    }
+
+    async fn compact_background_tick(&self, policy: CompactionPolicy) -> BackgroundCompactionTick {
+        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
+        if wal_debt_bytes < policy.background_wal_debt_threshold_bytes {
+            return BackgroundCompactionTick::SkippedBelowSoftThreshold;
+        }
+        if wal_debt_bytes >= policy.hard_wal_debt_threshold_bytes {
+            return BackgroundCompactionTick::SkippedAtHardThreshold;
+        }
+
+        let Ok(_compaction) = self.compaction_lock.try_lock() else {
+            return BackgroundCompactionTick::SkippedBusy;
+        };
+        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
+        if wal_debt_bytes < policy.background_wal_debt_threshold_bytes {
+            return BackgroundCompactionTick::SkippedBelowSoftThreshold;
+        }
+        if wal_debt_bytes >= policy.hard_wal_debt_threshold_bytes {
+            return BackgroundCompactionTick::SkippedAtHardThreshold;
+        }
+
+        let snapshot = match self.read_view.capture_compaction_snapshot().await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return BackgroundCompactionTick::SkippedNoSnapshot,
+            Err(error) => {
+                self.log_compaction_failed(WalSeq::zero(), wal_debt_bytes, "background", &error);
+                return BackgroundCompactionTick::Failed;
+            }
+        };
+        let target_wal_seq = snapshot.target_wal_seq;
+        let snapshot_wal_debt_bytes = snapshot.wal_debt_bytes;
+        match self.compact_snapshot_locked(snapshot).await {
+            Ok(result) => {
+                let outcome = result.outcome();
+                log_compaction_completed(&self.export_name, &result, "background");
+                BackgroundCompactionTick::Compacted(outcome)
+            }
+            Err(error) => {
+                self.log_compaction_failed(
+                    target_wal_seq,
+                    snapshot_wal_debt_bytes,
+                    "background",
+                    &error,
+                );
+                BackgroundCompactionTick::Failed
             }
         }
     }
@@ -559,4 +642,177 @@ fn validate_snapshot_can_open(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::LocalBlobStore;
+    use crate::wal::{LocalWalProvider, OpenWal, WalDomain, WalProvider};
+    use nbd_control_plane::{
+        CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
+        TREE_CHUNK_BYTES,
+    };
+    use nbd_test_support::TestRuntime;
+
+    const MIGRATIONS: &[&str] = &[include_str!(
+        "../../../../../prisma/migrations/20260506000000_baseline/migration.sql"
+    )];
+
+    #[tokio::test]
+    async fn background_tick_skips_below_soft_threshold() {
+        let fixture = BackgroundTickFixture::new("background-below-soft", 1024).await;
+        fixture.write(0, b"abcd").await;
+
+        let tick = fixture
+            .compaction()
+            .compact_background_tick(compaction_policy(5, 10))
+            .await;
+
+        assert_eq!(tick, BackgroundCompactionTick::SkippedBelowSoftThreshold);
+        assert_eq!(fixture.engine.wal_debt_bytes().await, 4);
+        assert_eq!(fixture.catalog_base_wal_seq().await, WalSeq::zero());
+    }
+
+    #[tokio::test]
+    async fn background_tick_compacts_at_soft_threshold_below_hard() {
+        let fixture = BackgroundTickFixture::new("background-compact", 1024).await;
+        fixture.write(0, b"abcde").await;
+
+        let tick = fixture
+            .compaction()
+            .compact_background_tick(compaction_policy(5, 10))
+            .await;
+
+        assert_eq!(
+            tick,
+            BackgroundCompactionTick::Compacted(CompactionOutcome::Published),
+        );
+        assert_eq!(fixture.engine.wal_debt_bytes().await, 0);
+        assert_eq!(fixture.catalog_base_wal_seq().await, WalSeq::new(1));
+    }
+
+    #[tokio::test]
+    async fn background_tick_skips_at_hard_threshold() {
+        let fixture = BackgroundTickFixture::new("background-at-hard", 1024).await;
+        fixture.write(0, b"abcdefghij").await;
+
+        let tick = fixture
+            .compaction()
+            .compact_background_tick(compaction_policy(5, 10))
+            .await;
+
+        assert_eq!(tick, BackgroundCompactionTick::SkippedAtHardThreshold);
+        assert_eq!(fixture.engine.wal_debt_bytes().await, 10);
+        assert_eq!(fixture.catalog_base_wal_seq().await, WalSeq::zero());
+    }
+
+    #[tokio::test]
+    async fn background_tick_skips_when_compaction_lock_is_busy() {
+        let fixture = BackgroundTickFixture::new("background-busy", 1024).await;
+        fixture.write(0, b"abcde").await;
+        let compaction = fixture.compaction();
+        let _busy = compaction.compaction_lock.lock().await;
+
+        let tick = compaction
+            .compact_background_tick(compaction_policy(5, 10))
+            .await;
+
+        assert_eq!(tick, BackgroundCompactionTick::SkippedBusy);
+        assert_eq!(fixture.engine.wal_debt_bytes().await, 5);
+        assert_eq!(fixture.catalog_base_wal_seq().await, WalSeq::zero());
+    }
+
+    struct BackgroundTickFixture {
+        _runtime: TestRuntime,
+        catalog: SQLiteExportCatalog,
+        export_id: ExportId,
+        engine: WalDurableEngine,
+    }
+
+    impl BackgroundTickFixture {
+        async fn new(name: &str, engine_hard_threshold_bytes: u64) -> Self {
+            let runtime = TestRuntime::new().expect("test runtime");
+            let catalog = migrated_catalog(&runtime).await;
+            let created = catalog
+                .create_export(
+                    CreateExport::new(
+                        ExportName::new(name).expect("export name"),
+                        TREE_CHUNK_BYTES,
+                        4096,
+                        ExportEngineKind::WalDurable,
+                    )
+                    .expect("create export"),
+                )
+                .await
+                .expect("create wal export");
+            let descriptor = catalog
+                .load_export_descriptor(created.name().clone())
+                .await
+                .expect("load descriptor");
+            let wal_provider = LocalWalProvider::new(runtime.wal_dir());
+            let wal = wal_provider
+                .open_export(OpenWal::new(WalDomain::for_export_id(created.id().clone())))
+                .await
+                .expect("open wal");
+            let engine = WalDurableEngine::open_with_cow_tree_and_wal_debt_threshold(
+                &descriptor,
+                wal,
+                Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
+                Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
+                engine_hard_threshold_bytes,
+            )
+            .await
+            .expect("open wal durable engine");
+
+            Self {
+                _runtime: runtime,
+                catalog,
+                export_id: created.id().clone(),
+                engine,
+            }
+        }
+
+        async fn write(&self, offset: u64, data: &[u8]) {
+            self.engine
+                .write(offset, data.to_vec())
+                .await
+                .expect("write");
+        }
+
+        fn compaction(&self) -> &CompactionCoordinator {
+            self.engine.compaction.as_ref().expect("compaction")
+        }
+
+        async fn catalog_base_wal_seq(&self) -> WalSeq {
+            self.catalog
+                .load_cow_tree(&self.export_id)
+                .await
+                .expect("load cow tree")
+                .base_wal_seq()
+        }
+    }
+
+    async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
+        let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+        let catalog = SQLiteExportCatalog::connect(&url)
+            .await
+            .expect("connect catalog");
+
+        for migration in MIGRATIONS {
+            sqlx::raw_sql(migration)
+                .execute(catalog.pool())
+                .await
+                .expect("apply migration");
+        }
+
+        catalog
+    }
+
+    fn compaction_policy(soft: u64, hard: u64) -> CompactionPolicy {
+        CompactionPolicy {
+            background_wal_debt_threshold_bytes: soft,
+            hard_wal_debt_threshold_bytes: hard,
+        }
+    }
 }
