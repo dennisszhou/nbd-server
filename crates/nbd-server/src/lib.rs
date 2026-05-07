@@ -1,4 +1,4 @@
-//! NBD server implementation with an in-memory export backend.
+//! NBD server implementation.
 
 #![deny(unsafe_code)]
 
@@ -14,6 +14,7 @@ mod extent_map;
 mod memory;
 pub mod observability;
 mod read_cache;
+mod range;
 mod registry;
 mod runtime;
 mod server;
@@ -24,7 +25,7 @@ mod wal;
 mod wal_durable;
 
 pub use admission::{
-    AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ByteRange, ExportAdmissionCtl,
+    AdmissionOp, AdmissionPermit, AdmissionTicket, AdmissionWaiter, ExportAdmissionCtl,
 };
 pub use compaction::{CompactionOutcome, CompactionResult, CowCompactor};
 pub use error::{Result, ServerError};
@@ -35,6 +36,7 @@ pub use export::{
 };
 pub use memory::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
 pub use observability::{ConnectionId, ExportJobContext, RequestSequence};
+pub use range::ByteRange;
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use runtime::{
     ConcurrentExportRuntime, ExportQueueSlot, ExportRuntime, ExportRuntimeHandle,

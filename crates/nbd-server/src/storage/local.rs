@@ -1,8 +1,6 @@
 use super::{BlobStore, MutableBlobStore};
-use crate::{
-    Result, ServerError,
-    observability::{self, event, target},
-};
+use crate::error::{Result, ServerError};
+use crate::observability::{self, event, target};
 use nbd_control_plane::BlobKey;
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};

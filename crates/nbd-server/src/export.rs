@@ -298,7 +298,8 @@ impl ExportRequest {
 mod tests {
     use super::*;
     use crate::{
-        admission::{AdmissionOp, ByteRange, ExportAdmissionCtl},
+        admission::{AdmissionOp, ExportAdmissionCtl},
+        ByteRange,
         memory::MemoryExportEngine,
         runtime::{ExportRuntime, SerialExportRuntime},
     };

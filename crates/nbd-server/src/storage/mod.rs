@@ -1,6 +1,6 @@
 mod local;
 
-use crate::{Result, ServerError};
+use crate::error::{Result, ServerError};
 use nbd_control_plane::BlobKey;
 use std::fmt;
 use std::io;
