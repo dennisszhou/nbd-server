@@ -289,9 +289,33 @@ impl CompactionCoordinator {
     }
 
     async fn compact_close_best_effort(&self) {
-        let target_wal_seq = self.read_view.last_applied_seq().await;
-        let wal_debt_bytes = self.read_view.wal_debt_bytes().await;
-        self.compact_best_effort(target_wal_seq, wal_debt_bytes, "engine_close")
+        let snapshot = match self.read_view.capture_compaction_snapshot().await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                match self.read_view.export_head().await {
+                    Ok(head) => self.prune_published_wal(head.base_wal_seq()).await,
+                    Err(error) => {
+                        self.log_compaction_failed(
+                            WalSeq::zero(),
+                            self.read_view.wal_debt_bytes().await,
+                            "engine_close",
+                            &error,
+                        );
+                    }
+                }
+                return;
+            }
+            Err(error) => {
+                self.log_compaction_failed(
+                    WalSeq::zero(),
+                    self.read_view.wal_debt_bytes().await,
+                    "engine_close",
+                    &error,
+                );
+                return;
+            }
+        };
+        self.compact_snapshot_best_effort(snapshot, "engine_close")
             .await;
     }
 
@@ -304,19 +328,22 @@ impl CompactionCoordinator {
         match self.compact_through(target_wal_seq).await {
             Ok(result) => log_compaction_completed(&self.export_name, &result, phase),
             Err(error) => {
-                tracing::warn!(
-                    target: target::WAL,
-                    event = event::WAL_COMPACTION_FAILED,
-                    service = observability::SERVICE_NAME,
-                    server_instance_id = observability::server_instance_id(),
-                    pid = observability::pid(),
-                    export_id = %self.export_id,
-                    export_name = %self.export_name,
-                    target_wal_seq = target_wal_seq.get(),
-                    wal_debt_bytes,
-                    phase,
-                    error = %error,
-                );
+                self.log_compaction_failed(target_wal_seq, wal_debt_bytes, phase, &error);
+            }
+        }
+    }
+
+    async fn compact_snapshot_best_effort(
+        &self,
+        snapshot: read_view::ReadViewCompactionSnapshot,
+        phase: &'static str,
+    ) {
+        let target_wal_seq = snapshot.target_wal_seq;
+        let wal_debt_bytes = snapshot.wal_debt_bytes;
+        match self.compact_snapshot(snapshot).await {
+            Ok(result) => log_compaction_completed(&self.export_name, &result, phase),
+            Err(error) => {
+                self.log_compaction_failed(target_wal_seq, wal_debt_bytes, phase, &error);
             }
         }
     }
@@ -331,6 +358,20 @@ impl CompactionCoordinator {
         Ok(result)
     }
 
+    async fn compact_snapshot(
+        &self,
+        snapshot: read_view::ReadViewCompactionSnapshot,
+    ) -> Result<CompactionResult> {
+        let _compaction = self.compaction_lock.lock().await;
+        let result = self
+            .compactor
+            .compact_snapshot(&self.export_id, &snapshot)
+            .await?;
+        self.advance_after_snapshot_compaction(&result, &snapshot)
+            .await?;
+        Ok(result)
+    }
+
     async fn advance_after_compaction(&self, result: &CompactionResult) -> Result<()> {
         match result.outcome() {
             CompactionOutcome::Published | CompactionOutcome::AlreadyCovered => {
@@ -342,6 +383,30 @@ impl CompactionCoordinator {
                 let root = RootSnapshot::from_cow_snapshot(snapshot);
                 let prune_through = root.base_wal_seq();
                 self.read_view.advance_root(root).await?;
+                self.prune_published_wal(prune_through).await;
+            }
+            CompactionOutcome::StalePlan | CompactionOutcome::NoRecords => {}
+        }
+        Ok(())
+    }
+
+    async fn advance_after_snapshot_compaction(
+        &self,
+        result: &CompactionResult,
+        compaction_snapshot: &read_view::ReadViewCompactionSnapshot,
+    ) -> Result<()> {
+        match result.outcome() {
+            CompactionOutcome::Published | CompactionOutcome::AlreadyCovered => {
+                let snapshot = self
+                    .catalog
+                    .load_cow_tree(&self.export_id)
+                    .await
+                    .map_err(ServerError::catalog)?;
+                let root = RootSnapshot::from_cow_snapshot(snapshot);
+                let prune_through = root.base_wal_seq();
+                self.read_view
+                    .advance_after_compaction(root, compaction_snapshot)
+                    .await?;
                 self.prune_published_wal(prune_through).await;
             }
             CompactionOutcome::StalePlan | CompactionOutcome::NoRecords => {}
@@ -364,6 +429,28 @@ impl CompactionCoordinator {
                 error = %error,
             );
         }
+    }
+
+    fn log_compaction_failed(
+        &self,
+        target_wal_seq: WalSeq,
+        wal_debt_bytes: u64,
+        phase: &'static str,
+        error: &ServerError,
+    ) {
+        tracing::warn!(
+            target: target::WAL,
+            event = event::WAL_COMPACTION_FAILED,
+            service = observability::SERVICE_NAME,
+            server_instance_id = observability::server_instance_id(),
+            pid = observability::pid(),
+            export_id = %self.export_id,
+            export_name = %self.export_name,
+            target_wal_seq = target_wal_seq.get(),
+            wal_debt_bytes,
+            phase,
+            error = %error,
+        );
     }
 }
 

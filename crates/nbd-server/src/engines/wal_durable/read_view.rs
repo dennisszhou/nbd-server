@@ -340,6 +340,86 @@ impl ExportReadView {
         }
         Ok(())
     }
+
+    pub(super) async fn advance_after_compaction(
+        &self,
+        new_root: RootSnapshot,
+        snapshot: &ReadViewCompactionSnapshot,
+    ) -> Result<()> {
+        let mut state = self.state.write().await;
+        if new_root.size_bytes() != state.root.size_bytes() {
+            return Err(ServerError::wal(
+                "advance read-view root after compaction",
+                format!(
+                    "new root size {} does not match current size {}",
+                    new_root.size_bytes(),
+                    state.root.size_bytes()
+                ),
+            ));
+        }
+
+        let current_checkpoint = state.root.base_wal_seq();
+        let snapshot_base = snapshot.root.base_wal_seq();
+        let snapshot_target = snapshot.target_wal_seq;
+        if current_checkpoint >= snapshot_target {
+            return Ok(());
+        }
+        if current_checkpoint != snapshot_base {
+            return Err(ServerError::wal(
+                "advance read-view root after compaction",
+                format!(
+                    "current checkpoint {} does not match snapshot base {}",
+                    current_checkpoint, snapshot_base
+                ),
+            ));
+        }
+
+        let new_checkpoint = new_root.base_wal_seq();
+        if new_checkpoint < snapshot_target {
+            return Err(ServerError::wal(
+                "advance read-view root after compaction",
+                format!(
+                    "new checkpoint {} is before snapshot target {}",
+                    new_checkpoint, snapshot_target
+                ),
+            ));
+        }
+        if new_checkpoint > state.last_applied_seq {
+            return Err(ServerError::wal(
+                "advance read-view root after compaction",
+                format!(
+                    "new checkpoint {} is beyond last applied WAL sequence {}",
+                    new_checkpoint, state.last_applied_seq
+                ),
+            ));
+        }
+        if snapshot.wal_debt_bytes > state.wal_debt_bytes {
+            return Err(ServerError::wal(
+                "advance read-view root after compaction",
+                format!(
+                    "snapshot WAL debt {} exceeds live WAL debt {}",
+                    snapshot.wal_debt_bytes, state.wal_debt_bytes
+                ),
+            ));
+        }
+
+        let retired = state.overlay.visible_through(new_checkpoint);
+        for extent in &retired {
+            state.cache.insert_wal_record_slice(
+                byte_range_from_bounds(extent.start, extent.end)?,
+                extent.record.clone(),
+                extent.record_offset,
+                CacheInsertPlacement::Cold,
+            )?;
+        }
+        state.overlay.remove_retired(&retired)?;
+        state.root = new_root;
+        state.wal_debt_bytes -= snapshot.wal_debt_bytes;
+        if new_checkpoint == state.last_applied_seq {
+            state.wal_debt_bytes = 0;
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Debug for ExportReadView {
@@ -909,6 +989,37 @@ mod tests {
         assert_eq!(
             read_view.state.read().await.overlay.debug_extents(),
             vec![(0, 4, WalSeq::new(1), 0)],
+        );
+    }
+
+    #[tokio::test]
+    async fn read_view_compaction_advance_subtracts_only_snapshot_debt() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply snapshot record");
+        let snapshot = read_view
+            .capture_compaction_snapshot()
+            .await
+            .expect("capture snapshot")
+            .expect("snapshot present");
+        read_view
+            .apply_wal_record(wal_record(2, 8, b"bbbb"))
+            .await
+            .expect("apply later record");
+
+        read_view
+            .advance_after_compaction(zero_root_at(4096, WalSeq::new(1)), &snapshot)
+            .await
+            .expect("advance after compaction");
+
+        let state = read_view.state.read().await;
+        assert_eq!(state.root.base_wal_seq(), WalSeq::new(1));
+        assert_eq!(state.wal_debt_bytes, 4);
+        assert_eq!(
+            state.overlay.debug_extents(),
+            vec![(8, 12, WalSeq::new(2), 0)],
         );
     }
 

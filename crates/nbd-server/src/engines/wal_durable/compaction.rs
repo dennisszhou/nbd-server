@@ -164,7 +164,7 @@ impl CowCompactor {
     pub(super) async fn compact_snapshot(
         &self,
         export_id: &ExportId,
-        snapshot: ReadViewCompactionSnapshot,
+        snapshot: &ReadViewCompactionSnapshot,
     ) -> Result<CompactionResult> {
         let base_wal_seq = snapshot.root.base_wal_seq();
         let target_wal_seq = snapshot.target_wal_seq;
@@ -480,7 +480,7 @@ mod tests {
 
         let result = fixture
             .compactor
-            .compact_snapshot(created.id(), snapshot)
+            .compact_snapshot(created.id(), &snapshot)
             .await
             .expect("compact snapshot");
 
@@ -527,7 +527,7 @@ mod tests {
 
         let result = fixture
             .compactor
-            .compact_snapshot(created.id(), snapshot)
+            .compact_snapshot(created.id(), &snapshot)
             .await
             .expect("compact snapshot");
 
@@ -572,7 +572,7 @@ mod tests {
 
         let result = fixture
             .compactor
-            .compact_snapshot(created.id(), snapshot)
+            .compact_snapshot(created.id(), &snapshot)
             .await
             .expect("compact snapshot");
 
