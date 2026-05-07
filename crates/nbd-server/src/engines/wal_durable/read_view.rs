@@ -48,6 +48,14 @@ struct ExportReadViewState {
     cache: ReadCache,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ReadViewCompactionSnapshot {
+    pub(super) root: RootSnapshot,
+    pub(super) target_wal_seq: WalSeq,
+    pub(super) wal_debt_bytes: u64,
+    pub(super) overlay: OverlayExtentMap,
+}
+
 #[derive(Debug)]
 pub(super) struct ZeroTreeReader;
 
@@ -153,6 +161,22 @@ impl ExportReadView {
 
     pub(super) async fn wal_debt_bytes(&self) -> u64 {
         self.state.read().await.wal_debt_bytes
+    }
+
+    pub(super) async fn capture_compaction_snapshot(
+        &self,
+    ) -> Result<Option<ReadViewCompactionSnapshot>> {
+        let state = self.state.read().await;
+        if state.last_applied_seq <= state.root.base_wal_seq() || state.overlay.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(ReadViewCompactionSnapshot {
+            root: state.root.clone(),
+            target_wal_seq: state.last_applied_seq,
+            wal_debt_bytes: state.wal_debt_bytes,
+            overlay: state.overlay.clone(),
+        }))
     }
 
     pub async fn read(&self, range: ByteRange) -> Result<Vec<u8>> {
@@ -595,6 +619,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_snapshot_is_absent_without_retained_wal() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+
+        assert!(
+            read_view
+                .capture_compaction_snapshot()
+                .await
+                .expect("capture snapshot")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_snapshot_counts_physical_debt_for_hot_rewrites() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply first record");
+        read_view
+            .apply_wal_record(wal_record(2, 0, b"bbbb"))
+            .await
+            .expect("apply second record");
+        read_view
+            .apply_wal_record(wal_record(3, 0, b"cccc"))
+            .await
+            .expect("apply third record");
+
+        let snapshot = read_view
+            .capture_compaction_snapshot()
+            .await
+            .expect("capture snapshot")
+            .expect("snapshot present");
+
+        assert_eq!(snapshot.root.base_wal_seq(), WalSeq::zero());
+        assert_eq!(snapshot.target_wal_seq, WalSeq::new(3));
+        assert_eq!(snapshot.wal_debt_bytes, 12);
+        assert_eq!(
+            snapshot.overlay.debug_extents(),
+            vec![(0, 4, WalSeq::new(3), 0)],
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_snapshot_metadata_clone_reuses_record_arc() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply record");
+
+        let snapshot = read_view
+            .capture_compaction_snapshot()
+            .await
+            .expect("capture snapshot")
+            .expect("snapshot present");
+        let snapshot_slice = snapshot
+            .overlay
+            .read_slices(ByteRange::new(0, 4))
+            .expect("read snapshot overlay")
+            .pop()
+            .expect("snapshot overlay slice");
+        let live_slice = read_view
+            .state
+            .read()
+            .await
+            .overlay
+            .read_slices(ByteRange::new(0, 4))
+            .expect("read live overlay")
+            .pop()
+            .expect("live overlay slice");
+
+        assert!(Arc::ptr_eq(&snapshot_slice.record, &live_slice.record));
+    }
+
+    #[tokio::test]
+    async fn compaction_snapshot_stays_stable_after_later_writes() {
+        let read_view = ExportReadView::zero_filled(zero_root(4096));
+        read_view
+            .apply_wal_record(wal_record(1, 0, b"aaaa"))
+            .await
+            .expect("apply first record");
+        let snapshot = read_view
+            .capture_compaction_snapshot()
+            .await
+            .expect("capture snapshot")
+            .expect("snapshot present");
+        read_view
+            .apply_wal_record(wal_record(2, 0, b"bbbb"))
+            .await
+            .expect("apply second record");
+
+        let snapshot_slice = snapshot
+            .overlay
+            .read_slices(ByteRange::new(0, 4))
+            .expect("read snapshot overlay")
+            .pop()
+            .expect("snapshot overlay slice");
+
+        assert_eq!(snapshot.target_wal_seq, WalSeq::new(1));
+        assert_eq!(snapshot.wal_debt_bytes, 4);
+        assert_eq!(overlay_slice_bytes(&snapshot_slice), b"aaaa");
+        assert_eq!(
+            read_view
+                .read(ByteRange::new(0, 4))
+                .await
+                .expect("read latest live view"),
+            b"bbbb",
+        );
+        assert_eq!(
+            snapshot.overlay.debug_extents(),
+            vec![(0, 4, WalSeq::new(1), 0)],
+        );
+        assert_eq!(
+            read_view.state.read().await.overlay.debug_extents(),
+            vec![(0, 4, WalSeq::new(2), 0)],
+        );
+    }
+
+    #[tokio::test]
     async fn read_view_overlay_preserves_middle_split_offsets() {
         let read_view = ExportReadView::zero_filled(zero_root(4096));
         read_view
@@ -908,6 +1052,12 @@ mod tests {
             data.to_vec(),
         )
         .expect("WAL record")
+    }
+
+    fn overlay_slice_bytes(slice: &OverlayReadSlice) -> &[u8] {
+        let start = slice.record_offset as usize;
+        let len = (slice.end - slice.start) as usize;
+        &slice.record.data()[start..start + len]
     }
 
     #[derive(Debug)]

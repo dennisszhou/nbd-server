@@ -60,6 +60,10 @@ impl OverlayExtentMap {
         Ok(())
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.extents.is_empty()
+    }
+
     pub(super) fn read_slices(&self, range: ByteRange) -> Result<Vec<OverlayReadSlice>> {
         let read_start = range.start();
         let read_end = range_end(range);
