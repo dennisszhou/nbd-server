@@ -1,5 +1,5 @@
-use crate::export::ExportCompletionSink;
-use crate::observability::{self, RequestSequenceGenerator, event, target};
+use crate::export::{ExportCompletionSink, RequestSequenceGenerator};
+use crate::observability::{self, event, target};
 use crate::{
     CompletedExport, ConnectionId, ExportCompletion, ExportJob, ExportJobContext, ExportOwner,
     ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntimeHandle,

@@ -13,8 +13,8 @@ mod extent_map;
 #[allow(unsafe_code)]
 mod memory;
 pub mod observability;
-mod read_cache;
 mod range;
+mod read_cache;
 mod registry;
 mod runtime;
 mod server;
@@ -30,12 +30,12 @@ pub use admission::{
 pub use compaction::{CompactionOutcome, CompactionResult, CowCompactor};
 pub use error::{Result, ServerError};
 pub use export::{
-    AdmittedExportRequest, CompletedExport, ExportAdmissionPolicy, ExportAdmissionPolicyHandle,
-    ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob, ExportReply, ExportRequest,
-    ExportResult, OwnedAdmittedExportRequest,
+    AdmittedExportRequest, CompletedExport, ConnectionId, ExportAdmissionPolicy,
+    ExportAdmissionPolicyHandle, ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob,
+    ExportJobContext, ExportReply, ExportRequest, ExportResult, OwnedAdmittedExportRequest,
+    RequestSequence,
 };
 pub use memory::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
-pub use observability::{ConnectionId, ExportJobContext, RequestSequence};
 pub use range::ByteRange;
 pub use registry::{ExportFactory, ExportOwner, LocalExportRegistry};
 pub use runtime::{

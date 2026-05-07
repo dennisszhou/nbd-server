@@ -1,13 +1,17 @@
 use crate::{
     Result,
     admission::{AdmissionOp, AdmissionPermit},
-    observability::{self, ExportJobContext, event, target},
+    observability::{self, event, target},
     runtime::ExportQueueSlot,
 };
 use nbd_protocol::wire::NbdCookie;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Export request after wire decoding and before backend execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +29,144 @@ pub enum ExportReply {
 }
 
 pub type ExportResult = Result<ExportReply>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionId(u64);
+
+impl ConnectionId {
+    pub(crate) fn next() -> Self {
+        Self(NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(crate) fn internal() -> Self {
+        Self(0)
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for ConnectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestSequence(u64);
+
+impl RequestSequence {
+    pub(crate) fn internal() -> Self {
+        Self(0)
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for RequestSequence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RequestSequenceGenerator {
+    next: u64,
+}
+
+impl RequestSequenceGenerator {
+    pub(crate) fn new() -> Self {
+        Self { next: 1 }
+    }
+
+    pub(crate) fn next(&mut self) -> RequestSequence {
+        let sequence = RequestSequence(self.next);
+        self.next += 1;
+        sequence
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportJobContext {
+    connection_id: ConnectionId,
+    request_sequence: RequestSequence,
+    cookie: NbdCookie,
+    command: &'static str,
+    offset: Option<u64>,
+    length: Option<u64>,
+    reply_kind: &'static str,
+    started_at: Instant,
+}
+
+impl ExportJobContext {
+    pub(crate) fn new(
+        connection_id: ConnectionId,
+        request_sequence: RequestSequence,
+        cookie: NbdCookie,
+        command: &'static str,
+        offset: Option<u64>,
+        length: Option<u64>,
+        reply_kind: &'static str,
+    ) -> Self {
+        Self {
+            connection_id,
+            request_sequence,
+            cookie,
+            command,
+            offset,
+            length,
+            reply_kind,
+            started_at: Instant::now(),
+        }
+    }
+
+    pub(crate) fn internal(cookie: NbdCookie, command: &'static str) -> Self {
+        Self::new(
+            ConnectionId::internal(),
+            RequestSequence::internal(),
+            cookie,
+            command,
+            None,
+            None,
+            "internal",
+        )
+    }
+
+    pub fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
+
+    pub fn request_sequence(&self) -> RequestSequence {
+        self.request_sequence
+    }
+
+    pub fn cookie(&self) -> NbdCookie {
+        self.cookie
+    }
+
+    pub fn command(&self) -> &'static str {
+        self.command
+    }
+
+    pub fn offset(&self) -> Option<u64> {
+        self.offset
+    }
+
+    pub fn length(&self) -> Option<u64> {
+        self.length
+    }
+
+    pub fn reply_kind(&self) -> &'static str {
+        self.reply_kind
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+}
 
 /// Backing-store-specific mapping from export requests to admission operations.
 pub trait ExportAdmissionPolicy: Send + Sync {
@@ -298,8 +440,8 @@ impl ExportRequest {
 mod tests {
     use super::*;
     use crate::{
-        admission::{AdmissionOp, ExportAdmissionCtl},
         ByteRange,
+        admission::{AdmissionOp, ExportAdmissionCtl},
         memory::MemoryExportEngine,
         runtime::{ExportRuntime, SerialExportRuntime},
     };
@@ -307,6 +449,14 @@ mod tests {
         ExportEngineKind, ExportHead, ExportId, ExportName, ExportRecord, ExportState, Timestamp,
     };
     use tokio::sync::mpsc;
+
+    #[test]
+    fn request_sequence_generator_starts_at_one() {
+        let mut generator = RequestSequenceGenerator::new();
+
+        assert_eq!(generator.next().raw(), 1);
+        assert_eq!(generator.next().raw(), 2);
+    }
 
     #[tokio::test]
     async fn connection_completion_holds_slot_until_reply_drop() {

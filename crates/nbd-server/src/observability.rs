@@ -1,9 +1,7 @@
+use crate::export::ExportJobContext;
 use nbd_control_plane::ExportRecord;
-use nbd_protocol::wire::NbdCookie;
-use std::fmt;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 
 pub const SERVICE_NAME: &str = "nbd-server";
@@ -111,7 +109,6 @@ macro_rules! request_failure_event {
 pub(crate) use request_failure_event;
 
 static SERVER_INSTANCE_ID: OnceLock<String> = OnceLock::new();
-static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn server_instance_id() -> &'static str {
     SERVER_INSTANCE_ID
@@ -121,144 +118,6 @@ pub fn server_instance_id() -> &'static str {
 
 pub fn pid() -> u32 {
     std::process::id()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ConnectionId(u64);
-
-impl ConnectionId {
-    pub(crate) fn next() -> Self {
-        Self(NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed))
-    }
-
-    pub(crate) fn internal() -> Self {
-        Self(0)
-    }
-
-    pub fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for ConnectionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RequestSequence(u64);
-
-impl RequestSequence {
-    pub(crate) fn internal() -> Self {
-        Self(0)
-    }
-
-    pub fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for RequestSequence {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct RequestSequenceGenerator {
-    next: u64,
-}
-
-impl RequestSequenceGenerator {
-    pub(crate) fn new() -> Self {
-        Self { next: 1 }
-    }
-
-    pub(crate) fn next(&mut self) -> RequestSequence {
-        let sequence = RequestSequence(self.next);
-        self.next += 1;
-        sequence
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExportJobContext {
-    connection_id: ConnectionId,
-    request_sequence: RequestSequence,
-    cookie: NbdCookie,
-    command: &'static str,
-    offset: Option<u64>,
-    length: Option<u64>,
-    reply_kind: &'static str,
-    started_at: Instant,
-}
-
-impl ExportJobContext {
-    pub(crate) fn new(
-        connection_id: ConnectionId,
-        request_sequence: RequestSequence,
-        cookie: NbdCookie,
-        command: &'static str,
-        offset: Option<u64>,
-        length: Option<u64>,
-        reply_kind: &'static str,
-    ) -> Self {
-        Self {
-            connection_id,
-            request_sequence,
-            cookie,
-            command,
-            offset,
-            length,
-            reply_kind,
-            started_at: Instant::now(),
-        }
-    }
-
-    pub(crate) fn internal(cookie: NbdCookie, command: &'static str) -> Self {
-        Self::new(
-            ConnectionId::internal(),
-            RequestSequence::internal(),
-            cookie,
-            command,
-            None,
-            None,
-            "internal",
-        )
-    }
-
-    pub fn connection_id(&self) -> ConnectionId {
-        self.connection_id
-    }
-
-    pub fn request_sequence(&self) -> RequestSequence {
-        self.request_sequence
-    }
-
-    pub fn cookie(&self) -> NbdCookie {
-        self.cookie
-    }
-
-    pub fn command(&self) -> &'static str {
-        self.command
-    }
-
-    pub fn offset(&self) -> Option<u64> {
-        self.offset
-    }
-
-    pub fn length(&self) -> Option<u64> {
-        self.length
-    }
-
-    pub fn reply_kind(&self) -> &'static str {
-        self.reply_kind
-    }
-
-    pub fn elapsed(&self) -> Duration {
-        self.started_at.elapsed()
-    }
 }
 
 pub fn duration_ms(duration: Duration) -> u128 {
@@ -293,14 +152,6 @@ pub(crate) fn request_span(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn request_sequence_generator_starts_at_one() {
-        let mut generator = RequestSequenceGenerator::new();
-
-        assert_eq!(generator.next().raw(), 1);
-        assert_eq!(generator.next().raw(), 2);
-    }
 
     #[test]
     fn server_instance_id_is_process_stable() {
