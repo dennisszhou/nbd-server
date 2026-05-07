@@ -26,7 +26,9 @@ use nbd_control_plane::{
 };
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
+use tokio::task::JoinHandle;
+use tokio::time::{self, Duration, MissedTickBehavior};
 
 /// WAL-backed durable engine using a retained WAL overlay over committed state.
 pub struct WalDurableEngine {
@@ -35,7 +37,8 @@ pub struct WalDurableEngine {
     block_size: u64,
     wal: ExportWalHandle,
     read_view: Arc<ExportReadView>,
-    compaction: Option<CompactionCoordinator>,
+    compaction: Option<Arc<CompactionCoordinator>>,
+    background_compaction: Option<BackgroundCompactionTask>,
     compaction_policy: CompactionPolicy,
     write_lock: Mutex<()>,
 }
@@ -49,6 +52,12 @@ struct CompactionCoordinator {
     compactor: CowCompactor,
     read_view: Arc<ExportReadView>,
     compaction_lock: Mutex<()>,
+}
+
+/// Join-once lifecycle handle for one export's background compaction task.
+struct BackgroundCompactionTask {
+    shutdown: watch::Sender<bool>,
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +77,7 @@ enum BackgroundCompactionTick {
 }
 
 const DEFAULT_BACKGROUND_WAL_DEBT_COMPACTION_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +120,7 @@ impl WalDurableEngine {
             wal,
             read_view,
             compaction: None,
+            background_compaction: None,
             compaction_policy: CompactionPolicy::default(),
             write_lock: Mutex::new(()),
         })
@@ -139,6 +150,25 @@ impl WalDurableEngine {
         catalog: Arc<dyn CowTreeMetadataStore>,
         wal_debt_threshold_bytes: u64,
     ) -> Result<Self> {
+        Self::open_with_cow_tree_and_compaction_policy(
+            descriptor,
+            wal,
+            blob_store,
+            catalog,
+            CompactionPolicy::with_hard_threshold(wal_debt_threshold_bytes),
+            DEFAULT_BACKGROUND_COMPACTION_INTERVAL,
+        )
+        .await
+    }
+
+    async fn open_with_cow_tree_and_compaction_policy(
+        descriptor: &ActiveExportDescriptor,
+        wal: ExportWalHandle,
+        blob_store: BlobStoreHandle,
+        catalog: Arc<dyn CowTreeMetadataStore>,
+        compaction_policy: CompactionPolicy,
+        background_interval: Duration,
+    ) -> Result<Self> {
         if descriptor.engine_kind() != nbd_control_plane::ExportEngineKind::WalDurable {
             return Err(ServerError::Catalog {
                 message: format!("export `{}` is not a wal_durable export", descriptor.name()),
@@ -162,13 +192,18 @@ impl WalDurableEngine {
         ));
         let replay = replay_wal_after(&wal, read_view.as_ref(), &root).await?;
         log_replay_completed(descriptor.id(), descriptor.name(), &root, replay);
-        let compaction = CompactionCoordinator::new(
+        let compaction = Arc::new(CompactionCoordinator::new(
             descriptor.id().clone(),
             descriptor.name().clone(),
             wal.clone(),
             catalog,
             blob_store,
             read_view.clone(),
+        ));
+        let background_compaction = BackgroundCompactionTask::spawn(
+            compaction.clone(),
+            compaction_policy,
+            background_interval,
         );
 
         Ok(Self {
@@ -178,7 +213,8 @@ impl WalDurableEngine {
             wal,
             read_view,
             compaction: Some(compaction),
-            compaction_policy: CompactionPolicy::with_hard_threshold(wal_debt_threshold_bytes),
+            background_compaction: Some(background_compaction),
+            compaction_policy,
             write_lock: Mutex::new(()),
         })
     }
@@ -267,6 +303,60 @@ impl Default for CompactionPolicy {
     }
 }
 
+impl BackgroundCompactionTask {
+    fn spawn(
+        compaction: Arc<CompactionCoordinator>,
+        policy: CompactionPolicy,
+        interval: Duration,
+    ) -> Self {
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let mut ticks = time::interval(interval);
+            ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            ticks.tick().await;
+
+            loop {
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = ticks.tick() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                        compaction.compact_background_tick(policy).await;
+                    }
+                }
+            }
+        });
+
+        Self {
+            shutdown,
+            task: Mutex::new(Some(task)),
+        }
+    }
+
+    async fn stop(&self) {
+        let _ = self.shutdown.send(true);
+        let mut task = self.task.lock().await;
+        if let Some(task) = task.take() {
+            if let Err(error) = task.await {
+                tracing::warn!(
+                    target: target::WAL,
+                    event = event::WAL_COMPACTION_FAILED,
+                    service = observability::SERVICE_NAME,
+                    server_instance_id = observability::server_instance_id(),
+                    pid = observability::pid(),
+                    phase = "background_shutdown",
+                    error = %error,
+                );
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl ExportEngine for WalDurableEngine {
     fn admission_policy(&self) -> ExportAdmissionPolicyHandle {
@@ -294,6 +384,9 @@ impl ExportEngine for WalDurableEngine {
     }
 
     async fn close(&self) -> Result<()> {
+        if let Some(background) = &self.background_compaction {
+            background.stop().await;
+        }
         if let Some(compaction) = &self.compaction {
             compaction.compact_close_best_effort().await;
         }
@@ -650,10 +743,13 @@ mod tests {
     use crate::storage::LocalBlobStore;
     use crate::wal::{LocalWalProvider, OpenWal, WalDomain, WalProvider};
     use nbd_control_plane::{
-        CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, SQLiteExportCatalog,
-        TREE_CHUNK_BYTES,
+        CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, PublishCompaction,
+        PublishCompactionOutcome, SQLiteExportCatalog, TREE_CHUNK_BYTES,
     };
     use nbd_test_support::TestRuntime;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     const MIGRATIONS: &[&str] = &[include_str!(
         "../../../../../prisma/migrations/20260506000000_baseline/migration.sql"
@@ -723,17 +819,102 @@ mod tests {
         assert_eq!(fixture.catalog_base_wal_seq().await, WalSeq::zero());
     }
 
+    #[tokio::test]
+    async fn background_task_compacts_on_interval() {
+        let fixture = BackgroundTickFixture::new_with_policy(
+            "background-task",
+            compaction_policy(5, 10),
+            Duration::from_millis(10),
+        )
+        .await;
+        fixture.write(0, b"abcde").await;
+
+        wait_for_catalog_base(&fixture, WalSeq::new(1)).await;
+
+        assert_eq!(fixture.engine.wal_debt_bytes().await, 0);
+        fixture.engine.close().await.expect("close engine");
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_in_flight_background_compaction() {
+        let (fixture, blocking_store) = BackgroundTickFixture::new_with_blocking_store(
+            "background-close-wait",
+            compaction_policy(5, 10),
+            Duration::from_millis(1),
+        )
+        .await;
+        fixture.write(0, b"abcde").await;
+        blocking_store.wait_for_publish_count(1).await;
+
+        let engine = fixture.engine.clone();
+        let mut close_task = tokio::spawn(async move { engine.close().await });
+        assert!(
+            timeout(Duration::from_millis(50), &mut close_task)
+                .await
+                .is_err(),
+            "close completed before in-flight background compaction finished",
+        );
+
+        blocking_store.release_first_publish();
+        close_task
+            .await
+            .expect("join close task")
+            .expect("close engine");
+        assert_eq!(fixture.catalog_base_wal_seq().await, WalSeq::new(1));
+    }
+
     struct BackgroundTickFixture {
         _runtime: TestRuntime,
         catalog: SQLiteExportCatalog,
         export_id: ExportId,
-        engine: WalDurableEngine,
+        engine: Arc<WalDurableEngine>,
     }
 
     impl BackgroundTickFixture {
         async fn new(name: &str, engine_hard_threshold_bytes: u64) -> Self {
+            Self::new_with_policy(
+                name,
+                CompactionPolicy::with_hard_threshold(engine_hard_threshold_bytes),
+                DEFAULT_BACKGROUND_COMPACTION_INTERVAL,
+            )
+            .await
+        }
+
+        async fn new_with_policy(name: &str, policy: CompactionPolicy, interval: Duration) -> Self {
             let runtime = TestRuntime::new().expect("test runtime");
             let catalog = migrated_catalog(&runtime).await;
+            let cow_tree_store = Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>;
+            Self::new_with_store(runtime, catalog, name, policy, interval, cow_tree_store).await
+        }
+
+        async fn new_with_blocking_store(
+            name: &str,
+            policy: CompactionPolicy,
+            interval: Duration,
+        ) -> (Self, Arc<BlockingCowTreeStore>) {
+            let runtime = TestRuntime::new().expect("test runtime");
+            let catalog = migrated_catalog(&runtime).await;
+            let blocking_store = Arc::new(BlockingCowTreeStore::new(catalog.clone()));
+            let fixture = Self::new_with_store(
+                runtime,
+                catalog,
+                name,
+                policy,
+                interval,
+                blocking_store.clone() as Arc<dyn CowTreeMetadataStore>,
+            )
+            .await;
+            (fixture, blocking_store)
+        }
+
+        async fn new_with_store(
+            runtime: TestRuntime,
+            catalog: SQLiteExportCatalog,
+            name: &str,
+            policy: CompactionPolicy,
+            interval: Duration,
+            cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+        ) -> Self {
             let created = catalog
                 .create_export(
                     CreateExport::new(
@@ -755,15 +936,18 @@ mod tests {
                 .open_export(OpenWal::new(WalDomain::for_export_id(created.id().clone())))
                 .await
                 .expect("open wal");
-            let engine = WalDurableEngine::open_with_cow_tree_and_wal_debt_threshold(
-                &descriptor,
-                wal,
-                Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
-                Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>,
-                engine_hard_threshold_bytes,
-            )
-            .await
-            .expect("open wal durable engine");
+            let engine = Arc::new(
+                WalDurableEngine::open_with_cow_tree_and_compaction_policy(
+                    &descriptor,
+                    wal,
+                    Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
+                    cow_tree_store,
+                    policy,
+                    interval,
+                )
+                .await
+                .expect("open wal durable engine"),
+            );
 
             Self {
                 _runtime: runtime,
@@ -772,7 +956,66 @@ mod tests {
                 engine,
             }
         }
+    }
 
+    struct BlockingCowTreeStore {
+        inner: SQLiteExportCatalog,
+        publish_count: AtomicUsize,
+        publish_started: Notify,
+        release_publish: Notify,
+    }
+
+    impl BlockingCowTreeStore {
+        fn new(inner: SQLiteExportCatalog) -> Self {
+            Self {
+                inner,
+                publish_count: AtomicUsize::new(0),
+                publish_started: Notify::new(),
+                release_publish: Notify::new(),
+            }
+        }
+
+        async fn wait_for_publish_count(&self, expected: usize) {
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    if self.publish_count.load(Ordering::SeqCst) >= expected {
+                        return;
+                    }
+                    self.publish_started.notified().await;
+                }
+            })
+            .await
+            .expect("wait for blocked compaction publish");
+        }
+
+        fn release_first_publish(&self) {
+            self.release_publish.notify_waiters();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CowTreeMetadataStore for BlockingCowTreeStore {
+        async fn load_cow_tree(
+            &self,
+            export_id: &ExportId,
+        ) -> nbd_control_plane::Result<CowTreeSnapshot> {
+            self.inner.load_cow_tree(export_id).await
+        }
+
+        async fn publish_compaction(
+            &self,
+            request: PublishCompaction,
+        ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
+            let count = self.publish_count.fetch_add(1, Ordering::SeqCst) + 1;
+            self.publish_started.notify_waiters();
+            if count == 1 {
+                self.release_publish.notified().await;
+            }
+            self.inner.publish_compaction(request).await
+        }
+    }
+
+    impl BackgroundTickFixture {
         async fn write(&self, offset: u64, data: &[u8]) {
             self.engine
                 .write(offset, data.to_vec())
@@ -791,6 +1034,19 @@ mod tests {
                 .expect("load cow tree")
                 .base_wal_seq()
         }
+    }
+
+    async fn wait_for_catalog_base(fixture: &BackgroundTickFixture, expected: WalSeq) {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if fixture.catalog_base_wal_seq().await == expected {
+                    return;
+                }
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("wait for catalog base");
     }
 
     async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
