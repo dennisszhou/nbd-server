@@ -90,6 +90,18 @@ impl OverlayExtentMap {
             .collect()
     }
 
+    pub(super) fn all_slices(&self) -> Vec<OverlayReadSlice> {
+        self.extents
+            .iter()
+            .map(|extent| OverlayReadSlice {
+                start: extent.start(),
+                end: extent.end(),
+                record: extent.value().record.clone(),
+                record_offset: extent.value().record_offset,
+            })
+            .collect()
+    }
+
     pub(super) fn visible_through(&self, seq: WalSeq) -> Vec<RetiredOverlayExtent> {
         let mut retired = self
             .extents

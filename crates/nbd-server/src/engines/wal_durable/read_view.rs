@@ -106,7 +106,7 @@ impl RootSnapshot {
         matches!(&self.backing, RootBacking::Zero { .. })
     }
 
-    fn cow_tree(&self) -> Option<&CowTreeSnapshot> {
+    pub(super) fn cow_tree(&self) -> Option<&CowTreeSnapshot> {
         match &self.backing {
             RootBacking::Zero { .. } => None,
             RootBacking::CowTree(snapshot) => Some(snapshot.as_ref()),
