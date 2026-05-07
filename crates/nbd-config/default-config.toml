@@ -6,6 +6,9 @@ state_dir = "{{state_dir}}"
 blob_dir = "{{blob_dir}}"
 wal_dir = "{{wal_dir}}"
 
+[blob_store]
+kind = "local"
+
 [server]
 export_runtime = "concurrent"
 export_queue_depth = 64

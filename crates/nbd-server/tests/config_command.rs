@@ -28,8 +28,10 @@ fn config_command_prints_missing_explicit_defaults_without_writing() {
     let stdout = String::from_utf8(output.stdout).expect("config stdout is UTF-8");
     assert!(stdout.contains("[catalog]"));
     assert!(stdout.contains("[runtime]"));
+    assert!(stdout.contains("[blob_store]"));
     assert!(stdout.contains("[server]"));
     assert!(stdout.contains("[logging]"));
+    assert!(stdout.contains("kind = \"local\""));
     assert!(stdout.contains(&format!(
         "url = \"{}\"",
         nbd_config::catalog_file_url_for_path(temp.path().join("server").join("catalog.db"))
@@ -69,6 +71,67 @@ fn config_command_get_prints_existing_explicit_value() {
         String::from_utf8(output.stdout).expect("config stdout is UTF-8"),
         "64\n"
     );
+}
+
+#[test]
+fn config_command_get_prints_blob_store_kind() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    fs::write(
+        &config_path,
+        config.to_toml_string().expect("serialize config"),
+    )
+    .expect("write config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("config")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("get")
+        .arg("blob_store.kind")
+        .output()
+        .expect("run nbd-server config get");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("config stdout is UTF-8"),
+        "local\n"
+    );
+}
+
+#[test]
+fn config_command_get_rejects_secret_access_key() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    fs::write(
+        &config_path,
+        config.to_toml_string().expect("serialize config"),
+    )
+    .expect("write config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("config")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("get")
+        .arg("blob_store.secret_access_key")
+        .output()
+        .expect("run nbd-server config get");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("config stderr is UTF-8");
+    assert!(stderr.contains("unknown config key"));
+    assert!(!nbd_config::ConfigKey::SUPPORTED_KEYS.contains("secret_access_key"));
 }
 
 struct TempRoot {

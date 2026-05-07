@@ -1,7 +1,7 @@
 use nbd_config::{
-    ConfigFile, ConfigKey, ConfigSource, ExportRuntimeKind, NbdConfig, catalog_file_url_for_path,
-    default_blob_dir_for_home, default_config_path_for_home, default_log_file_path,
-    default_wal_dir_for_home,
+    BlobStoreConfig, ConfigFile, ConfigKey, ConfigSource, ExportRuntimeKind, NbdConfig,
+    catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
+    default_log_file_path, default_wal_dir_for_home,
 };
 use std::env;
 use std::fs;
@@ -32,6 +32,7 @@ fn explicit_config_loads_from_requested_path() {
     );
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
     assert_eq!(config.server.export_queue_depth.get(), 64);
+    assert_eq!(config.blob_store, BlobStoreConfig::Local);
     assert_eq!(config.logging.file_path, default_log_file_path());
 }
 
@@ -72,6 +73,7 @@ fn default_config_for_home_uses_absolute_home_paths() {
     assert!(config.catalog.url.starts_with("file:"));
     assert_eq!(config.server.export_runtime, ExportRuntimeKind::Concurrent);
     assert_eq!(config.server.export_queue_depth.get(), 64);
+    assert_eq!(config.blob_store, BlobStoreConfig::Local);
     assert_eq!(config.logging.file_path, default_log_file_path());
 }
 
@@ -102,6 +104,7 @@ fn config_file_load_or_default_prints_missing_explicit_defaults_without_writing(
         loaded.config().catalog.url,
         catalog_file_url_for_path(temp.path().join("generated").join("catalog.db")).unwrap()
     );
+    assert_eq!(loaded.config().blob_store, BlobStoreConfig::Local);
     assert!(!config_path.exists());
 }
 
@@ -134,6 +137,9 @@ fn generated_default_config_includes_logging_section() {
     let contents = config.to_toml_string().expect("serialize default config");
 
     assert_eq!(config.logging.file_path, default_log_file_path());
+    assert_eq!(config.blob_store, BlobStoreConfig::Local);
+    assert!(contents.contains("[blob_store]"));
+    assert!(contents.contains("kind = \"local\""));
     assert!(contents.contains("[logging]"));
     assert!(contents.contains("file_path = \"/tmp/nbd/current.log\""));
 }
@@ -157,6 +163,12 @@ fn config_keys_read_typed_values() {
         temp.path().join("blobs").display().to_string()
     );
     assert_eq!(
+        ConfigKey::from_str("blob_store.kind")
+            .unwrap()
+            .value(&config),
+        "local"
+    );
+    assert_eq!(
         ConfigKey::from_str("server.export_runtime")
             .unwrap()
             .value(&config),
@@ -176,6 +188,15 @@ fn config_key_rejects_unknown_key_with_supported_keys() {
 
     assert!(error.to_string().contains("unknown config key"));
     assert!(error.to_string().contains("server.export_queue_depth"));
+}
+
+#[test]
+fn config_key_does_not_expose_secret_access_key() {
+    let error = ConfigKey::from_str("blob_store.secret_access_key")
+        .expect_err("secret key should not be supported");
+
+    assert!(error.to_string().contains("unknown config key"));
+    assert!(!ConfigKey::SUPPORTED_KEYS.contains("secret_access_key"));
 }
 
 #[test]
@@ -244,6 +265,116 @@ fn explicit_config_loads_wal_directory() {
     assert_eq!(config.runtime.state_dir, state_dir);
     assert_eq!(config.runtime.blob_dir, state_dir.join("blobs"));
     assert_eq!(config.runtime.wal_dir, wal_dir);
+}
+
+#[test]
+fn explicit_config_loads_s3_blob_store() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let wal_dir = state_dir.join("wal");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        concat!(
+            "[catalog]\n",
+            "url = {:?}\n\n",
+            "[runtime]\n",
+            "state_dir = {:?}\n",
+            "wal_dir = {:?}\n\n",
+            "[blob_store]\n",
+            "kind = \"s3\"\n",
+            "endpoint_url = \"http://rustfs:9000\"\n",
+            "region = \"us-east-1\"\n",
+            "bucket = \"everstore\"\n",
+            "access_key_id = \"rustfsadmin\"\n",
+            "secret_access_key = \"rustfsadmin\"\n",
+            "force_path_style = true\n",
+            "key_prefix = \"v0.1/blobs/\"\n",
+            "auto_create_bucket = true\n",
+        ),
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir,
+        wal_dir,
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let config = NbdConfig::load(ConfigSource::ExplicitPath(config_path)).unwrap();
+
+    assert_eq!(
+        config.blob_store,
+        BlobStoreConfig::S3 {
+            endpoint_url: Some("http://rustfs:9000".to_owned()),
+            region: "us-east-1".to_owned(),
+            bucket: "everstore".to_owned(),
+            access_key_id: "rustfsadmin".to_owned(),
+            secret_access_key: "rustfsadmin".to_owned(),
+            force_path_style: true,
+            key_prefix: Some("v0.1/blobs/".to_owned()),
+            auto_create_bucket: true,
+        }
+    );
+    assert_eq!(
+        ConfigKey::from_str("blob_store.bucket")
+            .unwrap()
+            .value(&config),
+        "everstore"
+    );
+    assert_eq!(
+        ConfigKey::from_str("blob_store.key_prefix")
+            .unwrap()
+            .value(&config),
+        "v0.1/blobs/"
+    );
+    assert_eq!(
+        ConfigKey::from_str("blob_store.force_path_style")
+            .unwrap()
+            .value(&config),
+        "true"
+    );
+    assert_eq!(
+        ConfigKey::from_str("blob_store.auto_create_bucket")
+            .unwrap()
+            .value(&config),
+        "true"
+    );
+    let debug = format!("{:?}", config.blob_store);
+    assert!(debug.contains("<redacted>"));
+    assert!(!debug.contains("secret_access_key: \"rustfsadmin\""));
+}
+
+#[test]
+fn explicit_config_rejects_unknown_s3_blob_store_fields() {
+    let temp = TempRoot::new();
+    let state_dir = temp.path().join("state");
+    let wal_dir = state_dir.join("wal");
+    let catalog_path = temp.path().join("catalog.db");
+    let config_path = temp.path().join("config.toml");
+    let contents = format!(
+        concat!(
+            "[catalog]\n",
+            "url = {:?}\n\n",
+            "[runtime]\n",
+            "state_dir = {:?}\n",
+            "wal_dir = {:?}\n\n",
+            "[blob_store]\n",
+            "kind = \"s3\"\n",
+            "region = \"us-east-1\"\n",
+            "bucket = \"everstore\"\n",
+            "access_key_id = \"rustfsadmin\"\n",
+            "secret_access_key = \"rustfsadmin\"\n",
+            "unexpected = true\n",
+        ),
+        catalog_file_url_for_path(catalog_path).unwrap(),
+        state_dir,
+        wal_dir,
+    );
+    fs::write(&config_path, contents).unwrap();
+
+    let error = NbdConfig::load(ConfigSource::ExplicitPath(config_path))
+        .expect_err("unknown S3 config fields should fail");
+
+    assert!(error.to_string().contains("failed to parse config"));
+    assert!(error.to_string().contains("unexpected"));
 }
 
 #[test]

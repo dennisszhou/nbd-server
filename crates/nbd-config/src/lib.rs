@@ -28,6 +28,8 @@ pub struct NbdConfig {
     pub catalog: CatalogConfig,
     pub runtime: RuntimeConfig,
     #[serde(default)]
+    pub blob_store: BlobStoreConfig,
+    #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -92,6 +94,56 @@ pub struct LoggingConfig {
     pub file_path: PathBuf,
 }
 
+/// Blob byte storage selected by process config.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BlobStoreConfig {
+    #[default]
+    Local,
+    S3 {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_url: Option<String>,
+        region: String,
+        bucket: String,
+        access_key_id: String,
+        secret_access_key: String,
+        #[serde(default)]
+        force_path_style: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_prefix: Option<String>,
+        #[serde(default)]
+        auto_create_bucket: bool,
+    },
+}
+
+impl fmt::Debug for BlobStoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => f.write_str("Local"),
+            Self::S3 {
+                endpoint_url,
+                region,
+                bucket,
+                access_key_id,
+                force_path_style,
+                key_prefix,
+                auto_create_bucket,
+                secret_access_key: _,
+            } => f
+                .debug_struct("S3")
+                .field("endpoint_url", endpoint_url)
+                .field("region", region)
+                .field("bucket", bucket)
+                .field("access_key_id", access_key_id)
+                .field("secret_access_key", &"<redacted>")
+                .field("force_path_style", force_path_style)
+                .field("key_prefix", key_prefix)
+                .field("auto_create_bucket", auto_create_bucket)
+                .finish(),
+        }
+    }
+}
+
 /// Export request execution policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -129,6 +181,68 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             file_path: default_log_file_path(),
+        }
+    }
+}
+
+impl BlobStoreConfig {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::S3 { .. } => "s3",
+        }
+    }
+
+    pub fn endpoint_url(&self) -> Option<&str> {
+        match self {
+            Self::S3 { endpoint_url, .. } => endpoint_url.as_deref(),
+            Self::Local => None,
+        }
+    }
+
+    pub fn region(&self) -> Option<&str> {
+        match self {
+            Self::S3 { region, .. } => Some(region),
+            Self::Local => None,
+        }
+    }
+
+    pub fn bucket(&self) -> Option<&str> {
+        match self {
+            Self::S3 { bucket, .. } => Some(bucket),
+            Self::Local => None,
+        }
+    }
+
+    pub fn access_key_id(&self) -> Option<&str> {
+        match self {
+            Self::S3 { access_key_id, .. } => Some(access_key_id),
+            Self::Local => None,
+        }
+    }
+
+    pub fn force_path_style(&self) -> bool {
+        match self {
+            Self::S3 {
+                force_path_style, ..
+            } => *force_path_style,
+            Self::Local => false,
+        }
+    }
+
+    pub fn key_prefix(&self) -> Option<&str> {
+        match self {
+            Self::S3 { key_prefix, .. } => key_prefix.as_deref(),
+            Self::Local => None,
+        }
+    }
+
+    pub fn auto_create_bucket(&self) -> bool {
+        match self {
+            Self::S3 {
+                auto_create_bucket, ..
+            } => *auto_create_bucket,
+            Self::Local => false,
         }
     }
 }
@@ -178,6 +292,14 @@ pub enum ConfigKey {
     RuntimeStateDir,
     RuntimeBlobDir,
     RuntimeWalDir,
+    BlobStoreKind,
+    BlobStoreEndpointUrl,
+    BlobStoreRegion,
+    BlobStoreBucket,
+    BlobStoreAccessKeyId,
+    BlobStoreForcePathStyle,
+    BlobStoreKeyPrefix,
+    BlobStoreAutoCreateBucket,
     ServerExportRuntime,
     ServerExportQueueDepth,
     LoggingFilePath,
@@ -392,7 +514,14 @@ impl LoadedConfig {
 }
 
 impl ConfigKey {
-    pub const SUPPORTED_KEYS: &'static str = "catalog.url, runtime.state_dir, runtime.blob_dir, runtime.wal_dir, server.export_runtime, server.export_queue_depth, logging.file_path";
+    pub const SUPPORTED_KEYS: &str = concat!(
+        "catalog.url, runtime.state_dir, runtime.blob_dir, runtime.wal_dir, ",
+        "blob_store.kind, blob_store.endpoint_url, blob_store.region, ",
+        "blob_store.bucket, blob_store.access_key_id, ",
+        "blob_store.force_path_style, blob_store.key_prefix, ",
+        "blob_store.auto_create_bucket, server.export_runtime, ",
+        "server.export_queue_depth, logging.file_path"
+    );
 
     pub fn value(self, config: &NbdConfig) -> String {
         match self {
@@ -400,6 +529,26 @@ impl ConfigKey {
             Self::RuntimeStateDir => config.runtime.state_dir.display().to_string(),
             Self::RuntimeBlobDir => config.runtime.blob_dir.display().to_string(),
             Self::RuntimeWalDir => config.runtime.wal_dir.display().to_string(),
+            Self::BlobStoreKind => config.blob_store.kind().to_owned(),
+            Self::BlobStoreEndpointUrl => config
+                .blob_store
+                .endpoint_url()
+                .unwrap_or_default()
+                .to_owned(),
+            Self::BlobStoreRegion => config.blob_store.region().unwrap_or_default().to_owned(),
+            Self::BlobStoreBucket => config.blob_store.bucket().unwrap_or_default().to_owned(),
+            Self::BlobStoreAccessKeyId => config
+                .blob_store
+                .access_key_id()
+                .unwrap_or_default()
+                .to_owned(),
+            Self::BlobStoreForcePathStyle => config.blob_store.force_path_style().to_string(),
+            Self::BlobStoreKeyPrefix => config
+                .blob_store
+                .key_prefix()
+                .unwrap_or_default()
+                .to_owned(),
+            Self::BlobStoreAutoCreateBucket => config.blob_store.auto_create_bucket().to_string(),
             Self::ServerExportRuntime => config.server.export_runtime.to_string(),
             Self::ServerExportQueueDepth => config.server.export_queue_depth.get().to_string(),
             Self::LoggingFilePath => config.logging.file_path.display().to_string(),
@@ -416,6 +565,14 @@ impl FromStr for ConfigKey {
             "runtime.state_dir" => Ok(Self::RuntimeStateDir),
             "runtime.blob_dir" => Ok(Self::RuntimeBlobDir),
             "runtime.wal_dir" => Ok(Self::RuntimeWalDir),
+            "blob_store.kind" => Ok(Self::BlobStoreKind),
+            "blob_store.endpoint_url" => Ok(Self::BlobStoreEndpointUrl),
+            "blob_store.region" => Ok(Self::BlobStoreRegion),
+            "blob_store.bucket" => Ok(Self::BlobStoreBucket),
+            "blob_store.access_key_id" => Ok(Self::BlobStoreAccessKeyId),
+            "blob_store.force_path_style" => Ok(Self::BlobStoreForcePathStyle),
+            "blob_store.key_prefix" => Ok(Self::BlobStoreKeyPrefix),
+            "blob_store.auto_create_bucket" => Ok(Self::BlobStoreAutoCreateBucket),
             "server.export_runtime" => Ok(Self::ServerExportRuntime),
             "server.export_queue_depth" => Ok(Self::ServerExportQueueDepth),
             "logging.file_path" => Ok(Self::LoggingFilePath),
