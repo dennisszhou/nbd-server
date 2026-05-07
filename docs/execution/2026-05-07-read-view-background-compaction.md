@@ -1,11 +1,11 @@
 Title: Read-View Background Compaction Execution
 Date: 2026-05-07
-Status: approved
+Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved
+- current state: Series 1 finished
 Completion:
-- execution complete: no
+- execution complete: yes
 
 ## Goal
 
@@ -61,7 +61,7 @@ Done means: every planned commit lands, per-commit verification passes, final
 workspace verification passes, and end-of-series review finds no blocking
 semantic or lifecycle issue.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
@@ -79,7 +79,47 @@ Not included: public compaction config, global compaction workers, full
 read-version trees, WAL format changes, catalog schema changes, blob garbage
 collection, or changing the S3 storage contract.
 
-### Current-Series Commit Plan
+### Closeout
+
+Series 1 is finished. Implementation, verification, review-series, and
+polish-series completed on 2026-05-07.
+
+Actual commit stack after polish:
+
+```text
+36e88bc docs: add read-view compaction plans
+762a77f read-view: capture compaction snapshots
+8e55105 compaction: write checkpoints from snapshots
+a3d2cff wal: use snapshots for close compaction
+854ae2d wal: use snapshots for hard compaction
+97477db wal: add background compaction ticks
+231179d wal: run background compaction task
+7dd164a wal: reject stale snapshot over-advance
+```
+
+The two planned docs setup commits were intentionally folded into one docs
+commit during polish. Review-series found one stale snapshot advancement edge;
+the final commit guards against advancing a read-view snapshot past its target
+and includes regression coverage.
+
+Verification completed:
+
+```text
+cargo fmt --all --check
+cargo test -p nbd-server --lib
+cargo test -p nbd-server --test compaction
+cargo test -p nbd-server --test wal_durable
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+make docker-smoke
+make docker-smoke-s3
+```
+
+Deferred follow-up: bounded or cancellable compaction policy remains future
+work. That policy should cover both close-time cleanup and hard-threshold write
+pressure rather than adding a close-only timeout.
+
+### Planned Commit Contract
 
 ```text
 Commit 1/8: docs/plans: add read-view compaction design
