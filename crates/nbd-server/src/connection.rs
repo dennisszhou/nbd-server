@@ -3,7 +3,7 @@ use crate::observability::{self, event, target};
 use crate::{
     CompletedExport, ConnectionId, ExportCompletion, ExportJob, ExportJobContext, ExportOwner,
     ExportQueueSlot, ExportReply, ExportRequest, ExportResult, ExportRuntimeHandle,
-    LocalExportRegistry, Result, ServerError,
+    LocalExportRegistry, RequestCookie, Result, ServerError,
 };
 use nbd_control_plane::ExportName;
 use nbd_protocol::constants::{NBD_CMD_DISC, NBD_EINVAL, NBD_FLAG_HAS_FLAGS, NBD_FLAG_SEND_FLUSH};
@@ -100,7 +100,7 @@ impl ConnectionReply {
         result: ExportResult,
         queue_slot: ExportQueueSlot,
     ) -> Self {
-        let cookie = context.cookie();
+        let cookie = nbd_cookie(context.cookie());
         Self {
             cookie,
             payload: ConnectionReplyPayload::Export {
@@ -692,7 +692,7 @@ where
         let context = ExportJobContext::new(
             connection_id,
             request_sequences.next(),
-            cookie,
+            request_cookie(cookie),
             request.command_name(),
             offset,
             length,
@@ -887,6 +887,14 @@ where
         result = write_connection_reply(writer, reply) => result.map(|()| true),
         () = shutdown.cancelled() => Ok(false),
     }
+}
+
+fn request_cookie(cookie: NbdCookie) -> RequestCookie {
+    RequestCookie::new(cookie.raw())
+}
+
+fn nbd_cookie(cookie: RequestCookie) -> NbdCookie {
+    NbdCookie::new(cookie.raw())
 }
 
 async fn send_error_then_return(
@@ -1221,7 +1229,7 @@ mod tests {
         let runtime = SerialExportRuntime::with_capacity(meta, engine, 1);
         let queue_slot = runtime.reserve().await.expect("reserve queue slot");
         let reply = ConnectionReply::export_result(
-            ExportJobContext::internal(NbdCookie::new(301), "read"),
+            ExportJobContext::internal(RequestCookie::new(301), "read"),
             ReplyKind::Read,
             Ok(ExportReply::Read {
                 data: vec![7; 1024],

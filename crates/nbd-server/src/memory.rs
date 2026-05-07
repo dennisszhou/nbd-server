@@ -216,9 +216,10 @@ impl ExportEngine for MemoryExportEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AdmissionPermit, ExportAdmissionCtl, ExportEngine, ExportJobContext};
+    use crate::{
+        AdmissionPermit, ExportAdmissionCtl, ExportEngine, ExportJobContext, RequestCookie,
+    };
     use nbd_control_plane::{ExportEngineKind, ExportHead, ExportId, ExportState, Timestamp};
-    use nbd_protocol::wire::NbdCookie;
     use std::sync::Arc;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -302,7 +303,7 @@ mod tests {
     }
 
     fn admitted(request: ExportRequest, permit: AdmissionPermit) -> AdmittedExportRequest {
-        let context = ExportJobContext::internal(NbdCookie::new(0), request.command_name());
+        let context = ExportJobContext::internal(RequestCookie::new(0), request.command_name());
         AdmittedExportRequest::new(request, permit, context)
     }
 

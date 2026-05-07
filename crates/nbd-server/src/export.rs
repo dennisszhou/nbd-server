@@ -4,7 +4,6 @@ use crate::{
     observability::{self, event, target},
     runtime::ExportQueueSlot,
 };
-use nbd_protocol::wire::NbdCookie;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +28,25 @@ pub enum ExportReply {
 }
 
 pub type ExportResult = Result<ExportReply>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RequestCookie(u64);
+
+impl RequestCookie {
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for RequestCookie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnectionId(u64);
@@ -93,7 +111,7 @@ impl RequestSequenceGenerator {
 pub struct ExportJobContext {
     connection_id: ConnectionId,
     request_sequence: RequestSequence,
-    cookie: NbdCookie,
+    cookie: RequestCookie,
     command: &'static str,
     offset: Option<u64>,
     length: Option<u64>,
@@ -105,7 +123,7 @@ impl ExportJobContext {
     pub(crate) fn new(
         connection_id: ConnectionId,
         request_sequence: RequestSequence,
-        cookie: NbdCookie,
+        cookie: RequestCookie,
         command: &'static str,
         offset: Option<u64>,
         length: Option<u64>,
@@ -123,7 +141,7 @@ impl ExportJobContext {
         }
     }
 
-    pub(crate) fn internal(cookie: NbdCookie, command: &'static str) -> Self {
+    pub(crate) fn internal(cookie: RequestCookie, command: &'static str) -> Self {
         Self::new(
             ConnectionId::internal(),
             RequestSequence::internal(),
@@ -143,7 +161,7 @@ impl ExportJobContext {
         self.request_sequence
     }
 
-    pub fn cookie(&self) -> NbdCookie {
+    pub fn cookie(&self) -> RequestCookie {
         self.cookie
     }
 
@@ -381,7 +399,7 @@ impl ExportJob {
         queue_slot: ExportQueueSlot,
     ) -> Self {
         Self::with_context(
-            ExportJobContext::internal(NbdCookie::new(0), request.command_name()),
+            ExportJobContext::internal(RequestCookie::new(0), request.command_name()),
             request,
             completion,
             queue_slot,
@@ -557,7 +575,7 @@ mod tests {
         let second_waiter = admission
             .register(AdmissionOp::Write(ByteRange::new(0, 4)))
             .expect("register second");
-        let context = ExportJobContext::internal(NbdCookie::new(7), "write");
+        let context = ExportJobContext::internal(RequestCookie::new(7), "write");
         let admitted = AdmittedExportRequest::new(
             ExportRequest::Write {
                 offset: 0,

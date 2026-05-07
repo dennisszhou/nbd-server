@@ -33,7 +33,7 @@ pub use export::{
     AdmittedExportRequest, CompletedExport, ConnectionId, ExportAdmissionPolicy,
     ExportAdmissionPolicyHandle, ExportCompletion, ExportEngine, ExportEngineHandle, ExportJob,
     ExportJobContext, ExportReply, ExportRequest, ExportResult, OwnedAdmittedExportRequest,
-    RequestSequence,
+    RequestCookie, RequestSequence,
 };
 pub use memory::{MAX_MEMORY_EXPORT_BYTES, MemoryAdmissionPolicy, MemoryExportEngine};
 pub use range::ByteRange;
