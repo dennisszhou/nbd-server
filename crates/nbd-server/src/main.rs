@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod doctor;
 mod logging;
 mod output;
 
 use clap::Parser;
-use cli::{Cli, Command, ConfigAction, ConfigArgs, ServeArgs};
+use cli::{Cli, Command, ConfigAction, ConfigArgs, DoctorArgs, ServeArgs};
 use nbd_config::{ConfigFile, ConfigSource, NbdConfig};
 use nbd_server::NbdServer;
 use nbd_server::observability::{self, event, target};
@@ -27,6 +28,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Command::Serve(args) => run_serve(cli.config, args).await,
         Command::Config(args) => run_config(cli.config, args),
+        Command::Doctor(args) => run_doctor(cli.config, args).await,
     }
 }
 
@@ -100,6 +102,16 @@ fn run_config(config_path: Option<PathBuf>, args: ConfigArgs) -> Result<(), Box<
             let loaded = config_file.load_or_default()?;
             output::print_config(&loaded)?;
         }
+    }
+
+    Ok(())
+}
+
+async fn run_doctor(config_path: Option<PathBuf>, args: DoctorArgs) -> Result<(), Box<dyn Error>> {
+    let report = doctor::check(config_path).await;
+    output::print_doctor_report(&report, args.json)?;
+    if output::doctor_failed(&report) {
+        return Err("doctor checks failed".into());
     }
 
     Ok(())

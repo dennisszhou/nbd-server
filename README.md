@@ -211,6 +211,18 @@ cargo run -p nbd-server -- config init
 `config init` refuses to overwrite an existing config. `nbd-server config`
 prints the effective config or generated defaults without writing the file.
 
+Check server readiness without starting the listener:
+
+```sh
+cargo run -p nbd-server -- doctor --config .tmp/local.toml
+cargo run -p nbd-server -- doctor --config .tmp/local.toml --json
+```
+
+`nbd-server doctor` is read-only. It checks config loading, catalog URL/provider
+support, SQLite catalog file/schema readiness, runtime and logging path
+usability, and blob-store configuration. It does not create directories, apply
+migrations, or probe S3 network reachability.
+
 For throwaway local testing, use an explicit config under `.tmp`:
 
 ```sh

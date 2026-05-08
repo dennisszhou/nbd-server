@@ -1,4 +1,7 @@
 use nbd_config::ConfigFile;
+use nbd_control_plane::{CatalogUrl, SQLiteExportCatalog};
+use nbd_test_support::TestRuntime;
+use serde_json::Value;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+const MIGRATIONS: &[&str] = &[include_str!(
+    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
+)];
 
 #[test]
 fn config_command_prints_missing_explicit_defaults_without_writing() {
@@ -198,6 +204,133 @@ fn config_command_get_rejects_secret_access_key() {
     let stderr = String::from_utf8(output.stderr).expect("config stderr is UTF-8");
     assert!(stderr.contains("unknown config key"));
     assert!(!nbd_config::ConfigKey::SUPPORTED_KEYS.contains("secret_access_key"));
+}
+
+#[tokio::test]
+async fn doctor_command_reports_migrated_explicit_catalog_json() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(runtime.config_path())
+        .arg("--json")
+        .output()
+        .expect("run nbd-server doctor");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "ok");
+    assert!(has_check(&report, "config", "ok"));
+    assert!(has_check(&report, "catalog_schema", "ok"));
+}
+
+#[test]
+fn doctor_command_rejects_missing_explicit_config() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("missing").join("config.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("run nbd-server doctor");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("doctor stdout is UTF-8");
+    assert!(stdout.contains("config: failed"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("doctor checks failed"));
+    assert!(!config_path.exists());
+}
+
+#[test]
+fn doctor_command_rejects_missing_catalog_without_creating_it() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let catalog_path = temp.path().join("catalog.db");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    fs::write(
+        &config_path,
+        config.to_toml_string().expect("serialize config"),
+    )
+    .expect("write config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .expect("run nbd-server doctor");
+
+    assert!(!output.status.success());
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "failed");
+    assert!(has_check(&report, "catalog_file", "failed"));
+    assert!(!catalog_path.exists());
+}
+
+#[test]
+fn doctor_command_rejects_unmigrated_catalog() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let catalog_path = temp.path().join("catalog.db");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    fs::write(
+        &config_path,
+        config.to_toml_string().expect("serialize config"),
+    )
+    .expect("write config");
+    fs::File::create(&catalog_path).expect("create unmigrated catalog file");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .expect("run nbd-server doctor");
+
+    assert!(!output.status.success());
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "failed");
+    assert!(has_check(&report, "catalog_schema", "failed"));
+}
+
+async fn migrate_catalog(runtime: &TestRuntime) {
+    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    let catalog = SQLiteExportCatalog::connect(&url)
+        .await
+        .expect("connect catalog");
+
+    for migration in MIGRATIONS {
+        sqlx::raw_sql(migration)
+            .execute(catalog.pool())
+            .await
+            .expect("apply migration");
+    }
+}
+
+fn json_stdout(output: &std::process::Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("JSON stdout")
+}
+
+fn has_check(report: &Value, name: &str, status: &str) -> bool {
+    report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .any(|check| check["name"] == name && check["status"] == status)
 }
 
 struct TempRoot {

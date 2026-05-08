@@ -18,6 +18,7 @@ pub struct Cli {
 pub enum Command {
     Serve(ServeArgs),
     Config(ConfigArgs),
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -42,6 +43,12 @@ pub struct ConfigArgs {
 pub enum ConfigAction {
     Get { key: ConfigKey },
     Init,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct DoctorArgs {
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(test)]
@@ -106,6 +113,24 @@ mod tests {
             .expect_err("serve should not accept JSON result mode");
 
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
+
+    #[test]
+    fn doctor_parses_json_flag() {
+        let parsed = Cli::try_parse_from([
+            "nbd-server",
+            "doctor",
+            "--config",
+            "/tmp/nbd/config.toml",
+            "--json",
+        ])
+        .expect("parse args");
+
+        let Command::Doctor(parsed_doctor) = parsed.command else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(parsed.config, Some(PathBuf::from("/tmp/nbd/config.toml")));
+        assert!(parsed_doctor.json);
     }
 
     #[test]
