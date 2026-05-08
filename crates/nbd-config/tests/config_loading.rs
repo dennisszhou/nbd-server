@@ -1,6 +1,6 @@
 use nbd_config::{
-    BlobStoreConfig, ConfigFile, ConfigKey, ConfigSource, ExportRuntimeKind, NbdConfig,
-    catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
+    BlobStoreConfig, ConfigError, ConfigFile, ConfigKey, ConfigSource, ExportRuntimeKind,
+    NbdConfig, catalog_file_url_for_path, default_blob_dir_for_home, default_config_path_for_home,
     default_log_file_path, default_wal_dir_for_home,
 };
 use std::env;
@@ -125,6 +125,58 @@ fn config_file_load_or_bootstrap_writes_generated_defaults() {
         .expect("reload config");
     assert!(reloaded.existed());
     assert_eq!(reloaded.config(), loaded.config());
+}
+
+#[test]
+fn config_file_init_writes_generated_defaults_once() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("initialized").join("config.toml");
+
+    let initialized = ConfigFile::explicit(&config_path)
+        .init()
+        .expect("initialize config");
+
+    assert_eq!(initialized.path(), config_path);
+    assert!(config_path.exists());
+    assert_eq!(
+        initialized.config().runtime.state_dir,
+        temp.path().join("initialized")
+    );
+    assert_eq!(
+        initialized.config().catalog.url,
+        catalog_file_url_for_path(temp.path().join("initialized").join("catalog.db")).unwrap()
+    );
+
+    let reloaded = ConfigFile::explicit(&config_path)
+        .load()
+        .expect("reload initialized config");
+    assert_eq!(reloaded.config(), initialized.config());
+}
+
+#[test]
+fn config_file_init_refuses_to_overwrite_existing_config() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let config_file = ConfigFile::explicit(&config_path);
+    let original = config_file.default_config().expect("default config");
+    fs::write(
+        &config_path,
+        original.to_toml_string().expect("serialize config"),
+    )
+    .expect("write existing config");
+
+    let error = config_file
+        .init()
+        .expect_err("init should not overwrite an existing config");
+
+    assert!(matches!(
+        error,
+        ConfigError::ConfigAlreadyExists { path } if path == config_path
+    ));
+    let reloaded = ConfigFile::explicit(&config_path)
+        .load()
+        .expect("reload existing config");
+    assert_eq!(reloaded.config(), &original);
 }
 
 #[test]

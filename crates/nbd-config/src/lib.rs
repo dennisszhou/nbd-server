@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -286,6 +286,13 @@ pub struct LoadedConfig {
     existed: bool,
 }
 
+/// Config generated and written by an explicit initialization command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitializedConfig {
+    path: PathBuf,
+    config: NbdConfig,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKey {
     CatalogUrl,
@@ -316,6 +323,8 @@ pub enum ConfigError {
     ReadConfig { path: PathBuf, source: io::Error },
     #[error("failed to write config {}: {source}", path.display())]
     WriteConfig { path: PathBuf, source: io::Error },
+    #[error("config already exists: {}", path.display())]
+    ConfigAlreadyExists { path: PathBuf },
     #[error("failed to create config directory {}: {source}", path.display())]
     CreateConfigDir { path: PathBuf, source: io::Error },
     #[error("failed to parse config {}: {source}", path.display())]
@@ -437,6 +446,45 @@ impl ConfigFile {
         })
     }
 
+    pub fn init(&self) -> Result<InitializedConfig, ConfigError> {
+        let config = self.default_config()?;
+        let contents = config.to_toml_string()?;
+
+        if let Some(parent) = non_empty_parent(&self.path) {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::CreateConfigDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map_err(|source| {
+                if source.kind() == io::ErrorKind::AlreadyExists {
+                    ConfigError::ConfigAlreadyExists {
+                        path: self.path.clone(),
+                    }
+                } else {
+                    ConfigError::WriteConfig {
+                        path: self.path.clone(),
+                        source,
+                    }
+                }
+            })?;
+        file.write_all(contents.as_bytes())
+            .map_err(|source| ConfigError::WriteConfig {
+                path: self.path.clone(),
+                source,
+            })?;
+
+        Ok(InitializedConfig {
+            path: self.path.clone(),
+            config,
+        })
+    }
+
     pub fn default_config(&self) -> Result<NbdConfig, ConfigError> {
         NbdConfig::default_for_paths(self.defaults.clone())
     }
@@ -506,6 +554,20 @@ impl LoadedConfig {
 
     pub fn existed(&self) -> bool {
         self.existed
+    }
+
+    pub fn into_config(self) -> NbdConfig {
+        self.config
+    }
+}
+
+impl InitializedConfig {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn config(&self) -> &NbdConfig {
+        &self.config
     }
 
     pub fn into_config(self) -> NbdConfig {
