@@ -1666,6 +1666,7 @@ dependencies = [
  "async-trait",
  "aws-sdk-s3",
  "bytes",
+ "clap",
  "crc",
  "nbd-config",
  "nbd-control-plane",

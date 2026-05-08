@@ -74,6 +74,72 @@ fn config_command_get_prints_existing_explicit_value() {
 }
 
 #[test]
+fn config_command_path_prints_selected_explicit_path_without_writing() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("server").join("config.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("config")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--path")
+        .output()
+        .expect("run nbd-server config --path");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("config path stdout is UTF-8"),
+        format!("{}\n", config_path.display())
+    );
+    assert!(!config_path.exists());
+}
+
+#[test]
+fn config_command_init_writes_missing_explicit_config_once() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("server").join("config.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("config")
+        .arg("init")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("run nbd-server config init");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(config_path.exists());
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("config init stdout is UTF-8")
+            .contains(&format!("initialized config {}", config_path.display()))
+    );
+
+    let existing = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
+        .arg("config")
+        .arg("init")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("rerun nbd-server config init");
+
+    assert!(!existing.status.success());
+    assert!(
+        String::from_utf8(existing.stderr)
+            .expect("config init stderr is UTF-8")
+            .contains("config already exists")
+    );
+}
+
+#[test]
 fn config_command_get_prints_blob_store_kind() {
     let temp = TempRoot::new();
     let config_path = temp.path().join("config.toml");

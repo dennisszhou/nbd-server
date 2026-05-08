@@ -195,6 +195,22 @@ DATABASE_URL="file:$HOME/.nbd/catalog.db" make -C prisma db-migrate
 The server can create the SQLite file if it is missing, but it does not apply
 the schema migration itself.
 
+`nbd-server` owns the default operator config file. Inspect the selected config
+path without writing:
+
+```sh
+cargo run -p nbd-server -- config --path
+```
+
+Initialize a missing config file without starting the server:
+
+```sh
+cargo run -p nbd-server -- config init
+```
+
+`config init` refuses to overwrite an existing config. `nbd-server config`
+prints the effective config or generated defaults without writing the file.
+
 For throwaway local testing, use an explicit config under `.tmp`:
 
 ```sh
