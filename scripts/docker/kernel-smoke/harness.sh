@@ -370,6 +370,7 @@ prepare_kernel_smoke() {
     build_smoke_binaries
     require_executable "${NBDCLI}"
     require_executable "${NBD_SERVER}"
+    initialize_smoke_config
 }
 
 build_smoke_binaries() {
@@ -380,6 +381,11 @@ build_smoke_binaries() {
     fi
 
     make build
+}
+
+initialize_smoke_config() {
+    HOME="${SMOKE_HOME}" "${NBD_SERVER}" config init
+    test -f "${CONFIG}"
 }
 
 create_export() {

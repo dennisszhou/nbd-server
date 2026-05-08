@@ -223,6 +223,10 @@ support, SQLite catalog file/schema readiness, runtime and logging path
 usability, and blob-store configuration. It does not create directories, apply
 migrations, or probe S3 network reachability.
 
+`nbdcli` reads an existing config only to locate the catalog. It does not
+create or bootstrap the default user config; use `nbd-server config init` for
+explicit setup.
+
 For throwaway local testing, use an explicit config under `.tmp`:
 
 ```sh
@@ -288,9 +292,14 @@ Inspect or list exports:
 
 ```sh
 cargo run -p nbdcli -- --config .tmp/local.toml list
+cargo run -p nbdcli -- --config .tmp/local.toml --json list
 cargo run -p nbdcli -- --config .tmp/local.toml inspect disk-a
 cargo run -p nbdcli -- --config .tmp/local.toml inspect disk-a --json
 ```
+
+`nbdcli --json` prints one machine-readable result to stdout for finite
+commands. Runtime errors in JSON mode are emitted as one diagnostic object on
+stderr after parsing succeeds.
 
 Clone a committed COW checkpoint:
 

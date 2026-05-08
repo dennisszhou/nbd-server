@@ -1,14 +1,21 @@
+use nbd_config::default_config_path_for_home;
 use nbd_control_plane::{
     BlobKey, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
     InspectExport, PublishCompaction, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
 };
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MIGRATIONS: &[&str] = &[include_str!(
     "../../../prisma/migrations/20260506000000_baseline/migration.sql"
 )];
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::test]
 async fn cli_creates_inspects_lists_and_deletes_exports() {
@@ -77,6 +84,27 @@ async fn cli_uses_explicit_config_and_reports_missing_exports() {
 
     assert!(!inspect.status.success(), "inspect unexpectedly succeeded");
     assert!(stderr(&inspect).contains("export `missing` not found"));
+
+    let inspect_json = nbdcli(&runtime, &["--json", "inspect", "missing"]);
+    assert!(
+        !inspect_json.status.success(),
+        "inspect unexpectedly succeeded"
+    );
+    assert!(
+        stdout(&inspect_json).is_empty(),
+        "JSON error command wrote stdout"
+    );
+    let error = json_stderr(&inspect_json);
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["code"], "catalog_error");
+    assert_eq!(error["operation"], "inspect");
+    assert_eq!(error["resource"], "missing");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("error message")
+            .contains("export `missing` not found")
+    );
 }
 
 #[tokio::test]
@@ -173,6 +201,48 @@ async fn cli_clones_committed_wal_durable_exports() {
 }
 
 #[tokio::test]
+async fn cli_global_json_reports_write_results() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+    let size = TREE_CHUNK_BYTES.to_string();
+
+    let create = nbdcli(
+        &runtime,
+        &[
+            "--json",
+            "create",
+            "source",
+            "--size",
+            &size,
+            "--engine",
+            "wal_durable",
+        ],
+    );
+    assert_success(&create);
+    let created = json_stdout(&create);
+    assert_eq!(created["status"], "created");
+    assert_eq!(created["export"]["name"], "source");
+    assert_eq!(created["export"]["engine_kind"], "wal_durable");
+
+    let source_root = publish_cow_root(&runtime, "source", 9).await;
+
+    let clone = nbdcli(&runtime, &["--json", "clone", "source", "destination"]);
+    assert_success(&clone);
+    let cloned = json_stdout(&clone);
+    assert_eq!(cloned["status"], "cloned");
+    assert_eq!(cloned["source"]["name"], "source");
+    assert_eq!(cloned["source"]["head"]["root_node_id"], source_root);
+    assert_eq!(cloned["destination"]["name"], "destination");
+    assert_eq!(cloned["source_wal_cloned"], false);
+
+    let delete = nbdcli(&runtime, &["--json", "delete", "destination"]);
+    assert_success(&delete);
+    let deleted = json_stdout(&delete);
+    assert_eq!(deleted["status"], "deleted");
+    assert_eq!(deleted["name"], "destination");
+}
+
+#[tokio::test]
 async fn cli_clone_rejects_empty_wal_sources() {
     let runtime = TestRuntime::new().expect("test runtime");
     migrate_catalog(&runtime).await;
@@ -193,6 +263,31 @@ async fn cli_clone_rejects_empty_wal_sources() {
     let clone = nbdcli(&runtime, &["clone", "empty", "destination"]);
     assert!(!clone.status.success(), "clone unexpectedly succeeded");
     assert!(stderr(&clone).contains("source committed snapshot is empty"));
+}
+
+#[test]
+fn cli_default_config_load_is_read_only() {
+    let temp = TempRoot::new();
+    let config_path = default_config_path_for_home(temp.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbdcli"))
+        .env("HOME", temp.path())
+        .arg("--json")
+        .arg("list")
+        .output()
+        .expect("run nbdcli");
+
+    assert!(!output.status.success());
+    assert!(
+        stdout(&output).is_empty(),
+        "JSON error command wrote stdout"
+    );
+    let error = json_stderr(&output);
+    assert_eq!(error["status"], "error");
+    assert_eq!(error["code"], "config_error");
+    assert_eq!(error["operation"], "list");
+    assert!(error["resource"].is_null());
+    assert!(!config_path.exists());
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {
@@ -277,10 +372,45 @@ fn json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("JSON stdout")
 }
 
+fn json_stderr(output: &Output) -> Value {
+    serde_json::from_slice(&output.stderr).expect("JSON stderr")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+struct TempRoot {
+    path: PathBuf,
+}
+
+impl TempRoot {
+    fn new() -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let counter = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = env::temp_dir().join(format!(
+            "nbdcli-config-test-{}-{unique}-{counter}",
+            std::process::id()
+        ));
+
+        fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }

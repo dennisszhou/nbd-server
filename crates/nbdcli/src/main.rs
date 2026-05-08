@@ -1,138 +1,73 @@
 #![forbid(unsafe_code)]
 
-use clap::{Parser, Subcommand};
-use nbd_config::{ConfigSource, NbdConfig};
+mod cli;
+mod output;
+
+use clap::Parser;
+use cli::{Cli, Command};
+use nbd_config::{ConfigFile, NbdConfig};
 use nbd_control_plane::{
-    CatalogUrl, CloneExport, CreateExport, DeleteExport, ExportEngineKind, ExportName,
-    ExportRecord, InspectExport, ListExports, open_catalog,
+    CatalogUrl, CloneExport, CreateExport, DeleteExport, ExportName, InspectExport, ListExports,
+    open_catalog,
 };
 use std::error::Error;
 use std::path::PathBuf;
 
-const DEFAULT_BLOCK_SIZE: u64 = 4096;
-
-#[derive(Debug, Parser)]
-#[command(name = "nbdcli")]
-#[command(about = "Manage NBD exports")]
-struct Cli {
-    #[arg(long, global = true)]
-    config: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Debug, Subcommand)]
-enum Command {
-    Create {
-        name: String,
-
-        #[arg(long)]
-        size: u64,
-
-        #[arg(long, default_value_t = DEFAULT_BLOCK_SIZE)]
-        block_size: u64,
-
-        #[arg(long, default_value_t = ExportEngineKind::Memory)]
-        engine: ExportEngineKind,
-    },
-    List {
-        #[arg(long)]
-        include_deleted: bool,
-
-        #[arg(long)]
-        json: bool,
-    },
-    Inspect {
-        name: String,
-
-        #[arg(long)]
-        json: bool,
-    },
-    Clone {
-        source: String,
-        destination: String,
-    },
-    Delete {
-        name: String,
-    },
-}
-
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run(Cli::parse()).await {
-        eprintln!("error: {error}");
+    let cli = Cli::parse();
+    let output_mode = output::OutputMode::from_json(cli.json);
+    let error_context = output::ErrorContext::from_command(&cli.command);
+
+    if let Err(error) = run(cli).await {
+        output::print_error(error.as_ref(), output_mode, &error_context);
         std::process::exit(1);
     }
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
+    let output_mode = output::OutputMode::from_json(cli.json);
     let config = load_config(cli.config)?;
     let catalog_url = CatalogUrl::parse(&config.catalog.url)?;
     let catalog = open_catalog(&catalog_url).await?.export_catalog();
 
     match cli.command {
-        Command::Create {
-            name,
-            size,
-            block_size,
-            engine,
-        } => {
-            let request = CreateExport::new(ExportName::new(name)?, size, block_size, engine)?;
+        Command::Create(args) => {
+            let request = CreateExport::new(
+                ExportName::new(args.name)?,
+                args.size,
+                args.block_size,
+                args.engine,
+            )?;
             let meta = catalog.create_export(request).await?;
-            println!(
-                "created export {} size={} block_size={} engine={}",
-                meta.name(),
-                meta.size_bytes(),
-                meta.block_size(),
-                meta.engine_kind()
-            );
+            output::print_created(&meta, output_mode)?;
         }
-        Command::List {
-            include_deleted,
-            json,
-        } => {
+        Command::List(args) => {
             let exports = catalog
-                .list_exports(ListExports::new(include_deleted))
+                .list_exports(ListExports::new(args.include_deleted))
                 .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&exports)?);
-            } else {
-                print_export_list(&exports);
-            }
+            output::print_export_list(&exports, output_mode)?;
         }
-        Command::Inspect { name, json } => {
+        Command::Inspect(args) => {
             let meta = catalog
-                .inspect_export(InspectExport::new(ExportName::new(name)?))
+                .inspect_export(InspectExport::new(ExportName::new(args.name)?))
                 .await?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&meta)?);
-            } else {
-                print_export(&meta);
-            }
+            output::print_export(&meta, output_mode)?;
         }
-        Command::Clone {
-            source,
-            destination,
-        } => {
-            let request =
-                CloneExport::new(ExportName::new(source)?, ExportName::new(destination)?)?;
+        Command::Clone(args) => {
+            let request = CloneExport::new(
+                ExportName::new(args.source)?,
+                ExportName::new(args.destination)?,
+            )?;
             let cloned = catalog.clone_export(request).await?;
-            println!(
-                "cloned export {} from {} source_base_wal_seq={} destination_base_wal_seq={}",
-                cloned.destination().name(),
-                cloned.source().name(),
-                cloned.source().head().base_wal_seq(),
-                cloned.destination().head().base_wal_seq(),
-            );
-            println!("note: copied committed checkpoint only; source WAL was not cloned");
+            output::print_cloned(&cloned, output_mode)?;
         }
-        Command::Delete { name } => {
-            let name = ExportName::new(name)?;
+        Command::Delete(args) => {
+            let name = ExportName::new(args.name)?;
             catalog
                 .delete_export(DeleteExport::new(name.clone()))
                 .await?;
-            println!("deleted export {name}");
+            output::print_deleted(&name, output_mode)?;
         }
     }
 
@@ -140,37 +75,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
 }
 
 fn load_config(path: Option<PathBuf>) -> Result<NbdConfig, Box<dyn Error>> {
-    let source = path
-        .map(ConfigSource::ExplicitPath)
-        .unwrap_or(ConfigSource::DefaultUserPath);
+    let loaded = match path {
+        Some(path) => ConfigFile::explicit(path).load()?,
+        None => ConfigFile::local()?.load()?,
+    };
 
-    Ok(NbdConfig::load(source)?)
-}
-
-fn print_export_list(exports: &[ExportRecord]) {
-    for export in exports {
-        println!(
-            "{}\t{}\tsize={}\tblock_size={}\tengine={}\tlayout={}",
-            export.name(),
-            export.state(),
-            export.size_bytes(),
-            export.block_size(),
-            export.engine_kind(),
-            export.head().layout_kind()
-        );
-    }
-}
-
-fn print_export(export: &ExportRecord) {
-    println!("name: {}", export.name());
-    println!("state: {}", export.state());
-    println!("size: {}", export.size_bytes());
-    println!("block_size: {}", export.block_size());
-    println!("engine: {}", export.engine_kind());
-    println!("layout: {}", export.head().layout_kind());
-    println!("base_wal_seq: {}", export.head().base_wal_seq());
-    match export.head().root_node_id() {
-        Some(root_node_id) => println!("root_node_id: {root_node_id}"),
-        None => println!("root_node_id: <empty>"),
-    }
+    Ok(loaded.into_config())
 }
