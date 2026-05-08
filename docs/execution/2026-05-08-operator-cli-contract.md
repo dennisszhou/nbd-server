@@ -1,11 +1,14 @@
 Title: Operator CLI Contract Execution
 Date: 2026-05-08
-Status: approved
+Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved
+- current state: Series 1 finished
 Completion:
-- execution complete: no
+- execution complete: yes
+- completed series: Series 1
+- review complete: yes, `$review-series` found no issues
+- closeout approved: yes, `$finish-series`
 
 ## Goal
 
@@ -54,7 +57,7 @@ Done means: `nbd-server` uses `clap`; `nbd-server config --path`,
 `nbd-server config init`, and `nbd-server doctor` work; `nbdcli --json`
 works for finite catalog commands; `nbdcli doctor` works without writing; and
 outside-source-tree smoke tests run each binary by command name.
-Approval: approved
+Approval: finished
 Approval handoff: before `$impl-series`, set overall doc approval to `yes`,
 current state to `Series 1 approved`, document status to `approved`, and this
 series approval to `approved`.
