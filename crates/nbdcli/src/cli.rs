@@ -25,6 +25,7 @@ pub enum Command {
     Inspect(InspectArgs),
     Clone(CloneArgs),
     Delete(DeleteArgs),
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
@@ -62,6 +63,9 @@ pub struct CloneArgs {
 pub struct DeleteArgs {
     pub name: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct DoctorArgs {}
 
 #[cfg(test)]
 mod tests {
@@ -123,5 +127,15 @@ mod tests {
         assert_eq!(args.size, 1048576);
         assert_eq!(args.block_size, DEFAULT_BLOCK_SIZE);
         assert_eq!(args.engine, ExportEngineKind::WalDurable);
+    }
+
+    #[test]
+    fn doctor_accepts_global_json_after_command() {
+        let parsed = Cli::try_parse_from(["nbdcli", "doctor", "--json"]).expect("parse args");
+
+        assert!(parsed.json);
+        let Command::Doctor(_) = parsed.command else {
+            panic!("expected doctor command");
+        };
     }
 }

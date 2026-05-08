@@ -1,4 +1,5 @@
 use crate::cli::{CloneArgs, Command};
+use crate::doctor::{DoctorReport, DoctorStatus};
 use nbd_control_plane::{CloneExportResult, ExportName, ExportRecord};
 use std::error::Error;
 
@@ -28,6 +29,7 @@ impl ErrorContext {
             Command::Inspect(args) => Self::new("inspect", Some(args.name.clone())),
             Command::Clone(args) => Self::from_clone(args),
             Command::Delete(args) => Self::new("delete", Some(args.name.clone())),
+            Command::Doctor(_) => Self::new("doctor", None),
         }
     }
 
@@ -136,6 +138,38 @@ pub fn print_deleted(name: &ExportName, mode: OutputMode) -> Result<(), Box<dyn 
     Ok(())
 }
 
+pub fn print_doctor_report(report: &DoctorReport, mode: OutputMode) -> Result<(), Box<dyn Error>> {
+    match mode {
+        OutputMode::Human => {
+            println!("status: {}", report.status());
+            for check in report.checks() {
+                match (check.detail(), check.remediation()) {
+                    (Some(detail), Some(remediation)) => println!(
+                        "{}: {} ({detail}; remediation: {remediation})",
+                        check.name(),
+                        check.status()
+                    ),
+                    (Some(detail), None) => {
+                        println!("{}: {} ({detail})", check.name(), check.status());
+                    }
+                    (None, Some(remediation)) => println!(
+                        "{}: {} (remediation: {remediation})",
+                        check.name(),
+                        check.status()
+                    ),
+                    (None, None) => println!("{}: {}", check.name(), check.status()),
+                }
+            }
+        }
+        OutputMode::Json => print_json_value(&doctor_report_json(report))?,
+    }
+    Ok(())
+}
+
+pub fn doctor_failed(report: &DoctorReport) -> bool {
+    report.status() == DoctorStatus::Failed
+}
+
 pub fn print_error(error: &(dyn Error + 'static), mode: OutputMode, context: &ErrorContext) {
     match mode {
         OutputMode::Human => eprintln!("error: {error}"),
@@ -171,4 +205,24 @@ fn error_code(error: &(dyn Error + 'static)) -> &'static str {
 fn print_json_value(value: &serde_json::Value) -> Result<(), serde_json::Error> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+fn doctor_report_json(report: &DoctorReport) -> serde_json::Value {
+    let checks = report
+        .checks()
+        .iter()
+        .map(|check| {
+            serde_json::json!({
+                "name": check.name(),
+                "status": check.status().as_str(),
+                "detail": check.detail(),
+                "remediation": check.remediation(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "status": report.status().as_str(),
+        "checks": checks,
+    })
 }

@@ -1,4 +1,4 @@
-use nbd_config::default_config_path_for_home;
+use nbd_config::{ConfigFile, default_config_path_for_home};
 use nbd_control_plane::{
     BlobKey, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
     InspectExport, PublishCompaction, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
@@ -290,6 +290,100 @@ fn cli_default_config_load_is_read_only() {
     assert!(!config_path.exists());
 }
 
+#[tokio::test]
+async fn cli_doctor_reports_migrated_catalog_json() {
+    let runtime = TestRuntime::new().expect("test runtime");
+    migrate_catalog(&runtime).await;
+
+    let output = nbdcli(&runtime, &["--json", "doctor"]);
+
+    assert_success(&output);
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "ok");
+    assert!(has_check(&report, "config", "ok"));
+    assert!(has_check(&report, "catalog_schema", "ok"));
+}
+
+#[test]
+fn cli_doctor_rejects_missing_explicit_config() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("missing").join("config.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbdcli"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .arg("doctor")
+        .output()
+        .expect("run nbdcli doctor");
+
+    assert!(!output.status.success());
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "failed");
+    assert!(has_check(&report, "config", "failed"));
+    let error = json_stderr(&output);
+    assert_eq!(error["operation"], "doctor");
+    assert!(!config_path.exists());
+}
+
+#[test]
+fn cli_doctor_rejects_missing_catalog_without_creating_it() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let catalog_path = temp.path().join("catalog.db");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    fs::write(
+        &config_path,
+        config.to_toml_string().expect("serialize config"),
+    )
+    .expect("write config");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbdcli"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .arg("doctor")
+        .output()
+        .expect("run nbdcli doctor");
+
+    assert!(!output.status.success());
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "failed");
+    assert!(has_check(&report, "catalog_file", "failed"));
+    assert!(!catalog_path.exists());
+}
+
+#[test]
+fn cli_doctor_rejects_unmigrated_catalog() {
+    let temp = TempRoot::new();
+    let config_path = temp.path().join("config.toml");
+    let catalog_path = temp.path().join("catalog.db");
+    let config = ConfigFile::explicit(&config_path)
+        .default_config()
+        .expect("default config");
+    fs::write(
+        &config_path,
+        config.to_toml_string().expect("serialize config"),
+    )
+    .expect("write config");
+    fs::File::create(&catalog_path).expect("create unmigrated catalog file");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nbdcli"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--json")
+        .arg("doctor")
+        .output()
+        .expect("run nbdcli doctor");
+
+    assert!(!output.status.success());
+    let report = json_stdout(&output);
+    assert_eq!(report["status"], "failed");
+    assert!(has_check(&report, "catalog_schema", "failed"));
+}
+
 async fn migrate_catalog(runtime: &TestRuntime) {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
     let catalog = SQLiteExportCatalog::connect(&url)
@@ -374,6 +468,14 @@ fn json_stdout(output: &Output) -> Value {
 
 fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("JSON stderr")
+}
+
+fn has_check(report: &Value, name: &str, status: &str) -> bool {
+    report["checks"]
+        .as_array()
+        .expect("checks array")
+        .iter()
+        .any(|check| check["name"] == name && check["status"] == status)
 }
 
 fn stdout(output: &Output) -> String {

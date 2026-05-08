@@ -227,6 +227,16 @@ migrations, or probe S3 network reachability.
 create or bootstrap the default user config; use `nbd-server config init` for
 explicit setup.
 
+Check catalog CLI readiness from an existing config:
+
+```sh
+cargo run -p nbdcli -- --config .tmp/local.toml --json doctor
+```
+
+`nbdcli doctor` is read-only. It checks the existing config, catalog
+URL/provider support, and SQLite catalog file/schema readiness without applying
+migrations or creating missing catalog files.
+
 For throwaway local testing, use an explicit config under `.tmp`:
 
 ```sh

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod doctor;
 mod output;
 
 use clap::Parser;
@@ -27,11 +28,32 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     let output_mode = output::OutputMode::from_json(cli.json);
-    let config = load_config(cli.config)?;
+    match cli.command {
+        Command::Doctor(_) => {
+            let report = doctor::check(cli.config).await;
+            output::print_doctor_report(&report, output_mode)?;
+            if output::doctor_failed(&report) {
+                return Err("doctor checks failed".into());
+            }
+        }
+        command => {
+            let config = load_config(cli.config)?;
+            run_catalog_command(command, config, output_mode).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_catalog_command(
+    command: Command,
+    config: NbdConfig,
+    output_mode: output::OutputMode,
+) -> Result<(), Box<dyn Error>> {
     let catalog_url = CatalogUrl::parse(&config.catalog.url)?;
     let catalog = open_catalog(&catalog_url).await?.export_catalog();
 
-    match cli.command {
+    match command {
         Command::Create(args) => {
             let request = CreateExport::new(
                 ExportName::new(args.name)?,
@@ -69,6 +91,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
                 .await?;
             output::print_deleted(&name, output_mode)?;
         }
+        Command::Doctor(_) => unreachable!("doctor is handled before opening the catalog"),
     }
 
     Ok(())
