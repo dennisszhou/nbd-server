@@ -1,6 +1,6 @@
 Title: Docker Smoke Output Framework
 Date: 2026-05-09
-Status: approved
+Status: completed
 
 Problem
 - The `make docker-smoke*` targets interleave operator state, Makefile command
@@ -391,7 +391,7 @@ Validation strategy
     `VERBOSE=1 make docker-smoke-s3` for local command visibility.
 
 Risks
-- Capturing child output can hide progress during a long smoke. The kernel
+- Capturing child output can hide progress during a long smoke. The NBD device
   smoke path mitigates this with a progress side channel whose events are
   intentionally small and secret-free; full command output remains in artifact
   logs.
@@ -423,7 +423,6 @@ Design exit criteria
   `docker-rustfs-s3-test`, the `docker-smoke-s3-probe` alias, and
   `docker-smoke-s3-down`.
 
-Recommended next step
-- `$review-plan` after this draft design is accepted.
-- Treat `ready for series planning` as permission to ask whether to start
-  `$plan-series`, not as permission to start `$plan-series` automatically.
+Closeout
+- Implemented and reviewed in one execution series.
+- No deferred follow-up is tracked for this slice.
