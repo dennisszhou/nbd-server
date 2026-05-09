@@ -50,8 +50,10 @@ fi
 source "${HARNESS}"
 source "${SCENARIO_FILE}"
 
+kernel_progress "scenario ${SCENARIO}"
 prepare_kernel_smoke
 run_smoke_scenario
 
+kernel_progress "export artifacts"
 export_artifacts
 echo "kernel NBD smoke scenario ${SCENARIO} passed"

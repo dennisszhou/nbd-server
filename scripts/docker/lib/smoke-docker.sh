@@ -94,6 +94,7 @@ docker_smoke_add_env_if_set() {
 
 docker_smoke_set_kernel_env_args() {
     local artifact_dir="${1:-${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}}"
+    local progress_file="${2:-}"
 
     DOCKER_SMOKE_ENV_ARGS=()
 
@@ -146,6 +147,11 @@ docker_smoke_set_kernel_env_args() {
     DOCKER_SMOKE_ENV_ARGS+=(
         -e "KERNEL_SMOKE_ARTIFACT_DIR=${artifact_dir}"
     )
+    if [ -n "${progress_file}" ]; then
+        DOCKER_SMOKE_ENV_ARGS+=(
+            -e "KERNEL_SMOKE_PROGRESS_FILE=${progress_file}"
+        )
+    fi
 }
 
 docker_smoke_collect_kernel_artifacts() {

@@ -48,7 +48,9 @@ Constraints
 - Cleanup of missing Docker resources must be quiet and idempotent.
 
 Non-goals
-- Rewriting the inner kernel smoke harness.
+- Rewriting inner kernel smoke scenario semantics. The harness may emit
+  presentation-only progress events, but NBD device lifecycle, server
+  lifecycle, catalog setup, and scenario behavior remain unchanged.
 - Replacing Bash with Python, Rust, or an `xtask` runner in this slice.
 - Adding a CI report format such as JUnit or JSON summaries.
 - Changing Docker images, Dockerfile contents, Cargo features, or S3 test
@@ -72,6 +74,8 @@ End state
 - Child process output is captured under the relevant artifact directory, with
   clear names such as `docker-build.log`, `kernel-smoke.log`,
   `rustfs-probe.log`, `s3-prefix-test.log`, and `rustfs.log`.
+- Long-running kernel smoke steps expose a small progress side channel while
+  keeping full child output captured in `kernel-smoke.log`.
 - On failure, the console reports the failed step, prints a bounded tail of the
   failed step log, and names the artifact directory.
 - `VERBOSE=1 make docker-smoke*` provides command-oriented detail for local
@@ -109,7 +113,8 @@ Proposed approach
 - Keep `scripts/docker/kernel-smoke.sh` and
   `scripts/docker/kernel-smoke/harness.sh` as the inner scenario owners. They
   still own NBD device lifecycle, server lifecycle, smoke-home setup, config
-  initialization, catalog migration, scenario actions, and kernel artifacts.
+  initialization, catalog migration, scenario actions, kernel artifacts, and
+  milestone progress events for those actions.
 
 Data model / API shape
 - Make variables remain the external configuration API:
@@ -160,6 +165,7 @@ smoke_ok <message>
 smoke_warn <message>
 smoke_fail <message>
 smoke_run <label> <log-path> <command> [args...]
+smoke_run_with_progress <label> <log-path> <progress-path> <command> [args...]
 smoke_run_quiet <label> <command> [args...]
 smoke_tail_log <log-path>
 smoke_redacted_command <command> [args...]
@@ -168,6 +174,10 @@ smoke_redacted_command <command> [args...]
 - `smoke_run` captures stdout and stderr to the named log. On success it prints
   a concise success line. On failure it prints the failed label, tails the log,
   and returns the command exit status.
+- `smoke_run_with_progress` captures stdout and stderr to the named log while
+  polling a progress file and rendering only those progress events to the
+  console. The progress file is a side channel, not a replacement for the full
+  command log.
 - `smoke_run_quiet` is for expected-idempotent cleanup and inspect commands.
   Missing Docker resources are not treated as operator-visible errors.
 - `smoke_redacted_command` is used only for verbose command display. It redacts
@@ -313,6 +323,10 @@ Alternatives considered
 - Update only the inner kernel smoke harness:
   - rejected because the worst noise and the secret-shaped command echo come
     from the outer Make/Docker orchestration.
+- Stream the whole kernel smoke log live:
+  - rejected because it would reintroduce noisy Prisma, Cargo, mkfs,
+    nbd-client, and server output into the default console. A progress side
+    channel gives useful milestones without losing the clean log boundary.
 
 Migration / rollout
 - First slice:
@@ -336,7 +350,9 @@ Validation strategy
   - `bash -n scripts/docker/docker-smoke-s3.sh`
   - a small helper self-check or shell test that proves `smoke_run` reports a
     failing step, writes a log, and redacts secret-shaped environment values in
-    verbose command output.
+    verbose command output;
+  - a helper self-check that proves `smoke_run_with_progress` prints progress
+    events while keeping raw command output in the captured log.
 - End-to-end behavior:
   - `make docker-smoke`
   - `make docker-smoke-s3-probe`
@@ -360,9 +376,10 @@ Validation strategy
     `VERBOSE=1 make docker-smoke-s3` for local command visibility.
 
 Risks
-- Capturing child output can hide progress during a long smoke. The runners
-  mitigate this with visible step start lines, bounded failure tails, artifact
-  paths, and `VERBOSE=1`.
+- Capturing child output can hide progress during a long smoke. The kernel
+  smoke path mitigates this with a progress side channel whose events are
+  intentionally small and secret-free; full command output remains in artifact
+  logs.
 - A Bash helper library can become too clever. Keep the first helpers small and
   generic: rendering, capture, redaction, log tails, and common Docker argument
   construction only.

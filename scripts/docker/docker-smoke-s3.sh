@@ -30,6 +30,8 @@ esac
 DOCKER_KERNEL_SMOKE_ARTIFACT_DIR="${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
 KERNEL_ARTIFACT_HOST_DIR="${DOCKER_SMOKE_S3_ARTIFACT_DIR}/kernel-artifacts"
 KERNEL_ARTIFACT_CONTAINER_DIR="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}/kernel-artifacts"
+KERNEL_PROGRESS_HOST_FILE="${DOCKER_SMOKE_S3_ARTIFACT_DIR}/kernel-progress.log"
+KERNEL_PROGRESS_CONTAINER_FILE="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}/kernel-progress.log"
 S3_RESOURCES_ACTIVE=0
 
 s3_endpoint_url() {
@@ -162,7 +164,9 @@ s3_wait_for_rustfs() {
 s3_set_kernel_env() {
     KERNEL_SMOKE_SCENARIO="wal-durable-s3-basic"
     KERNEL_SMOKE_CARGO_FEATURES="s3"
-    docker_smoke_set_kernel_env_args "${KERNEL_ARTIFACT_CONTAINER_DIR}"
+    docker_smoke_set_kernel_env_args \
+        "${KERNEL_ARTIFACT_CONTAINER_DIR}" \
+        "${KERNEL_PROGRESS_CONTAINER_FILE}"
 
     DOCKER_SMOKE_ENV_ARGS+=(
         -e "KERNEL_SMOKE_S3_ENDPOINT_URL=$(s3_endpoint_url)"
@@ -195,8 +199,9 @@ s3_run_kernel_smoke() {
         "${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}"
     s3_set_kernel_env
 
-    smoke_run "kernel smoke" \
+    smoke_run_with_progress "kernel smoke" \
         "${DOCKER_SMOKE_S3_ARTIFACT_DIR}/kernel-smoke.log" \
+        "${KERNEL_PROGRESS_HOST_FILE}" \
         docker run --rm \
             "${DOCKER_SMOKE_WORKSPACE_ARGS[@]}" \
             --network "${DOCKER_SMOKE_S3_NETWORK}" \

@@ -34,6 +34,25 @@ smoke_run "passing step" "${TMP_DIR}/pass.log" \
 assert_contains "ok: passing step" "${TMP_DIR}/pass.out"
 assert_contains "pass output" "${TMP_DIR}/pass.log"
 
+SMOKE_PROGRESS_POLL_SECONDS=0.01 \
+    smoke_run_with_progress \
+        "progress step" \
+        "${TMP_DIR}/progress.log" \
+        "${TMP_DIR}/progress-events.log" \
+        bash -c '
+            printf "first milestone\n" >>"$1"
+            printf "hidden command output\n"
+            sleep 0.05
+            printf "second milestone\n" >>"$1"
+        ' _ "${TMP_DIR}/progress-events.log" \
+        >"${TMP_DIR}/progress.out" 2>&1
+assert_contains "progress:" "${TMP_DIR}/progress.out"
+assert_contains "first milestone" "${TMP_DIR}/progress.out"
+assert_contains "second milestone" "${TMP_DIR}/progress.out"
+assert_contains "ok: progress step" "${TMP_DIR}/progress.out"
+assert_not_contains "hidden command output" "${TMP_DIR}/progress.out"
+assert_contains "hidden command output" "${TMP_DIR}/progress.log"
+
 if smoke_run "failing step" "${TMP_DIR}/fail.log" \
     bash -c 'echo boom >&2; exit 7' >"${TMP_DIR}/fail.out" 2>&1; then
     fail "expected smoke_run to return a failing status"

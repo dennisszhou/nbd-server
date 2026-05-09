@@ -10,6 +10,8 @@ cd "${REPO_ROOT}"
 
 KERNEL_ARTIFACT_HOST_DIR="${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}/kernel-artifacts"
 KERNEL_ARTIFACT_CONTAINER_DIR="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}/kernel-artifacts"
+KERNEL_PROGRESS_HOST_FILE="${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}/kernel-progress.log"
+KERNEL_PROGRESS_CONTAINER_FILE="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}/kernel-progress.log"
 status=0
 
 mkdir -p "${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}"
@@ -23,13 +25,16 @@ docker_smoke_build_image \
 
 mkdir -p "${KERNEL_ARTIFACT_HOST_DIR}"
 docker_smoke_set_workspace_args "ro"
-docker_smoke_set_kernel_env_args "${KERNEL_ARTIFACT_CONTAINER_DIR}"
+docker_smoke_set_kernel_env_args \
+    "${KERNEL_ARTIFACT_CONTAINER_DIR}" \
+    "${KERNEL_PROGRESS_CONTAINER_FILE}"
 docker_smoke_set_artifact_args \
     "${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}" \
     "${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}"
 
-smoke_run "kernel smoke" \
+smoke_run_with_progress "kernel smoke" \
     "${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}/kernel-smoke.log" \
+    "${KERNEL_PROGRESS_HOST_FILE}" \
     docker run --rm \
         "${DOCKER_SMOKE_WORKSPACE_ARGS[@]}" \
         "${DOCKER_SMOKE_ENV_ARGS[@]}" \

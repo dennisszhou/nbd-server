@@ -103,6 +103,81 @@ smoke_run() {
     return "${status}"
 }
 
+smoke_follow_progress() {
+    local progress_path="$1"
+    local stop_path="$2"
+    local next_line=1
+    local total line
+
+    while :; do
+        if [ -f "${progress_path}" ]; then
+            total="$(wc -l <"${progress_path}" | tr -d '[:space:]')"
+            if [ -z "${total}" ]; then
+                total=0
+            fi
+
+            if [ "${total}" -ge "${next_line}" ]; then
+                sed -n "${next_line},${total}p" "${progress_path}" |
+                    while IFS= read -r line; do
+                        if [ -n "${line}" ]; then
+                            smoke_state "progress" "${line}"
+                        fi
+                    done
+                next_line=$((total + 1))
+            fi
+        fi
+
+        if [ -e "${stop_path}" ]; then
+            break
+        fi
+
+        sleep "${SMOKE_PROGRESS_POLL_SECONDS:-0.2}"
+    done
+}
+
+smoke_run_with_progress() {
+    local label="$1"
+    local log_path="$2"
+    local progress_path="$3"
+    local status=0
+    local command_pid progress_pid stop_path
+    shift 3
+
+    smoke_step "${label}"
+    mkdir -p "$(dirname "${log_path}")"
+    mkdir -p "$(dirname "${progress_path}")"
+    : >"${progress_path}"
+    stop_path="${progress_path}.done.$$"
+    rm -f "${stop_path}"
+
+    if smoke_verbose; then
+        printf '  command: '
+        smoke_redacted_command "$@"
+    fi
+
+    smoke_follow_progress "${progress_path}" "${stop_path}" &
+    progress_pid=$!
+
+    "$@" >"${log_path}" 2>&1 &
+    command_pid=$!
+    wait "${command_pid}" || status=$?
+
+    : >"${stop_path}"
+    wait "${progress_pid}" || true
+    rm -f "${stop_path}"
+
+    if [ "${status}" -eq 0 ]; then
+        smoke_ok "${label}"
+        smoke_state "log" "${log_path}"
+        return 0
+    fi
+
+    smoke_fail "${label} failed with exit status ${status}"
+    smoke_state "log" "${log_path}" >&2
+    smoke_tail_log "${log_path}"
+    return "${status}"
+}
+
 smoke_run_quiet() {
     local label="$1"
     shift
