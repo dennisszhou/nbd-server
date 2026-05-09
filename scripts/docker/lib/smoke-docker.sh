@@ -10,6 +10,14 @@ docker_smoke_init_defaults() {
     KERNEL_SMOKE_OUTPUT="${KERNEL_SMOKE_OUTPUT:-docker-smoke}"
     DOCKER_KERNEL_SMOKE_ARTIFACT_DIR="${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR:-${REPO_ROOT}/.tmp/${KERNEL_SMOKE_OUTPUT}}"
     DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT:-/tmp/nbd-smoke-artifacts}"
+
+    case "${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}" in
+        /*)
+            ;;
+        *)
+            DOCKER_KERNEL_SMOKE_ARTIFACT_DIR="${REPO_ROOT}/${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}"
+            ;;
+    esac
 }
 
 docker_smoke_effective_scenario() {
@@ -113,6 +121,24 @@ docker_smoke_set_kernel_env_args() {
     docker_smoke_add_env_if_set \
         "KERNEL_SMOKE_RUST_LOG" \
         "${KERNEL_SMOKE_RUST_LOG:-}"
+    docker_smoke_add_env_if_set \
+        "KERNEL_SMOKE_S3_ENDPOINT_URL" \
+        "${KERNEL_SMOKE_S3_ENDPOINT_URL:-}"
+    docker_smoke_add_env_if_set \
+        "KERNEL_SMOKE_S3_BUCKET" \
+        "${KERNEL_SMOKE_S3_BUCKET:-}"
+    docker_smoke_add_env_if_set \
+        "KERNEL_SMOKE_S3_ACCESS_KEY_ID" \
+        "${KERNEL_SMOKE_S3_ACCESS_KEY_ID:-}"
+    docker_smoke_add_env_if_set \
+        "KERNEL_SMOKE_S3_SECRET_ACCESS_KEY" \
+        "${KERNEL_SMOKE_S3_SECRET_ACCESS_KEY:-}"
+    docker_smoke_add_env_if_set \
+        "KERNEL_SMOKE_S3_REGION" \
+        "${KERNEL_SMOKE_S3_REGION:-}"
+    docker_smoke_add_env_if_set \
+        "KERNEL_SMOKE_S3_KEY_PREFIX" \
+        "${KERNEL_SMOKE_S3_KEY_PREFIX:-}"
     docker_smoke_add_env_if_set \
         "KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS" \
         "${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-}"
