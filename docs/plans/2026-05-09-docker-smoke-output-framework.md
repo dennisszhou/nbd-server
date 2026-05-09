@@ -4,8 +4,8 @@ Status: approved
 
 Problem
 - The `make docker-smoke*` targets interleave operator state, Makefile command
-  echo, Docker commands, Docker build output, ignored cleanup errors, kernel
-  smoke logs, RustFS logs, and Cargo test output.
+  echo, Docker commands, Docker build output, ignored cleanup errors, NBD
+  device smoke logs, RustFS logs, and Cargo test output.
 - The important state is not visually distinct from commands. It is hard to
   tell what scenario is running, which step failed, and where to look next.
 - The Makefile currently owns both orchestration and presentation. That makes
@@ -24,7 +24,7 @@ Goal
 - Keep these Make targets as the stable operator commands:
   - `make docker-smoke`
   - `make docker-smoke-s3`
-  - `make docker-smoke-s3-probe`
+  - `make docker-rustfs-s3-test`
   - `make docker-smoke-s3-down`
 - Preserve existing scenario behavior, Docker resource names, environment
   overrides, artifact locations, and `KEEP_RUSTFS=1` behavior.
@@ -39,8 +39,9 @@ Constraints
   standard Unix utilities.
 - Existing Make variables remain the compatibility surface for callers and CI
   scripts.
-- The first migration must not change kernel smoke scenario semantics, S3 blob
-  store behavior, Prisma migration behavior, or the inner NBD/kernel lifecycle.
+- The first migration must not change NBD device smoke scenario semantics, S3
+  blob store behavior, Prisma migration behavior, or the inner NBD/kernel
+  lifecycle.
 - Console output must not print raw secret values or full env-rich Docker
   command lines by default.
 - Each smoke target must keep returning nonzero when a required smoke step
@@ -48,7 +49,7 @@ Constraints
 - Cleanup of missing Docker resources must be quiet and idempotent.
 
 Non-goals
-- Rewriting inner kernel smoke scenario semantics. The harness may emit
+- Rewriting inner NBD device smoke scenario semantics. The harness may emit
   presentation-only progress events, but NBD device lifecycle, server
   lifecycle, catalog setup, and scenario behavior remain unchanged.
 - Replacing Bash with Python, Rust, or an `xtask` runner in this slice.
@@ -72,10 +73,10 @@ End state
 - Default console output is a short sequence of state and step lines. It does
   not print long Docker commands or credential values.
 - Child process output is captured under the relevant artifact directory, with
-  clear names such as `docker-build.log`, `kernel-smoke.log`,
-  `rustfs-probe.log`, `s3-prefix-test.log`, and `rustfs.log`.
-- Long-running kernel smoke steps expose a small progress side channel while
-  keeping full child output captured in `kernel-smoke.log`.
+  clear names such as `docker-build.log`, `nbd-device-smoke.log`,
+  `rustfs-s3-test.log`, `s3-prefix-test.log`, and `rustfs.log`.
+- Long-running NBD device smoke steps expose a small progress side channel while
+  keeping full child output captured in `nbd-device-smoke.log`.
 - On failure, the console reports the failed step, prints a bounded tail of the
   failed step log, and names the artifact directory.
 - `VERBOSE=1 make docker-smoke*` provides command-oriented detail for local
@@ -88,11 +89,11 @@ Proposed approach
 - Add a plain Docker smoke runner for `make docker-smoke`:
   1. create the artifact directory;
   2. build or refresh the Docker image while capturing build output;
-  3. run the privileged kernel smoke scenario in the container;
+  3. run the privileged NBD device smoke scenario in the container;
   4. report the artifact directory.
 - Add one S3 smoke runner with modes for the S3 target family:
   - `run` for `make docker-smoke-s3`;
-  - `probe` for `make docker-smoke-s3-probe`;
+  - `rustfs-s3-test` for `make docker-rustfs-s3-test`;
   - `down` for `make docker-smoke-s3-down`.
 - The S3 `run` mode owns this lifecycle:
   1. create the artifact directory;
@@ -101,20 +102,22 @@ Proposed approach
   4. create the smoke network and RustFS data volume;
   5. start the RustFS sidecar;
   6. wait for RustFS from inside the smoke network;
-  7. run the privileged kernel smoke scenario with S3 settings;
+  7. run the privileged NBD device smoke scenario with S3 settings;
   8. run the S3 prefix assertion test;
   9. collect RustFS logs;
   10. clean up sidecar resources unless `KEEP_RUSTFS=1`.
-- The S3 `probe` mode shares the same setup, readiness, log collection, and
-  cleanup lifecycle, but runs `scripts/docker/rustfs-s3-probe.sh` instead of
-  the kernel smoke and prefix assertion pair.
+- The S3 `rustfs-s3-test` mode shares the same setup, readiness, log
+  collection, and cleanup lifecycle, but runs
+  `scripts/docker/rustfs-s3-test.sh` instead of the NBD device smoke and
+  prefix assertion pair. The old `probe` mode remains as a compatibility
+  alias.
 - The S3 `down` mode performs quiet, idempotent cleanup of the RustFS container,
   network, and volume. It does not build the image.
-- Keep `scripts/docker/kernel-smoke.sh` and
-  `scripts/docker/kernel-smoke/harness.sh` as the inner scenario owners. They
-  still own NBD device lifecycle, server lifecycle, smoke-home setup, config
-  initialization, catalog migration, scenario actions, kernel artifacts, and
-  milestone progress events for those actions.
+- Keep `scripts/docker/nbd-device-smoke.sh` and
+  `scripts/docker/nbd-device-smoke/harness.sh` as the inner scenario owners.
+  They still own NBD device lifecycle, server lifecycle, smoke-home setup,
+  config initialization, catalog migration, scenario actions, NBD device
+  artifacts, and milestone progress events for those actions.
 
 Data model / API shape
 - Make variables remain the external configuration API:
@@ -123,18 +126,24 @@ Data model / API shape
   - `DOCKER_WORKDIR`
   - `DOCKER_CARGO_TARGET_DIR`
   - `DOCKER_PATH`
-  - `KERNEL_SMOKE_OUTPUT`
-  - `DOCKER_KERNEL_SMOKE_ARTIFACT_DIR`
-  - `DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT`
-  - `KERNEL_SMOKE_EXPORT`
-  - `KERNEL_SMOKE_SCENARIO`
-  - `KERNEL_SMOKE_SIZE_BYTES`
-  - `KERNEL_SMOKE_ENGINE`
-  - `KERNEL_SMOKE_CARGO_FEATURES`
-  - `KERNEL_SMOKE_PORT`
-  - `KERNEL_SMOKE_DEVICE`
-  - `KERNEL_SMOKE_RUST_LOG`
-  - `KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS`
+  - `NBD_DEVICE_SMOKE_OUTPUT`
+  - `DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR`
+  - `DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT`
+  - `NBD_DEVICE_SMOKE_EXPORT`
+  - `NBD_DEVICE_SMOKE_SCENARIO`
+  - `NBD_DEVICE_SMOKE_SIZE_BYTES`
+  - `NBD_DEVICE_SMOKE_ENGINE`
+  - `NBD_DEVICE_SMOKE_CARGO_FEATURES`
+  - `NBD_DEVICE_SMOKE_PORT`
+  - `NBD_DEVICE_SMOKE_DEVICE`
+  - `NBD_DEVICE_SMOKE_RUST_LOG`
+  - `NBD_DEVICE_SMOKE_COMPACTION_SETTLE_SECONDS`
+  - `NBD_DEVICE_SMOKE_S3_ENDPOINT_URL`
+  - `NBD_DEVICE_SMOKE_S3_BUCKET`
+  - `NBD_DEVICE_SMOKE_S3_ACCESS_KEY_ID`
+  - `NBD_DEVICE_SMOKE_S3_SECRET_ACCESS_KEY`
+  - `NBD_DEVICE_SMOKE_S3_REGION`
+  - `NBD_DEVICE_SMOKE_S3_KEY_PREFIX`
   - `DOCKER_SMOKE_S3_NETWORK`
   - `DOCKER_SMOKE_S3_RUSTFS_CONTAINER`
   - `DOCKER_SMOKE_S3_RUSTFS_ALIAS`
@@ -147,6 +156,9 @@ Data model / API shape
   - `RUSTFS_IMAGE`
   - `KEEP_RUSTFS`
   - `VERBOSE`
+- Legacy `KERNEL_SMOKE_*` and `DOCKER_KERNEL_SMOKE_*` names remain accepted as
+  aliases during this rename, but new docs and scripts should use
+  `NBD_DEVICE_SMOKE_*` and `DOCKER_NBD_DEVICE_SMOKE_*`.
 - The Makefile passes these variables to the host-side scripts as environment.
   The scripts derive Docker argument arrays from those environment values.
 - Source-of-truth state:
@@ -188,7 +200,7 @@ smoke_redacted_command <command> [args...]
 ```text
 docker_smoke_build_image <log-path>
 docker_smoke_workspace_args <rw|ro>
-docker_smoke_kernel_env_args
+docker_smoke_nbd_device_env_args
 docker_smoke_artifact_args <host-dir> <container-dir>
 docker_smoke_run_in_workspace <log-path> <extra-args...> -- <command...>
 ```
@@ -201,7 +213,7 @@ docker_smoke_run_in_workspace <log-path> <extra-args...> -- <command...>
 ```text
 docker-smoke:
   build-image
-  kernel-smoke
+  nbd-device-smoke
 
 docker-smoke-s3 run:
   build-image
@@ -210,19 +222,19 @@ docker-smoke-s3 run:
   create-volume
   start-rustfs
   wait-rustfs
-  kernel-smoke
+  nbd-device-smoke
   s3-prefix-test
   collect-rustfs-log
   cleanup-resources
 
-docker-smoke-s3 probe:
+docker-rustfs-s3-test:
   build-image
   cleanup-stale-resources
   create-network
   create-volume
   start-rustfs
   wait-rustfs
-  rustfs-probe
+  rustfs-s3-test
   collect-rustfs-log
   cleanup-resources
 
@@ -236,7 +248,7 @@ docker-smoke-s3 down:
 Source topology / project structure
 - `Makefile`
   - Keeps default variables and stable phony targets.
-  - `docker-smoke`, `docker-smoke-s3`, `docker-smoke-s3-probe`, and
+  - `docker-smoke`, `docker-smoke-s3`, `docker-rustfs-s3-test`, and
     `docker-smoke-s3-down` become thin wrappers around host-side scripts.
 - `scripts/docker/lib/smoke-log.sh`
   - Owns generic console rendering, command capture, verbose display, redaction,
@@ -245,22 +257,23 @@ Source topology / project structure
 - `scripts/docker/lib/smoke-docker.sh`
   - Owns common Docker image build and workspace argument construction.
   - Knows Docker workspace mounts, Cargo cache volumes, target dir, platform,
-    image name, and kernel smoke environment argument construction.
+    image name, and NBD device smoke environment argument construction.
   - Does not know the S3 sidecar lifecycle.
 - `scripts/docker/docker-smoke.sh`
   - Owns the host-side lifecycle for the plain `docker-smoke` target.
-  - Calls `make kernel-smoke-inner` inside the privileged smoke container.
+  - Calls `make nbd-device-smoke-inner` inside the privileged smoke container.
 - `scripts/docker/docker-smoke-s3.sh`
   - Owns the outer S3 smoke lifecycle and Docker resource policy for the S3
     target family.
-  - Implements `run`, `probe`, and `down` modes.
-  - Calls `make kernel-smoke-inner` inside the privileged smoke container for
-    `run` mode.
-  - Calls `scripts/docker/rustfs-s3-probe.sh` inside the smoke network for
-    `probe` mode.
-- `scripts/docker/kernel-smoke.sh`
-  - Remains the entrypoint for the inner kernel smoke scenario.
-- `scripts/docker/kernel-smoke/harness.sh`
+  - Implements `run`, `rustfs-s3-test`, compatibility `probe`, and `down`
+    modes.
+  - Calls `make nbd-device-smoke-inner` inside the privileged smoke container
+    for `run` mode.
+  - Calls `scripts/docker/rustfs-s3-test.sh` inside the smoke network for
+    `rustfs-s3-test` mode.
+- `scripts/docker/nbd-device-smoke.sh`
+  - Remains the entrypoint for the inner NBD device smoke scenario.
+- `scripts/docker/nbd-device-smoke/harness.sh`
   - Remains the owner of NBD device, mount, server, config, catalog, and
     scenario artifacts.
 - This change leaves the Makefile less likely to become the dumping ground for
@@ -277,17 +290,17 @@ Invariants
   are quiet.
 - `KEEP_RUSTFS=1` leaves the RustFS sidecar resources in place and prints the
   network, container, and cleanup command.
-- Without `KEEP_RUSTFS=1`, S3 `run` and `probe` perform best-effort cleanup
-  after both success and failure.
+- Without `KEEP_RUSTFS=1`, S3 `run` and `rustfs-s3-test` perform best-effort
+  cleanup after both success and failure.
 - The scripts pass the same smoke scenario variables, S3 endpoint, bucket,
   region, key prefix, and credentials that the Makefile targets pass today.
-- The inner kernel smoke harness remains the only owner of `/dev/nbd0`, mount
-  cleanup, server shutdown, and scenario-level artifacts.
+- The inner NBD device smoke harness remains the only owner of `/dev/nbd0`,
+  mount cleanup, server shutdown, and scenario-level artifacts.
 - The Make targets remain the operator API and exit with the runner status.
 
 Operational and lifecycle contracts
 - The plain Docker smoke runner owns image build, artifact setup, and the outer
-  container invocation for kernel smoke.
+  container invocation for NBD device smoke.
 - The S3 runner owns sidecar startup, readiness, log collection, and cleanup.
 - The S3 runner installs an exit trap after it creates Docker resources. The
   trap collects RustFS logs when possible and cleans resources unless
@@ -320,10 +333,10 @@ Alternatives considered
   - deferred. That may make sense once smoke orchestration grows a matrix,
     machine-readable reports, or richer artifact indexing, but it is too much
     toolchain surface for this output cleanup.
-- Update only the inner kernel smoke harness:
+- Update only the inner NBD device smoke harness:
   - rejected because the worst noise and the secret-shaped command echo come
     from the outer Make/Docker orchestration.
-- Stream the whole kernel smoke log live:
+- Stream the whole NBD device smoke log live:
   - rejected because it would reintroduce noisy Prisma, Cargo, mkfs,
     nbd-client, and server output into the default console. A progress side
     channel gives useful milestones without losing the clean log boundary.
@@ -333,12 +346,14 @@ Migration / rollout
   - add the shared output helper;
   - add the shared Docker-smoke helper;
   - add the plain Docker smoke runner;
-  - add the S3 runner with `run`, `probe`, and `down` modes;
-  - convert `docker-smoke`, `docker-smoke-s3`, `docker-smoke-s3-probe`, and
+  - add the S3 runner with `run`, `rustfs-s3-test`, and `down` modes;
+  - convert `docker-smoke`, `docker-smoke-s3`, `docker-rustfs-s3-test`, and
     `docker-smoke-s3-down` to thin Make wrappers;
+  - keep `docker-smoke-s3-probe` as a compatibility alias for
+    `docker-rustfs-s3-test`;
   - preserve target names, default variables, artifact paths, and exit status.
-- No repository user should need to change the command they run for any
-  `make docker-smoke*` target.
+- No repository user should need to change an existing `make docker-smoke*`
+  invocation, but new docs should prefer `make docker-rustfs-s3-test`.
 - Future Docker smoke targets should be implemented as scripts using the same
   helper libraries instead of adding lifecycle logic to the Makefile.
 
@@ -355,13 +370,13 @@ Validation strategy
     events while keeping raw command output in the captured log.
 - End-to-end behavior:
   - `make docker-smoke`
-  - `make docker-smoke-s3-probe`
+  - `make docker-rustfs-s3-test`
   - `make docker-smoke-s3`
   - verify each console has concise state and step output;
   - verify each command exits zero on a passing smoke;
   - verify artifacts include the expected logs for that target;
   - verify S3 console output does not include `DOCKER_SMOKE_S3_SECRET_KEY`,
-    `KERNEL_SMOKE_S3_SECRET_ACCESS_KEY`, `NBD_TEST_S3_SECRET_ACCESS_KEY`, or
+    `NBD_DEVICE_SMOKE_S3_SECRET_ACCESS_KEY`, `NBD_TEST_S3_SECRET_ACCESS_KEY`, or
     the configured secret value.
 - Failure-path behavior:
   - run a focused helper failure check, or run the S3 runner with an invalid
@@ -369,7 +384,7 @@ Validation strategy
   - verify the console names the failed step, tails the relevant log, exits
     nonzero, and cleans Docker resources unless `KEEP_RUSTFS=1`.
 - Compatibility:
-  - `KEEP_RUSTFS=1 make docker-smoke-s3-probe`
+  - `KEEP_RUSTFS=1 make docker-rustfs-s3-test`
   - `KEEP_RUSTFS=1 make docker-smoke-s3`
   - `make docker-smoke-s3-down`
   - optional `VERBOSE=1 make docker-smoke` and
@@ -404,8 +419,8 @@ Design exit criteria
 - The default output contract is accepted: concise console, captured logs, and
   bounded tails on failure.
 - The redaction invariant is accepted for console output.
-- The first slice scope is accepted as all current `make docker-smoke*` targets:
-  `docker-smoke`, `docker-smoke-s3`, `docker-smoke-s3-probe`, and
+- The first slice scope is accepted as `docker-smoke`, `docker-smoke-s3`,
+  `docker-rustfs-s3-test`, the `docker-smoke-s3-probe` alias, and
   `docker-smoke-s3-down`.
 
 Recommended next step

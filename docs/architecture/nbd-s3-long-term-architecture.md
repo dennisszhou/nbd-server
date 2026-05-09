@@ -332,8 +332,8 @@ Include:
 - SQLite `ExportCatalog` with `exports`, `export_heads`, simple mutable tree,
   and COW tree metadata;
 - basic `nbdcli` create/list/clone/delete/inspect;
-- Docker kernel smoke coverage for local WAL durable and S3/RustFS WAL durable
-  lifecycle paths.
+- Docker NBD device smoke coverage for local WAL durable and S3/RustFS WAL
+  durable lifecycle paths.
 
 Defer:
 

@@ -6,14 +6,13 @@ run_smoke_scenario() {
     local clone_root
 
     create_export "wal_durable"
-    configure_s3_blob_store
 
     start_server
     connect_device
     format_device
     mount_device
 
-    write_and_verify_probe "${PROBE_EXPECTED}" "nbd kernel smoke s3" "probe.txt"
+    write_and_verify_probe "${PROBE_EXPECTED}" "nbd device smoke" "probe.txt"
 
     unmount_device
     disconnect_device
@@ -42,7 +41,7 @@ run_smoke_scenario() {
     verify_probe "${PROBE_EXPECTED}" "probe.txt"
     write_and_verify_probe \
         "${CLONE_PROBE_EXPECTED}" \
-        "nbd kernel smoke s3 clone" \
+        "nbd device smoke clone" \
         "probe-clone.txt"
     unmount_device
     disconnect_device
@@ -63,7 +62,7 @@ run_smoke_scenario() {
     verify_absent "probe-clone.txt"
     write_and_verify_probe \
         "${SECOND_PROBE_EXPECTED}" \
-        "nbd kernel smoke s3 second" \
+        "nbd device smoke second" \
         "probe-second.txt"
 
     unmount_device

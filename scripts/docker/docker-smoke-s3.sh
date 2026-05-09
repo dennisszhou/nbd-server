@@ -27,11 +27,11 @@ case "${DOCKER_SMOKE_S3_ARTIFACT_DIR}" in
         DOCKER_SMOKE_S3_ARTIFACT_DIR="${REPO_ROOT}/${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
         ;;
 esac
-DOCKER_KERNEL_SMOKE_ARTIFACT_DIR="${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
-KERNEL_ARTIFACT_HOST_DIR="${DOCKER_SMOKE_S3_ARTIFACT_DIR}/kernel-artifacts"
-KERNEL_ARTIFACT_CONTAINER_DIR="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}/kernel-artifacts"
-KERNEL_PROGRESS_HOST_FILE="${DOCKER_SMOKE_S3_ARTIFACT_DIR}/kernel-progress.log"
-KERNEL_PROGRESS_CONTAINER_FILE="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}/kernel-progress.log"
+DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR="${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
+NBD_DEVICE_ARTIFACT_HOST_DIR="${DOCKER_SMOKE_S3_ARTIFACT_DIR}/nbd-device-artifacts"
+NBD_DEVICE_ARTIFACT_CONTAINER_DIR="${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT}/nbd-device-artifacts"
+NBD_DEVICE_PROGRESS_HOST_FILE="${DOCKER_SMOKE_S3_ARTIFACT_DIR}/nbd-device-progress.log"
+NBD_DEVICE_PROGRESS_CONTAINER_FILE="${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT}/nbd-device-progress.log"
 S3_RESOURCES_ACTIVE=0
 
 s3_endpoint_url() {
@@ -161,20 +161,20 @@ s3_wait_for_rustfs() {
             exit 1'
 }
 
-s3_set_kernel_env() {
-    KERNEL_SMOKE_SCENARIO="wal-durable-s3-basic"
-    KERNEL_SMOKE_CARGO_FEATURES="s3"
-    docker_smoke_set_kernel_env_args \
-        "${KERNEL_ARTIFACT_CONTAINER_DIR}" \
-        "${KERNEL_PROGRESS_CONTAINER_FILE}"
+s3_set_nbd_device_env() {
+    NBD_DEVICE_SMOKE_SCENARIO="wal-durable-s3-basic"
+    NBD_DEVICE_SMOKE_CARGO_FEATURES="s3"
+    docker_smoke_set_nbd_device_env_args \
+        "${NBD_DEVICE_ARTIFACT_CONTAINER_DIR}" \
+        "${NBD_DEVICE_PROGRESS_CONTAINER_FILE}"
 
     DOCKER_SMOKE_ENV_ARGS+=(
-        -e "KERNEL_SMOKE_S3_ENDPOINT_URL=$(s3_endpoint_url)"
-        -e "KERNEL_SMOKE_S3_BUCKET=${DOCKER_SMOKE_S3_BUCKET}"
-        -e "KERNEL_SMOKE_S3_ACCESS_KEY_ID=${DOCKER_SMOKE_S3_ACCESS_KEY}"
-        -e "KERNEL_SMOKE_S3_SECRET_ACCESS_KEY=${DOCKER_SMOKE_S3_SECRET_KEY}"
-        -e "KERNEL_SMOKE_S3_REGION=${DOCKER_SMOKE_S3_REGION}"
-        -e "KERNEL_SMOKE_S3_KEY_PREFIX=${DOCKER_SMOKE_S3_KEY_PREFIX}"
+        -e "NBD_DEVICE_SMOKE_S3_ENDPOINT_URL=$(s3_endpoint_url)"
+        -e "NBD_DEVICE_SMOKE_S3_BUCKET=${DOCKER_SMOKE_S3_BUCKET}"
+        -e "NBD_DEVICE_SMOKE_S3_ACCESS_KEY_ID=${DOCKER_SMOKE_S3_ACCESS_KEY}"
+        -e "NBD_DEVICE_SMOKE_S3_SECRET_ACCESS_KEY=${DOCKER_SMOKE_S3_SECRET_KEY}"
+        -e "NBD_DEVICE_SMOKE_S3_REGION=${DOCKER_SMOKE_S3_REGION}"
+        -e "NBD_DEVICE_SMOKE_S3_KEY_PREFIX=${DOCKER_SMOKE_S3_KEY_PREFIX}"
     )
 }
 
@@ -189,19 +189,19 @@ s3_set_test_env() {
     )
 }
 
-s3_run_kernel_smoke() {
+s3_run_nbd_device_smoke() {
     local status=0
 
-    mkdir -p "${KERNEL_ARTIFACT_HOST_DIR}"
+    mkdir -p "${NBD_DEVICE_ARTIFACT_HOST_DIR}"
     docker_smoke_set_workspace_args "ro"
     docker_smoke_set_artifact_args \
         "${DOCKER_SMOKE_S3_ARTIFACT_DIR}" \
-        "${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}"
-    s3_set_kernel_env
+        "${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT}"
+    s3_set_nbd_device_env
 
-    smoke_run_with_progress "kernel smoke" \
-        "${DOCKER_SMOKE_S3_ARTIFACT_DIR}/kernel-smoke.log" \
-        "${KERNEL_PROGRESS_HOST_FILE}" \
+    smoke_run_with_progress "NBD device smoke" \
+        "${DOCKER_SMOKE_S3_ARTIFACT_DIR}/nbd-device-smoke.log" \
+        "${NBD_DEVICE_PROGRESS_HOST_FILE}" \
         docker run --rm \
             "${DOCKER_SMOKE_WORKSPACE_ARGS[@]}" \
             --network "${DOCKER_SMOKE_S3_NETWORK}" \
@@ -209,10 +209,10 @@ s3_run_kernel_smoke() {
             "${DOCKER_SMOKE_ARTIFACT_ARGS[@]}" \
             --privileged \
             "${DOCKER_IMAGE}" \
-            make kernel-smoke-inner || status=$?
+            make nbd-device-smoke-inner || status=$?
 
-    docker_smoke_collect_kernel_artifacts \
-        "${KERNEL_ARTIFACT_HOST_DIR}" \
+    docker_smoke_collect_nbd_device_artifacts \
+        "${NBD_DEVICE_ARTIFACT_HOST_DIR}" \
         "${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
 
     if [ "${status}" -ne 0 ]; then
@@ -237,18 +237,18 @@ s3_run_prefix_test() {
                 s3_configured_prefix_contains_objects_when_required -- --exact
 }
 
-s3_run_probe() {
+s3_run_rustfs_s3_test() {
     docker_smoke_set_workspace_args "ro"
     s3_set_test_env
 
-    smoke_run "RustFS S3 probe" \
-        "${DOCKER_SMOKE_S3_ARTIFACT_DIR}/rustfs-probe.log" \
+    smoke_run "RustFS S3 tests" \
+        "${DOCKER_SMOKE_S3_ARTIFACT_DIR}/rustfs-s3-test.log" \
         docker run --rm \
             "${DOCKER_SMOKE_WORKSPACE_ARGS[@]}" \
             --network "${DOCKER_SMOKE_S3_NETWORK}" \
             "${DOCKER_SMOKE_S3_TEST_ENV_ARGS[@]}" \
             "${DOCKER_IMAGE}" \
-            bash scripts/docker/rustfs-s3-probe.sh
+            bash scripts/docker/rustfs-s3-test.sh
 }
 
 s3_prepare() {
@@ -269,16 +269,16 @@ case "${MODE}" in
         s3_print_header "docker S3 smoke"
         smoke_state "scenario" "wal-durable-s3-basic"
         s3_prepare
-        s3_run_kernel_smoke
+        s3_run_nbd_device_smoke
         s3_run_prefix_test
         smoke_ok "docker S3 smoke passed"
         smoke_state "artifacts" "${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
         ;;
-    probe)
-        s3_print_header "docker S3 smoke probe"
+    rustfs-s3-test | probe)
+        s3_print_header "docker RustFS S3 test"
         s3_prepare
-        s3_run_probe
-        smoke_ok "docker S3 smoke probe passed"
+        s3_run_rustfs_s3_test
+        smoke_ok "docker RustFS S3 test passed"
         smoke_state "artifacts" "${DOCKER_SMOKE_S3_ARTIFACT_DIR}"
         ;;
     down)

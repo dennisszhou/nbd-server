@@ -18,7 +18,7 @@ this file only records local facts and conventions.
   - `crates/nbd-protocol`: wire constants, parsing, and encoding.
   - `crates/nbd-us-client`: userspace validation client.
   - `crates/nbdcli`: operator/catalog CLI.
-- Docker and kernel smoke support lives in `Makefile`, `docker/`, and
+- Docker and NBD device smoke support lives in `Makefile`, `docker/`, and
   `scripts/docker/`.
 
 ## Where To Look First
@@ -51,9 +51,9 @@ this file only records local facts and conventions.
 - Config work:
   - `crates/nbd-config/src/lib.rs`
   - `crates/nbd-config/tests/config_loading.rs`
-- Docker/kernel smoke work:
+- Docker/NBD device smoke work:
   - `Makefile`
-  - `scripts/docker/kernel-smoke.sh`
+  - `scripts/docker/nbd-device-smoke.sh`
 
 ## Source Of Truth
 
@@ -129,26 +129,30 @@ make test-protocol
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 make docker-smoke
-make docker-smoke KERNEL_SMOKE_SCENARIO=memory-basic \
-  KERNEL_SMOKE_OUTPUT=memory-basic
+make docker-smoke NBD_DEVICE_SMOKE_SCENARIO=memory-basic \
+  NBD_DEVICE_SMOKE_OUTPUT=memory-basic
 ```
 
 - `make test-protocol` runs the userspace TCP protocol integration baseline.
-- `make docker-smoke` runs the privileged kernel NBD smoke path. It defaults
-  to the `wal-durable-basic` scenario, verifies reattach and close compaction,
-  and exports logs and inspect snapshots under `./.tmp/docker-smoke`.
-- `KERNEL_SMOKE_SCENARIO=memory-basic make docker-smoke` checks the volatile
+- `make docker-smoke` runs the privileged NBD device smoke path through the
+  Linux kernel NBD client. It defaults to the `wal-durable-basic` scenario,
+  verifies reattach and close compaction, and exports logs and inspect
+  snapshots under `./.tmp/docker-smoke`.
+- `NBD_DEVICE_SMOKE_SCENARIO=memory-basic make docker-smoke` checks the volatile
   engine path. Current scenarios are `memory-basic`, `simple-durable-basic`,
   and `wal-durable-basic`.
-- `make docker-smoke KERNEL_SMOKE_OUTPUT=wal-basic` writes artifacts under
+- `make docker-smoke NBD_DEVICE_SMOKE_OUTPUT=wal-basic` writes artifacts under
   `./.tmp/wal-basic`.
-- Set `DOCKER_KERNEL_SMOKE_ARTIFACT_DIR=/path` to override the full host
+- Set `DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR=/path` to override the full host
   artifact path.
-- `KERNEL_SMOKE_ENGINE=memory make docker-smoke` remains a compatibility
+- `NBD_DEVICE_SMOKE_ENGINE=memory make docker-smoke` remains a compatibility
   shortcut for the matching basic scenario.
+- `make docker-rustfs-s3-test` starts the RustFS smoke sidecar and runs the S3
+  blob-store tests against it without attaching an NBD device.
 - `make build` builds `nbd-server` and `nbdcli`.
 - `make -C prisma db-migrate` applies Prisma migrations to `DATABASE_URL`.
-- If Docker/kernel smoke cannot run, say exactly why and what was run instead.
+- If Docker/NBD device smoke cannot run, say exactly why and what was run
+  instead.
 
 ## Docker And Manual NBD Notes
 

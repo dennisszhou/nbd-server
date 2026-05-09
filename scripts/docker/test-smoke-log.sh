@@ -63,11 +63,11 @@ assert_contains "boom" "${TMP_DIR}/fail.log"
 
 VERBOSE=1 smoke_redacted_command docker run \
     -e NBD_TEST_S3_SECRET_ACCESS_KEY=rustfsadmin \
-    -e KERNEL_SMOKE_S3_KEY_PREFIX=v0.1/blobs/ \
+    -e NBD_DEVICE_SMOKE_S3_KEY_PREFIX=v0.1/blobs/ \
     -e NBD_TEST_S3_BUCKET=everstore \
     >"${TMP_DIR}/redacted.out"
 assert_contains "NBD_TEST_S3_SECRET_ACCESS_KEY" "${TMP_DIR}/redacted.out"
-assert_contains "KERNEL_SMOKE_S3_KEY_PREFIX" "${TMP_DIR}/redacted.out"
+assert_contains "NBD_DEVICE_SMOKE_S3_KEY_PREFIX" "${TMP_DIR}/redacted.out"
 assert_contains "NBD_TEST_S3_BUCKET=everstore" "${TMP_DIR}/redacted.out"
 assert_not_contains "rustfsadmin" "${TMP_DIR}/redacted.out"
 assert_not_contains "v0.1/blobs/" "${TMP_DIR}/redacted.out"

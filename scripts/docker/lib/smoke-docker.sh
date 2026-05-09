@@ -7,26 +7,27 @@ docker_smoke_init_defaults() {
     DOCKER_WORKDIR="${DOCKER_WORKDIR:-/work}"
     DOCKER_CARGO_TARGET_DIR="${DOCKER_CARGO_TARGET_DIR:-/cargo-target}"
     DOCKER_PATH="${DOCKER_PATH:-${DOCKER_CARGO_TARGET_DIR}/debug:/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-    KERNEL_SMOKE_OUTPUT="${KERNEL_SMOKE_OUTPUT:-docker-smoke}"
-    DOCKER_KERNEL_SMOKE_ARTIFACT_DIR="${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR:-${REPO_ROOT}/.tmp/${KERNEL_SMOKE_OUTPUT}}"
-    DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT="${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT:-/tmp/nbd-smoke-artifacts}"
+    NBD_DEVICE_SMOKE_OUTPUT="${NBD_DEVICE_SMOKE_OUTPUT:-${KERNEL_SMOKE_OUTPUT:-docker-smoke}}"
+    DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR="${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR:-${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR:-${REPO_ROOT}/.tmp/${NBD_DEVICE_SMOKE_OUTPUT}}}"
+    DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT="${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT:-${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT:-/tmp/nbd-device-smoke-artifacts}}"
 
-    case "${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}" in
+    case "${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR}" in
         /*)
             ;;
         *)
-            DOCKER_KERNEL_SMOKE_ARTIFACT_DIR="${REPO_ROOT}/${DOCKER_KERNEL_SMOKE_ARTIFACT_DIR}"
+            DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR="${REPO_ROOT}/${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_DIR}"
             ;;
     esac
 }
 
 docker_smoke_effective_scenario() {
-    if [ -n "${KERNEL_SMOKE_SCENARIO:-}" ]; then
-        printf '%s\n' "${KERNEL_SMOKE_SCENARIO}"
+    if [ -n "${NBD_DEVICE_SMOKE_SCENARIO:-${KERNEL_SMOKE_SCENARIO:-}}" ]; then
+        printf '%s\n' \
+            "${NBD_DEVICE_SMOKE_SCENARIO:-${KERNEL_SMOKE_SCENARIO:-}}"
         return 0
     fi
 
-    case "${KERNEL_SMOKE_ENGINE:-wal_durable}" in
+    case "${NBD_DEVICE_SMOKE_ENGINE:-${KERNEL_SMOKE_ENGINE:-wal_durable}}" in
         memory)
             printf '%s\n' "memory-basic"
             ;;
@@ -92,69 +93,73 @@ docker_smoke_add_env_if_set() {
     fi
 }
 
-docker_smoke_set_kernel_env_args() {
-    local artifact_dir="${1:-${DOCKER_KERNEL_SMOKE_ARTIFACT_MOUNT}}"
+docker_smoke_set_nbd_device_env_args() {
+    local artifact_dir="${1:-${DOCKER_NBD_DEVICE_SMOKE_ARTIFACT_MOUNT}}"
     local progress_file="${2:-}"
 
     DOCKER_SMOKE_ENV_ARGS=()
 
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_EXPORT" \
-        "${KERNEL_SMOKE_EXPORT:-}"
+        "NBD_DEVICE_SMOKE_EXPORT" \
+        "${NBD_DEVICE_SMOKE_EXPORT:-${KERNEL_SMOKE_EXPORT:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_SCENARIO" \
-        "${KERNEL_SMOKE_SCENARIO:-}"
+        "NBD_DEVICE_SMOKE_SCENARIO" \
+        "${NBD_DEVICE_SMOKE_SCENARIO:-${KERNEL_SMOKE_SCENARIO:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_SIZE_BYTES" \
-        "${KERNEL_SMOKE_SIZE_BYTES:-}"
+        "NBD_DEVICE_SMOKE_SIZE_BYTES" \
+        "${NBD_DEVICE_SMOKE_SIZE_BYTES:-${KERNEL_SMOKE_SIZE_BYTES:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_ENGINE" \
-        "${KERNEL_SMOKE_ENGINE:-}"
+        "NBD_DEVICE_SMOKE_ENGINE" \
+        "${NBD_DEVICE_SMOKE_ENGINE:-${KERNEL_SMOKE_ENGINE:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_CARGO_FEATURES" \
-        "${KERNEL_SMOKE_CARGO_FEATURES:-}"
+        "NBD_DEVICE_SMOKE_CARGO_FEATURES" \
+        "${NBD_DEVICE_SMOKE_CARGO_FEATURES:-${KERNEL_SMOKE_CARGO_FEATURES:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_PORT" \
-        "${KERNEL_SMOKE_PORT:-}"
+        "NBD_DEVICE_SMOKE_PORT" \
+        "${NBD_DEVICE_SMOKE_PORT:-${KERNEL_SMOKE_PORT:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_DEVICE" \
-        "${KERNEL_SMOKE_DEVICE:-}"
+        "NBD_DEVICE_SMOKE_DEVICE" \
+        "${NBD_DEVICE_SMOKE_DEVICE:-${KERNEL_SMOKE_DEVICE:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_RUST_LOG" \
-        "${KERNEL_SMOKE_RUST_LOG:-}"
+        "NBD_DEVICE_SMOKE_RUST_LOG" \
+        "${NBD_DEVICE_SMOKE_RUST_LOG:-${KERNEL_SMOKE_RUST_LOG:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_S3_ENDPOINT_URL" \
-        "${KERNEL_SMOKE_S3_ENDPOINT_URL:-}"
+        "NBD_DEVICE_SMOKE_S3_ENDPOINT_URL" \
+        "${NBD_DEVICE_SMOKE_S3_ENDPOINT_URL:-${KERNEL_SMOKE_S3_ENDPOINT_URL:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_S3_BUCKET" \
-        "${KERNEL_SMOKE_S3_BUCKET:-}"
+        "NBD_DEVICE_SMOKE_S3_BUCKET" \
+        "${NBD_DEVICE_SMOKE_S3_BUCKET:-${KERNEL_SMOKE_S3_BUCKET:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_S3_ACCESS_KEY_ID" \
-        "${KERNEL_SMOKE_S3_ACCESS_KEY_ID:-}"
+        "NBD_DEVICE_SMOKE_S3_ACCESS_KEY_ID" \
+        "${NBD_DEVICE_SMOKE_S3_ACCESS_KEY_ID:-${KERNEL_SMOKE_S3_ACCESS_KEY_ID:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_S3_SECRET_ACCESS_KEY" \
-        "${KERNEL_SMOKE_S3_SECRET_ACCESS_KEY:-}"
+        "NBD_DEVICE_SMOKE_S3_SECRET_ACCESS_KEY" \
+        "${NBD_DEVICE_SMOKE_S3_SECRET_ACCESS_KEY:-${KERNEL_SMOKE_S3_SECRET_ACCESS_KEY:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_S3_REGION" \
-        "${KERNEL_SMOKE_S3_REGION:-}"
+        "NBD_DEVICE_SMOKE_S3_REGION" \
+        "${NBD_DEVICE_SMOKE_S3_REGION:-${KERNEL_SMOKE_S3_REGION:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_S3_KEY_PREFIX" \
-        "${KERNEL_SMOKE_S3_KEY_PREFIX:-}"
+        "NBD_DEVICE_SMOKE_S3_KEY_PREFIX" \
+        "${NBD_DEVICE_SMOKE_S3_KEY_PREFIX:-${KERNEL_SMOKE_S3_KEY_PREFIX:-}}"
     docker_smoke_add_env_if_set \
-        "KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS" \
-        "${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-}"
+        "NBD_DEVICE_SMOKE_COMPACTION_SETTLE_SECONDS" \
+        "${NBD_DEVICE_SMOKE_COMPACTION_SETTLE_SECONDS:-${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-}}"
 
     DOCKER_SMOKE_ENV_ARGS+=(
-        -e "KERNEL_SMOKE_ARTIFACT_DIR=${artifact_dir}"
+        -e "NBD_DEVICE_SMOKE_ARTIFACT_DIR=${artifact_dir}"
     )
     if [ -n "${progress_file}" ]; then
         DOCKER_SMOKE_ENV_ARGS+=(
-            -e "KERNEL_SMOKE_PROGRESS_FILE=${progress_file}"
+            -e "NBD_DEVICE_SMOKE_PROGRESS_FILE=${progress_file}"
         )
     fi
 }
 
-docker_smoke_collect_kernel_artifacts() {
+docker_smoke_set_kernel_env_args() {
+    docker_smoke_set_nbd_device_env_args "$@"
+}
+
+docker_smoke_collect_nbd_device_artifacts() {
     local source_dir="$1"
     local destination_dir="$2"
 
@@ -165,4 +170,8 @@ docker_smoke_collect_kernel_artifacts() {
     mkdir -p "${destination_dir}"
     find "${source_dir}" -maxdepth 1 -type f \
         -exec cp -f {} "${destination_dir}/" \;
+}
+
+docker_smoke_collect_kernel_artifacts() {
+    docker_smoke_collect_nbd_device_artifacts "$@"
 }

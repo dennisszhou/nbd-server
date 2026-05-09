@@ -8,7 +8,7 @@ run_smoke_scenario() {
     format_device
     mount_device
 
-    write_and_verify_probe "${PROBE_EXPECTED}" "nbd kernel smoke" "probe.txt"
+    write_and_verify_probe "${PROBE_EXPECTED}" "nbd device smoke" "probe.txt"
 
     unmount_device
     disconnect_device

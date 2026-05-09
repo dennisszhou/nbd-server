@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 
-EXPORT_NAME="${KERNEL_SMOKE_EXPORT:-smoke}"
-CLONE_EXPORT_NAME="${KERNEL_SMOKE_CLONE_EXPORT:-${EXPORT_NAME}-clone}"
-SIZE_BYTES="${KERNEL_SMOKE_SIZE_BYTES:-67108864}"
-PORT="${KERNEL_SMOKE_PORT:-10809}"
-DEVICE="${KERNEL_SMOKE_DEVICE:-/dev/nbd0}"
-ARTIFACT_DIR="${KERNEL_SMOKE_ARTIFACT_DIR:-}"
-RUST_LOG_FILTER="${KERNEL_SMOKE_RUST_LOG:-info,nbd_server::storage=info}"
-COMPACTION_SETTLE_SECONDS="${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-0.2}"
-S3_ENDPOINT_URL="${KERNEL_SMOKE_S3_ENDPOINT_URL:-http://rustfs:9000}"
-S3_REGION="${KERNEL_SMOKE_S3_REGION:-us-east-1}"
-S3_BUCKET="${KERNEL_SMOKE_S3_BUCKET:-everstore}"
-S3_ACCESS_KEY_ID="${KERNEL_SMOKE_S3_ACCESS_KEY_ID:-rustfsadmin}"
-S3_SECRET_ACCESS_KEY="${KERNEL_SMOKE_S3_SECRET_ACCESS_KEY:-rustfsadmin}"
-S3_KEY_PREFIX="${KERNEL_SMOKE_S3_KEY_PREFIX:-v0.1/blobs/}"
-PROGRESS_FILE="${KERNEL_SMOKE_PROGRESS_FILE:-}"
+EXPORT_NAME="${NBD_DEVICE_SMOKE_EXPORT:-${KERNEL_SMOKE_EXPORT:-smoke}}"
+CLONE_EXPORT_NAME="${NBD_DEVICE_SMOKE_CLONE_EXPORT:-${KERNEL_SMOKE_CLONE_EXPORT:-${EXPORT_NAME}-clone}}"
+SIZE_BYTES="${NBD_DEVICE_SMOKE_SIZE_BYTES:-${KERNEL_SMOKE_SIZE_BYTES:-67108864}}"
+PORT="${NBD_DEVICE_SMOKE_PORT:-${KERNEL_SMOKE_PORT:-10809}}"
+DEVICE="${NBD_DEVICE_SMOKE_DEVICE:-${KERNEL_SMOKE_DEVICE:-/dev/nbd0}}"
+ARTIFACT_DIR="${NBD_DEVICE_SMOKE_ARTIFACT_DIR:-${KERNEL_SMOKE_ARTIFACT_DIR:-}}"
+RUST_LOG_FILTER="${NBD_DEVICE_SMOKE_RUST_LOG:-${KERNEL_SMOKE_RUST_LOG:-info,nbd_server::storage=info}}"
+COMPACTION_SETTLE_SECONDS="${NBD_DEVICE_SMOKE_COMPACTION_SETTLE_SECONDS:-${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-0.2}}"
+S3_ENDPOINT_URL="${NBD_DEVICE_SMOKE_S3_ENDPOINT_URL:-${KERNEL_SMOKE_S3_ENDPOINT_URL:-http://rustfs:9000}}"
+S3_REGION="${NBD_DEVICE_SMOKE_S3_REGION:-${KERNEL_SMOKE_S3_REGION:-us-east-1}}"
+S3_BUCKET="${NBD_DEVICE_SMOKE_S3_BUCKET:-${KERNEL_SMOKE_S3_BUCKET:-everstore}}"
+S3_ACCESS_KEY_ID="${NBD_DEVICE_SMOKE_S3_ACCESS_KEY_ID:-${KERNEL_SMOKE_S3_ACCESS_KEY_ID:-rustfsadmin}}"
+S3_SECRET_ACCESS_KEY="${NBD_DEVICE_SMOKE_S3_SECRET_ACCESS_KEY:-${KERNEL_SMOKE_S3_SECRET_ACCESS_KEY:-rustfsadmin}}"
+S3_KEY_PREFIX="${NBD_DEVICE_SMOKE_S3_KEY_PREFIX:-${KERNEL_SMOKE_S3_KEY_PREFIX:-v0.1/blobs/}}"
+PROGRESS_FILE="${NBD_DEVICE_SMOKE_PROGRESS_FILE:-${KERNEL_SMOKE_PROGRESS_FILE:-}}"
+CARGO_FEATURES="${NBD_DEVICE_SMOKE_CARGO_FEATURES:-${KERNEL_SMOKE_CARGO_FEATURES:-}}"
 LISTEN="127.0.0.1:${PORT}"
 ROOT="$(mktemp -d /tmp/nbd-smoke.XXXXXX)"
 SMOKE_HOME="${ROOT}/home"
@@ -38,7 +39,7 @@ COMPACTION_WAL_SEQ=""
 COMPACTION_ROOT=""
 ARTIFACTS_CLEARED=0
 
-kernel_progress() {
+nbd_device_progress() {
     if [ -z "${PROGRESS_FILE}" ]; then
         return 0
     fi
@@ -98,7 +99,7 @@ wait_for_server() {
 }
 
 start_server() {
-    kernel_progress "start nbd-server on ${LISTEN}"
+    nbd_device_progress "start nbd-server on ${LISTEN}"
     RUST_LOG="${RUST_LOG_FILTER}" HOME="${SMOKE_HOME}" \
         "${NBD_SERVER}" serve --listen "${LISTEN}" \
         >>"${SERVER_STDOUT}" 2>>"${SERVER_STDERR}" &
@@ -108,7 +109,7 @@ start_server() {
 
 stop_server() {
     if [ -n "${SERVER_PID}" ]; then
-        kernel_progress "stop nbd-server"
+        nbd_device_progress "stop nbd-server"
         kill -INT "${SERVER_PID}" >/dev/null 2>&1
         if ! wait_for_process_exit "${SERVER_PID}"; then
             echo "timed out waiting for graceful server stop; sending SIGTERM" >&2
@@ -140,7 +141,7 @@ wait_for_process_exit() {
 connect_device() {
     local export_name="${1:-${EXPORT_NAME}}"
 
-    kernel_progress "connect ${DEVICE} to ${export_name}"
+    nbd_device_progress "connect ${DEVICE} to ${export_name}"
     "${NBD_CLIENT}" 127.0.0.1 "${PORT}" "${DEVICE}" \
         -name "${export_name}" \
         -block-size 4096
@@ -148,25 +149,25 @@ connect_device() {
 }
 
 disconnect_device() {
-    kernel_progress "disconnect ${DEVICE}"
+    nbd_device_progress "disconnect ${DEVICE}"
     "${NBD_CLIENT}" -d "${DEVICE}"
     DEVICE_CONNECTED=0
 }
 
 mount_device() {
-    kernel_progress "mount ${DEVICE}"
+    nbd_device_progress "mount ${DEVICE}"
     mount -t ext4 "${DEVICE}" "${MOUNT_DIR}"
     MOUNT_CREATED=1
 }
 
 unmount_device() {
-    kernel_progress "unmount ${DEVICE}"
+    nbd_device_progress "unmount ${DEVICE}"
     umount "${MOUNT_DIR}"
     MOUNT_CREATED=0
 }
 
 format_device() {
-    kernel_progress "format ${DEVICE}"
+    nbd_device_progress "format ${DEVICE}"
     mkfs.ext4 -F -E nodiscard "${DEVICE}"
 }
 
@@ -200,7 +201,7 @@ wait_for_wal_compaction() {
     local export_name="${3:-${EXPORT_NAME}}"
     local path wal_seq root
 
-    kernel_progress "wait for ${export_name} ${label} compaction"
+    nbd_device_progress "wait for ${export_name} ${label} compaction"
     for _ in $(seq 1 500); do
         path="$(write_inspect_artifact "${label}" "${export_name}")"
         wal_seq="$(inspect_field "${path}" "base_wal_seq")"
@@ -224,7 +225,7 @@ wait_for_wal_reattach_base() {
     local expected_base="$1"
     local export_name="${2:-${EXPORT_NAME}}"
 
-    kernel_progress "wait for ${export_name} WAL reattach base ${expected_base}"
+    nbd_device_progress "wait for ${export_name} WAL reattach base ${expected_base}"
     for _ in $(seq 1 100); do
         if node - "${LOG_FILE}" "${export_name}" "${expected_base}" <<'NODE'
 const fs = require("fs");
@@ -293,7 +294,7 @@ write_and_verify_probe() {
     local prefix="$2"
     local target_name="$3"
 
-    kernel_progress "write ${target_name}"
+    nbd_device_progress "write ${target_name}"
     write_probe_lines "${expected_path}" "${prefix}"
     cp "${expected_path}" "${MOUNT_DIR}/${target_name}"
     sync
@@ -304,7 +305,7 @@ verify_probe() {
     local expected_path="$1"
     local target_name="$2"
 
-    kernel_progress "verify ${target_name}"
+    nbd_device_progress "verify ${target_name}"
     drop_page_cache
     cmp "${expected_path}" "${MOUNT_DIR}/${target_name}"
 }
@@ -312,7 +313,7 @@ verify_probe() {
 verify_absent() {
     local target_name="$1"
 
-    kernel_progress "verify absent ${target_name}"
+    nbd_device_progress "verify absent ${target_name}"
     if [ -e "${MOUNT_DIR}/${target_name}" ]; then
         echo "${target_name} unexpectedly exists on mounted export" >&2
         return 1
@@ -320,7 +321,7 @@ verify_absent() {
 }
 
 settle_compaction() {
-    kernel_progress "settle compaction"
+    nbd_device_progress "settle compaction"
     sleep "${COMPACTION_SETTLE_SECONDS}"
 }
 
@@ -372,13 +373,13 @@ export_artifacts() {
         -exec cp -f {} "${ARTIFACT_DIR}/" \;
 }
 
-prepare_kernel_smoke() {
-    kernel_progress "prepare kernel smoke workspace"
+prepare_nbd_device_smoke() {
+    nbd_device_progress "prepare NBD device smoke workspace"
     mkdir -p "${MOUNT_DIR}"
     mkdir -p "$(dirname "${LOG_FILE}")"
     rm -f "${LOG_FILE}"
 
-    kernel_progress "check kernel NBD prerequisites"
+    nbd_device_progress "check kernel NBD prerequisites"
     require_kernel_nbd
     require_executable "${NBD_CLIENT}"
     if mountpoint -q "${MOUNT_DIR}"; then
@@ -391,7 +392,7 @@ prepare_kernel_smoke() {
     fi
 
     mkdir -p "$(dirname "${CATALOG}")"
-    kernel_progress "run catalog migrations"
+    nbd_device_progress "run catalog migrations"
     DATABASE_URL="file:${CATALOG}" make -C prisma db-migrate
     build_smoke_binaries
     require_executable "${NBDCLI}"
@@ -400,9 +401,9 @@ prepare_kernel_smoke() {
 }
 
 build_smoke_binaries() {
-    kernel_progress "build smoke binaries"
-    if [ -n "${KERNEL_SMOKE_CARGO_FEATURES:-}" ]; then
-        cargo build -p nbd-server --features "${KERNEL_SMOKE_CARGO_FEATURES}"
+    nbd_device_progress "build smoke binaries"
+    if [ -n "${CARGO_FEATURES}" ]; then
+        cargo build -p nbd-server --features "${CARGO_FEATURES}"
         cargo build -p nbdcli
         return 0
     fi
@@ -411,7 +412,7 @@ build_smoke_binaries() {
 }
 
 initialize_smoke_config() {
-    kernel_progress "initialize server config"
+    nbd_device_progress "initialize server config"
     HOME="${SMOKE_HOME}" "${NBD_SERVER}" config init
     test -f "${CONFIG}"
 }
@@ -420,7 +421,7 @@ create_export() {
     local engine="$1"
     local export_name="${2:-${EXPORT_NAME}}"
 
-    kernel_progress "create ${engine} export ${export_name}"
+    nbd_device_progress "create ${engine} export ${export_name}"
     HOME="${SMOKE_HOME}" "${NBDCLI}" create "${export_name}" \
         --size "${SIZE_BYTES}" \
         --block-size 4096 \
@@ -432,7 +433,7 @@ configure_s3_blob_store() {
     require_s3_smoke_config
     local config_without_blob_store="${ROOT}/config-without-blob-store.toml"
 
-    kernel_progress "configure S3 blob store"
+    nbd_device_progress "configure S3 blob store"
     awk '
         /^\[blob_store\]$/ { skip = 1; next }
         /^\[/ { skip = 0 }
@@ -475,7 +476,7 @@ clone_export() {
     local source_name="${1:-${EXPORT_NAME}}"
     local destination_name="${2:-${CLONE_EXPORT_NAME}}"
 
-    kernel_progress "clone ${source_name} to ${destination_name}"
+    nbd_device_progress "clone ${source_name} to ${destination_name}"
     HOME="${SMOKE_HOME}" "${NBDCLI}" clone \
         "${source_name}" \
         "${destination_name}"
@@ -488,7 +489,7 @@ assert_export_field() {
     local label="$4"
     local path actual
 
-    kernel_progress "assert ${export_name} ${field}"
+    nbd_device_progress "assert ${export_name} ${field}"
     path="$(write_inspect_artifact "${label}" "${export_name}")"
     actual="$(inspect_field "${path}" "${field}")"
     if [ "${actual}" != "${expected}" ]; then
