@@ -21,8 +21,8 @@ use crate::range::ByteRange;
 use crate::storage::BlobStoreHandle;
 use crate::wal::{ExportWalHandle, WalRequest};
 use nbd_control_plane::{
-    ActiveExportDescriptor, CowTreeMetadataStore, CowTreeSnapshot, ExportId, ExportLayoutKind,
-    ExportName, ExportRecord, NodeId, WalSeq,
+    ActiveExportDescriptor, ExportHead, ExportId, ExportLayoutKind, ExportName, ExportRecord,
+    NodeId, TreeRecordStore, WalSeq,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -47,7 +47,6 @@ pub struct WalDurableEngine {
 struct CompactionCoordinator {
     export_id: ExportId,
     export_name: ExportName,
-    catalog: Arc<dyn CowTreeMetadataStore>,
     wal: ExportWalHandle,
     compactor: CowCompactor,
     read_view: Arc<ExportReadView>,
@@ -130,13 +129,15 @@ impl WalDurableEngine {
         descriptor: &ActiveExportDescriptor,
         wal: ExportWalHandle,
         blob_store: BlobStoreHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
+        tree_store: Arc<dyn TreeRecordStore>,
+        head: ExportHead,
     ) -> Result<Self> {
         Self::open_with_cow_tree_and_wal_debt_threshold(
             descriptor,
             wal,
             blob_store,
-            catalog,
+            tree_store,
+            head,
             DEFAULT_WAL_DEBT_COMPACTION_THRESHOLD_BYTES,
         )
         .await
@@ -147,14 +148,16 @@ impl WalDurableEngine {
         descriptor: &ActiveExportDescriptor,
         wal: ExportWalHandle,
         blob_store: BlobStoreHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
+        tree_store: Arc<dyn TreeRecordStore>,
+        head: ExportHead,
         wal_debt_threshold_bytes: u64,
     ) -> Result<Self> {
         Self::open_with_cow_tree_and_compaction_policy(
             descriptor,
             wal,
             blob_store,
-            catalog,
+            tree_store,
+            head,
             CompactionPolicy::with_hard_threshold(wal_debt_threshold_bytes),
             DEFAULT_BACKGROUND_COMPACTION_INTERVAL,
         )
@@ -165,7 +168,8 @@ impl WalDurableEngine {
         descriptor: &ActiveExportDescriptor,
         wal: ExportWalHandle,
         blob_store: BlobStoreHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
+        tree_store: Arc<dyn TreeRecordStore>,
+        head: ExportHead,
         compaction_policy: CompactionPolicy,
         background_interval: Duration,
     ) -> Result<Self> {
@@ -176,18 +180,15 @@ impl WalDurableEngine {
             });
         }
 
-        let snapshot = catalog
-            .load_cow_tree(descriptor.id())
-            .await
-            .map_err(ServerError::catalog)?;
-        validate_snapshot_can_open(descriptor, &snapshot)?;
-        let size_bytes = snapshot.size_bytes();
-        let root = RootSnapshot::from_cow_snapshot(snapshot);
+        validate_head_can_open(descriptor, &head)?;
+        let root = RootSnapshot::from_head(&head)?;
+        let size_bytes = root.size_bytes();
         log_root_loaded(descriptor.id(), descriptor.name(), &root);
         let read_view = Arc::new(ExportReadView::new(
             root.clone(),
             Arc::new(CowTreeReader {
                 blob_store: blob_store.clone(),
+                store: tree_store.clone(),
             }),
         ));
         let replay = replay_wal_after(&wal, read_view.as_ref(), &root).await?;
@@ -196,7 +197,7 @@ impl WalDurableEngine {
             descriptor.id().clone(),
             descriptor.name().clone(),
             wal.clone(),
-            catalog,
+            tree_store,
             blob_store,
             read_view.clone(),
         ));
@@ -399,15 +400,14 @@ impl CompactionCoordinator {
         export_id: ExportId,
         export_name: ExportName,
         wal: ExportWalHandle,
-        catalog: Arc<dyn CowTreeMetadataStore>,
+        tree_store: Arc<dyn TreeRecordStore>,
         blob_store: BlobStoreHandle,
         read_view: Arc<ExportReadView>,
     ) -> Self {
-        let compactor = CowCompactor::new(catalog.clone(), blob_store);
+        let compactor = CowCompactor::new_lazy(tree_store, blob_store);
         Self {
             export_id,
             export_name,
-            catalog,
             wal,
             compactor,
             read_view,
@@ -571,19 +571,23 @@ impl CompactionCoordinator {
         compaction_snapshot: &read_view::ReadViewCompactionSnapshot,
     ) -> Result<()> {
         match result.outcome() {
-            CompactionOutcome::Published | CompactionOutcome::AlreadyCovered => {
-                let snapshot = self
-                    .catalog
-                    .load_cow_tree(&self.export_id)
-                    .await
-                    .map_err(ServerError::catalog)?;
-                let root = RootSnapshot::from_cow_snapshot(snapshot);
+            CompactionOutcome::Published => {
+                let root =
+                    result
+                        .published_root()
+                        .cloned()
+                        .ok_or_else(|| ServerError::Catalog {
+                            message: "published WAL compaction did not return a root snapshot"
+                                .to_owned(),
+                            source: None,
+                        })?;
                 let prune_through = root.base_wal_seq();
                 self.read_view
                     .advance_after_compaction(root, compaction_snapshot)
                     .await?;
                 self.prune_published_wal(prune_through).await;
             }
+            CompactionOutcome::AlreadyCovered => {}
             CompactionOutcome::StalePlan | CompactionOutcome::NoRecords => {}
         }
         Ok(())
@@ -720,16 +724,13 @@ impl fmt::Debug for WalDurableEngine {
     }
 }
 
-fn validate_snapshot_can_open(
-    descriptor: &ActiveExportDescriptor,
-    snapshot: &CowTreeSnapshot,
-) -> Result<()> {
-    if snapshot.export_id() != descriptor.id() {
+fn validate_head_can_open(descriptor: &ActiveExportDescriptor, head: &ExportHead) -> Result<()> {
+    if head.layout_kind() != ExportLayoutKind::CowImmutableTree {
         return Err(ServerError::Catalog {
             message: format!(
-                "COW snapshot export id `{}` does not match export `{}`",
-                snapshot.export_id(),
-                descriptor.id()
+                "WAL durable export `{}` requires cow_immutable_tree head, got {}",
+                descriptor.name(),
+                head.layout_kind()
             ),
             source: None,
         });
@@ -743,8 +744,9 @@ mod tests {
     use crate::storage::LocalBlobStore;
     use crate::wal::{LocalWalProvider, OpenWal, WalDomain, WalProvider};
     use nbd_control_plane::{
-        CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, PublishCompaction,
-        PublishCompactionOutcome, SQLiteExportCatalog, TREE_CHUNK_BYTES,
+        CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, PublishTreeUpdate,
+        PublishTreeUpdateOutcome, SQLiteExportCatalog, TREE_CHUNK_BYTES, TreeEdgeLookup,
+        TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord,
     };
     use nbd_test_support::TestRuntime;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -884,25 +886,25 @@ mod tests {
         async fn new_with_policy(name: &str, policy: CompactionPolicy, interval: Duration) -> Self {
             let runtime = TestRuntime::new().expect("test runtime");
             let catalog = migrated_catalog(&runtime).await;
-            let cow_tree_store = Arc::new(catalog.clone()) as Arc<dyn CowTreeMetadataStore>;
-            Self::new_with_store(runtime, catalog, name, policy, interval, cow_tree_store).await
+            let tree_store = Arc::new(catalog.clone()) as Arc<dyn TreeRecordStore>;
+            Self::new_with_store(runtime, catalog, name, policy, interval, tree_store).await
         }
 
         async fn new_with_blocking_store(
             name: &str,
             policy: CompactionPolicy,
             interval: Duration,
-        ) -> (Self, Arc<BlockingCowTreeStore>) {
+        ) -> (Self, Arc<BlockingTreeRecordStore>) {
             let runtime = TestRuntime::new().expect("test runtime");
             let catalog = migrated_catalog(&runtime).await;
-            let blocking_store = Arc::new(BlockingCowTreeStore::new(catalog.clone()));
+            let blocking_store = Arc::new(BlockingTreeRecordStore::new(catalog.clone()));
             let fixture = Self::new_with_store(
                 runtime,
                 catalog,
                 name,
                 policy,
                 interval,
-                blocking_store.clone() as Arc<dyn CowTreeMetadataStore>,
+                blocking_store.clone() as Arc<dyn TreeRecordStore>,
             )
             .await;
             (fixture, blocking_store)
@@ -914,7 +916,7 @@ mod tests {
             name: &str,
             policy: CompactionPolicy,
             interval: Duration,
-            cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+            tree_store: Arc<dyn TreeRecordStore>,
         ) -> Self {
             let created = catalog
                 .create_export(
@@ -937,12 +939,17 @@ mod tests {
                 .open_export(OpenWal::new(WalDomain::for_export_id(created.id().clone())))
                 .await
                 .expect("open wal");
+            let head = catalog
+                .load_export_head(created.id())
+                .await
+                .expect("load export head");
             let engine = Arc::new(
                 WalDurableEngine::open_with_cow_tree_and_compaction_policy(
                     &descriptor,
                     wal,
                     Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs"))),
-                    cow_tree_store,
+                    tree_store,
+                    head,
                     policy,
                     interval,
                 )
@@ -959,14 +966,14 @@ mod tests {
         }
     }
 
-    struct BlockingCowTreeStore {
+    struct BlockingTreeRecordStore {
         inner: SQLiteExportCatalog,
         publish_count: AtomicUsize,
         publish_started: Notify,
         release_publish: Notify,
     }
 
-    impl BlockingCowTreeStore {
+    impl BlockingTreeRecordStore {
         fn new(inner: SQLiteExportCatalog) -> Self {
             Self {
                 inner,
@@ -995,24 +1002,45 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl CowTreeMetadataStore for BlockingCowTreeStore {
-        async fn load_cow_tree(
+    impl TreeRecordStore for BlockingTreeRecordStore {
+        async fn load_node(
             &self,
-            export_id: &ExportId,
-        ) -> nbd_control_plane::Result<CowTreeSnapshot> {
-            self.inner.load_cow_tree(export_id).await
+            node_id: &NodeId,
+        ) -> nbd_control_plane::Result<Option<TreeNodeRecord>> {
+            self.inner.load_node(node_id).await
         }
 
-        async fn publish_compaction(
+        async fn load_nodes(
             &self,
-            request: PublishCompaction,
-        ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
+            node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeNodeRecord>> {
+            self.inner.load_nodes(node_ids).await
+        }
+
+        async fn load_child_edges(
+            &self,
+            lookups: &[TreeEdgeLookup],
+        ) -> nbd_control_plane::Result<Vec<TreeEdgeRecord>> {
+            self.inner.load_child_edges(lookups).await
+        }
+
+        async fn load_leaf_refs(
+            &self,
+            node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeLeafRefRecord>> {
+            self.inner.load_leaf_refs(node_ids).await
+        }
+
+        async fn publish_tree_update(
+            &self,
+            request: PublishTreeUpdate,
+        ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
             let count = self.publish_count.fetch_add(1, Ordering::SeqCst) + 1;
             self.publish_started.notify_waiters();
             if count == 1 {
                 self.release_publish.notified().await;
             }
-            self.inner.publish_compaction(request).await
+            self.inner.publish_tree_update(request).await
         }
     }
 
@@ -1030,9 +1058,9 @@ mod tests {
 
         async fn catalog_base_wal_seq(&self) -> WalSeq {
             self.catalog
-                .load_cow_tree(&self.export_id)
+                .load_export_head(&self.export_id)
                 .await
-                .expect("load cow tree")
+                .expect("load export head")
                 .base_wal_seq()
         }
     }

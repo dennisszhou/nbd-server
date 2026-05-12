@@ -9,9 +9,10 @@ use nbd_server::{
 use nbd_test_support::TestRuntime;
 use std::sync::Arc;
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 
 #[tokio::test]
 async fn compaction_publishes_checkpoint_from_wal_records() {
@@ -190,7 +191,7 @@ impl CompactionFixture {
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
         .await
         .expect("connect catalog");
 

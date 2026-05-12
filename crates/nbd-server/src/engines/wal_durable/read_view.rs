@@ -2,14 +2,17 @@ use super::{
     overlay::{OverlayExtentMap, OverlayReadSlice},
     read_cache::{CacheInsertPlacement, ReadCache},
 };
-use crate::engines::tree::{Block, BlockPart, TreeReader};
+use crate::engines::tree::{
+    Block, BlockPart, LazyTreeMetadataReader, LoadedTreeLeaf, TreeGeometry, TreeReader,
+};
 use crate::error::{Result, ServerError};
 use crate::range::ByteRange;
 use crate::storage::BlobStoreHandle;
 use crate::wal::WalRecord;
 use bytes::Bytes;
 use nbd_control_plane::{
-    CowTreeSnapshot, ExportHead, ExportLayoutKind, ExportRecord, NodeId, TREE_CHUNK_BYTES, WalSeq,
+    CowTreeSnapshot, ExportHead, ExportLayoutKind, ExportRecord, NodeId, TREE_CHUNK_BYTES,
+    TreeFormat, TreeRecordStore, TreeStorageKind, WalSeq,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -30,7 +33,14 @@ enum RootBacking {
         base_wal_seq: WalSeq,
         size_bytes: u64,
     },
+    #[cfg(test)]
     CowTree(Arc<CowTreeSnapshot>),
+    CowHead {
+        root_node_id: Option<NodeId>,
+        base_wal_seq: WalSeq,
+        size_bytes: u64,
+        tree_format: TreeFormat,
+    },
 }
 
 /// Materialized read view for one open WAL durable export.
@@ -59,9 +69,15 @@ pub(super) struct ReadViewCompactionSnapshot {
 #[derive(Debug)]
 pub(super) struct ZeroTreeReader;
 
-#[derive(Debug)]
 pub(super) struct CowTreeReader {
     pub(super) blob_store: BlobStoreHandle,
+    pub(super) store: Arc<dyn TreeRecordStore>,
+}
+
+impl fmt::Debug for CowTreeReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CowTreeReader").finish_non_exhaustive()
+    }
 }
 
 impl RootSnapshot {
@@ -75,30 +91,61 @@ impl RootSnapshot {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn from_cow_snapshot(snapshot: CowTreeSnapshot) -> Self {
         Self {
             backing: RootBacking::CowTree(Arc::new(snapshot)),
         }
     }
 
+    pub(super) fn from_head(head: &ExportHead) -> Result<Self> {
+        if head.layout_kind() != ExportLayoutKind::CowImmutableTree {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "WAL root requires cow_immutable_tree head, got {}",
+                    head.layout_kind()
+                ),
+                source: None,
+            });
+        }
+        let tree_format = head.tree_format().ok_or_else(|| ServerError::Catalog {
+            message: "WAL root head is missing tree format".to_owned(),
+            source: None,
+        })?;
+        Ok(Self {
+            backing: RootBacking::CowHead {
+                root_node_id: head.root_node_id().cloned(),
+                base_wal_seq: head.base_wal_seq(),
+                size_bytes: head.size_bytes(),
+                tree_format,
+            },
+        })
+    }
+
     pub fn root_node_id(&self) -> Option<&NodeId> {
         match &self.backing {
             RootBacking::Zero { root_node_id, .. } => root_node_id.as_ref(),
+            #[cfg(test)]
             RootBacking::CowTree(snapshot) => snapshot.root_node_id(),
+            RootBacking::CowHead { root_node_id, .. } => root_node_id.as_ref(),
         }
     }
 
     pub fn base_wal_seq(&self) -> WalSeq {
         match &self.backing {
             RootBacking::Zero { base_wal_seq, .. } => *base_wal_seq,
+            #[cfg(test)]
             RootBacking::CowTree(snapshot) => snapshot.base_wal_seq(),
+            RootBacking::CowHead { base_wal_seq, .. } => *base_wal_seq,
         }
     }
 
     pub fn size_bytes(&self) -> u64 {
         match &self.backing {
             RootBacking::Zero { size_bytes, .. } => *size_bytes,
+            #[cfg(test)]
             RootBacking::CowTree(snapshot) => snapshot.size_bytes(),
+            RootBacking::CowHead { size_bytes, .. } => *size_bytes,
         }
     }
 
@@ -109,16 +156,28 @@ impl RootSnapshot {
     pub(super) fn cow_tree(&self) -> Option<&CowTreeSnapshot> {
         match &self.backing {
             RootBacking::Zero { .. } => None,
+            #[cfg(test)]
             RootBacking::CowTree(snapshot) => Some(snapshot.as_ref()),
+            RootBacking::CowHead { .. } => None,
+        }
+    }
+
+    pub(super) fn tree_format(&self) -> Option<TreeFormat> {
+        match &self.backing {
+            RootBacking::Zero { .. } => None,
+            #[cfg(test)]
+            RootBacking::CowTree(_) => Some(TreeFormat::default()),
+            RootBacking::CowHead { tree_format, .. } => Some(*tree_format),
         }
     }
 
     pub(super) fn to_export_head(&self) -> Result<ExportHead> {
-        ExportHead::new(
+        ExportHead::new_with_tree_format(
             ExportLayoutKind::CowImmutableTree,
             self.root_node_id().cloned(),
             self.size_bytes(),
             self.base_wal_seq(),
+            self.tree_format(),
         )
         .map_err(ServerError::catalog)
     }
@@ -456,10 +515,12 @@ impl TreeReader<RootSnapshot> for ZeroTreeReader {
 impl TreeReader<RootSnapshot> for CowTreeReader {
     async fn read_committed(&self, root: &RootSnapshot, range: ByteRange) -> Result<Block> {
         validate_range("read", range, root.size_bytes())?;
-        let snapshot = root.cow_tree().ok_or_else(|| ServerError::Catalog {
-            message: "COW backing reader requires a COW root snapshot".to_owned(),
-            source: None,
-        })?;
+        if root.is_zero_backed() {
+            return Err(ServerError::Catalog {
+                message: "COW backing reader requires a COW root".to_owned(),
+                source: None,
+            });
+        }
 
         let mut parts = Vec::new();
         let mut copied = 0usize;
@@ -471,10 +532,35 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
             let copy_len = chunk_available.min(range.len() - copied as u64) as u32;
             let part_range = ByteRange::new(current_offset, copy_len);
 
-            if let Some(chunk) = snapshot.chunk(chunk_index) {
+            if let Some(chunk) = root
+                .cow_tree()
+                .and_then(|snapshot| snapshot.chunk(chunk_index))
+            {
                 let chunk_data = self
                     .blob_store
                     .get_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
+                    .await?;
+                parts.push(BlockPart::Data {
+                    range: part_range,
+                    bytes: Bytes::from(chunk_data),
+                });
+            } else if let Some(leaf) = self.load_leaf(root, chunk_index).await? {
+                if leaf.leaf_ref().storage_kind != TreeStorageKind::ImmutableBlob {
+                    return Err(ServerError::Catalog {
+                        message: format!(
+                            "COW tree chunk {chunk_index} has storage kind {}",
+                            leaf.leaf_ref().storage_kind
+                        ),
+                        source: None,
+                    });
+                }
+                let chunk_data = self
+                    .blob_store
+                    .get_blob(
+                        &leaf.leaf_ref().storage_key,
+                        chunk_offset,
+                        u64::from(copy_len),
+                    )
                     .await?;
                 parts.push(BlockPart::Data {
                     range: part_range,
@@ -488,6 +574,26 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
         }
 
         Block::new(range, parts)
+    }
+}
+
+impl CowTreeReader {
+    async fn load_leaf(
+        &self,
+        root: &RootSnapshot,
+        chunk_index: nbd_control_plane::ChunkIndex,
+    ) -> Result<Option<LoadedTreeLeaf>> {
+        let Some(tree_format) = root.tree_format() else {
+            return Ok(None);
+        };
+        let geometry = TreeGeometry::new(tree_format, root.size_bytes())?;
+        let reader = LazyTreeMetadataReader::new(
+            self.store.clone(),
+            geometry,
+            ExportLayoutKind::CowImmutableTree,
+            root.root_node_id().cloned(),
+        );
+        reader.load_leaf(chunk_index).await
     }
 }
 
@@ -666,7 +772,10 @@ pub(super) fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> 
 mod tests {
     use super::*;
     use crate::storage::{LocalBlobStore, put_random_blob};
-    use nbd_control_plane::{ChunkIndex, CowChunkRef, ExportId};
+    use nbd_control_plane::{
+        ChunkIndex, CowChunkRef, ExportId, PublishTreeUpdate, PublishTreeUpdateOutcome,
+        TreeEdgeLookup, TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore,
+    };
     use nbd_test_support::TestRuntime;
     use std::collections::BTreeMap;
     use std::sync::{
@@ -1080,7 +1189,10 @@ mod tests {
         )
         .expect("cow snapshot");
         let root = RootSnapshot::from_cow_snapshot(snapshot);
-        let reader = CowTreeReader { blob_store };
+        let reader = CowTreeReader {
+            blob_store,
+            store: unused_tree_store(),
+        };
 
         let block = reader
             .read_committed(&root, ByteRange::new(8, 4))
@@ -1111,7 +1223,10 @@ mod tests {
         )
         .expect("cow snapshot");
         let root = RootSnapshot::from_cow_snapshot(snapshot);
-        let reader = CowTreeReader { blob_store };
+        let reader = CowTreeReader {
+            blob_store,
+            store: unused_tree_store(),
+        };
         let range = ByteRange::new(0, (TREE_CHUNK_BYTES + 16 * 1024 * 1024) as u32);
 
         let block = reader
@@ -1146,6 +1261,7 @@ mod tests {
         };
         let cow_reader = CowTreeReader {
             blob_store: blob_store.clone(),
+            store: unused_tree_store(),
         };
 
         assert!(matches!(
@@ -1206,6 +1322,50 @@ mod tests {
         let start = slice.record_offset as usize;
         let len = (slice.end - slice.start) as usize;
         &slice.record.data()[start..start + len]
+    }
+
+    fn unused_tree_store() -> Arc<dyn TreeRecordStore> {
+        Arc::new(UnusedTreeRecordStore)
+    }
+
+    struct UnusedTreeRecordStore;
+
+    #[async_trait::async_trait]
+    impl TreeRecordStore for UnusedTreeRecordStore {
+        async fn load_node(
+            &self,
+            _node_id: &NodeId,
+        ) -> nbd_control_plane::Result<Option<TreeNodeRecord>> {
+            panic!("unused tree record store should not load nodes")
+        }
+
+        async fn load_nodes(
+            &self,
+            _node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeNodeRecord>> {
+            panic!("unused tree record store should not load nodes")
+        }
+
+        async fn load_child_edges(
+            &self,
+            _lookups: &[TreeEdgeLookup],
+        ) -> nbd_control_plane::Result<Vec<TreeEdgeRecord>> {
+            panic!("unused tree record store should not load child edges")
+        }
+
+        async fn load_leaf_refs(
+            &self,
+            _node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeLeafRefRecord>> {
+            panic!("unused tree record store should not load leaf refs")
+        }
+
+        async fn publish_tree_update(
+            &self,
+            _request: PublishTreeUpdate,
+        ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
+            panic!("unused tree record store should not publish tree updates")
+        }
     }
 
     #[derive(Debug)]

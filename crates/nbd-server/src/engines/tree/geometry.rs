@@ -68,6 +68,10 @@ impl TreeGeometry {
         self.chunk_bytes
     }
 
+    pub(crate) fn fanout(self) -> u16 {
+        self.fanout
+    }
+
     pub(crate) fn root_span(self) -> TreeNodeSpan {
         TreeNodeSpan {
             level: self.root_level,

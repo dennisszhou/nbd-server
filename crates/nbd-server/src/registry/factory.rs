@@ -20,7 +20,6 @@ pub struct ExportFactory {
     blob_store: ConfiguredBlobStore,
     catalog: Arc<dyn ExportCatalog>,
     tree_record_store: Arc<dyn TreeRecordStore>,
-    cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
 }
 
@@ -35,7 +34,7 @@ impl ExportFactory {
         blob_store: ConfiguredBlobStore,
         catalog: Arc<dyn ExportCatalog>,
         tree_record_store: Arc<dyn TreeRecordStore>,
-        cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+        _cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
     ) -> Self {
         Self {
@@ -43,7 +42,6 @@ impl ExportFactory {
             blob_store,
             catalog,
             tree_record_store,
-            cow_tree_store,
             wal_provider,
         }
     }
@@ -147,11 +145,17 @@ impl ExportFactory {
             ExportEngineKind::WalDurable => {
                 let wal = self.open_wal(descriptor.id()).await?;
                 let blob_store: BlobStoreHandle = self.blob_store.blob_store();
+                let head = self
+                    .catalog
+                    .load_export_head(descriptor.id())
+                    .await
+                    .map_err(ServerError::catalog)?;
                 let engine = WalDurableEngine::open_with_cow_tree(
                     descriptor,
                     wal,
                     blob_store,
-                    self.cow_tree_store.clone(),
+                    self.tree_record_store.clone(),
+                    head,
                 )
                 .await?;
                 let head = engine.export_head().await?;

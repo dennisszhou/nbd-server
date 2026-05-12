@@ -1,16 +1,19 @@
 use super::overlay::OverlayReadSlice;
 use super::read_view::{ReadViewCompactionSnapshot, RootSnapshot};
+use crate::engines::tree::{LazyTreeMetadataReader, TreeGeometry, TreeNodeSpan, TreeRecordFactory};
 use crate::error::{Result, ServerError};
 use crate::storage::{BlobStore, BlobStoreHandle, put_random_blob};
 use crate::wal::ExportWalHandle;
 use nbd_control_plane::{
     ChunkIndex, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, ExportHead, ExportId,
-    ExportLayoutKind, PublishCompaction, PublishCompactionOutcome, TREE_CHUNK_BYTES, WalSeq,
+    ExportLayoutKind, NodeId, PublishCompaction, PublishCompactionOutcome, PublishTreeUpdate,
+    PublishTreeUpdateOutcome, TREE_CHUNK_BYTES, TreeEdgeLookup, TreeEdgeRecord, TreeNodeKind,
+    TreeNodeRecord, TreeRecordBatch, TreeRecordStore, TreeStorageKind, WalSeq,
 };
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
@@ -20,6 +23,7 @@ pub struct CompactionResult {
     compacted_records: u64,
     written_leaf_blobs: u64,
     outcome: CompactionOutcome,
+    published_root: Option<RootSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +36,8 @@ pub enum CompactionOutcome {
 
 #[derive(Clone)]
 pub struct CowCompactor {
-    catalog: Arc<dyn CowTreeMetadataStore>,
+    catalog: Option<Arc<dyn CowTreeMetadataStore>>,
+    tree_store: Option<Arc<dyn TreeRecordStore>>,
     blob_store: BlobStoreHandle,
 }
 
@@ -60,12 +65,28 @@ impl CompactionResult {
     pub fn outcome(&self) -> CompactionOutcome {
         self.outcome
     }
+
+    pub(crate) fn published_root(&self) -> Option<&RootSnapshot> {
+        self.published_root.as_ref()
+    }
 }
 
 impl CowCompactor {
     pub fn new(catalog: Arc<dyn CowTreeMetadataStore>, blob_store: BlobStoreHandle) -> Self {
         Self {
-            catalog,
+            catalog: Some(catalog),
+            tree_store: None,
+            blob_store,
+        }
+    }
+
+    pub(crate) fn new_lazy(
+        tree_store: Arc<dyn TreeRecordStore>,
+        blob_store: BlobStoreHandle,
+    ) -> Self {
+        Self {
+            catalog: None,
+            tree_store: Some(tree_store),
             blob_store,
         }
     }
@@ -76,8 +97,11 @@ impl CowCompactor {
         wal: &ExportWalHandle,
         through_wal_seq: WalSeq,
     ) -> Result<CompactionResult> {
-        let snapshot = self
-            .catalog
+        let catalog = self.catalog.as_ref().ok_or_else(|| ServerError::Catalog {
+            message: "direct export compaction requires legacy COW catalog".to_owned(),
+            source: None,
+        })?;
+        let snapshot = catalog
             .load_cow_tree(export_id)
             .await
             .map_err(ServerError::catalog)?;
@@ -93,6 +117,7 @@ impl CowCompactor {
                 compacted_records: 0,
                 written_leaf_blobs: 0,
                 outcome: CompactionOutcome::AlreadyCovered,
+                published_root: None,
             });
         }
 
@@ -118,6 +143,7 @@ impl CowCompactor {
                 compacted_records,
                 written_leaf_blobs: 0,
                 outcome: CompactionOutcome::NoRecords,
+                published_root: None,
             });
         }
 
@@ -132,8 +158,7 @@ impl CowCompactor {
         }
 
         let expected_base = snapshot_to_export_head(&snapshot)?;
-        let publication = self
-            .catalog
+        let publication = catalog
             .publish_compaction(
                 PublishCompaction::new(
                     export_id.clone(),
@@ -158,6 +183,7 @@ impl CowCompactor {
             compacted_records,
             written_leaf_blobs,
             outcome,
+            published_root: None,
         })
     }
 
@@ -176,6 +202,7 @@ impl CowCompactor {
                 compacted_records: 0,
                 written_leaf_blobs: 0,
                 outcome: CompactionOutcome::AlreadyCovered,
+                published_root: None,
             });
         }
 
@@ -188,6 +215,7 @@ impl CowCompactor {
                 compacted_records: 0,
                 written_leaf_blobs: 0,
                 outcome: CompactionOutcome::NoRecords,
+                published_root: None,
             });
         }
 
@@ -198,6 +226,7 @@ impl CowCompactor {
             visible_records.insert(slice.record.seq());
             apply_overlay_slice_to_chunks(
                 self.blob_store.as_ref(),
+                self.tree_store.clone(),
                 &snapshot.root,
                 &mut chunk_images,
                 slice,
@@ -205,12 +234,16 @@ impl CowCompactor {
             .await?;
         }
 
-        let mut chunks = snapshot
-            .root
-            .cow_tree()
-            .map(CowTreeSnapshot::chunks)
-            .cloned()
-            .unwrap_or_default();
+        let mut chunks = if self.tree_store.is_some() {
+            BTreeMap::new()
+        } else {
+            snapshot
+                .root
+                .cow_tree()
+                .map(CowTreeSnapshot::chunks)
+                .cloned()
+                .unwrap_or_default()
+        };
         let mut written_leaf_blobs = 0u64;
         for (chunk_index, data) in chunk_images {
             let key = put_random_blob(self.blob_store.as_ref(), &data).await?;
@@ -220,23 +253,38 @@ impl CowCompactor {
             written_leaf_blobs += 1;
         }
 
-        let publication = self
-            .catalog
-            .publish_compaction(
-                PublishCompaction::new(
-                    export_id.clone(),
-                    snapshot.root.to_export_head()?,
-                    target_wal_seq,
-                    chunks.into_values().collect(),
-                )
-                .map_err(ServerError::catalog)?,
+        let (outcome, published_root) = if let Some(tree_store) = &self.tree_store {
+            publish_lazy_compaction(
+                tree_store.as_ref(),
+                export_id,
+                &snapshot.root,
+                target_wal_seq,
+                chunks.into_values().collect(),
             )
-            .await
-            .map_err(ServerError::catalog)?;
-        let outcome = match publication {
-            PublishCompactionOutcome::Published(_) => CompactionOutcome::Published,
-            PublishCompactionOutcome::AlreadyCovered(_) => CompactionOutcome::AlreadyCovered,
-            PublishCompactionOutcome::StalePlan(_) => CompactionOutcome::StalePlan,
+            .await?
+        } else {
+            let catalog = self.catalog.as_ref().ok_or_else(|| ServerError::Catalog {
+                message: "legacy COW compaction requires COW catalog".to_owned(),
+                source: None,
+            })?;
+            let publication = catalog
+                .publish_compaction(
+                    PublishCompaction::new(
+                        export_id.clone(),
+                        snapshot.root.to_export_head()?,
+                        target_wal_seq,
+                        chunks.into_values().collect(),
+                    )
+                    .map_err(ServerError::catalog)?,
+                )
+                .await
+                .map_err(ServerError::catalog)?;
+            let outcome = match publication {
+                PublishCompactionOutcome::Published(_) => CompactionOutcome::Published,
+                PublishCompactionOutcome::AlreadyCovered(_) => CompactionOutcome::AlreadyCovered,
+                PublishCompactionOutcome::StalePlan(_) => CompactionOutcome::StalePlan,
+            };
+            (outcome, None)
         };
 
         Ok(CompactionResult {
@@ -246,6 +294,7 @@ impl CowCompactor {
             compacted_records: visible_records.len() as u64,
             written_leaf_blobs,
             outcome,
+            published_root,
         })
     }
 }
@@ -319,6 +368,7 @@ fn validate_record_range(snapshot: &CowTreeSnapshot, record: &crate::WalRecord) 
 
 async fn apply_overlay_slice_to_chunks(
     blob_store: &dyn BlobStore,
+    tree_store: Option<Arc<dyn TreeRecordStore>>,
     root: &RootSnapshot,
     chunk_images: &mut BTreeMap<ChunkIndex, Vec<u8>>,
     slice: &OverlayReadSlice,
@@ -342,7 +392,14 @@ async fn apply_overlay_slice_to_chunks(
         let src_end = src_start
             .checked_add(copy_len)
             .ok_or_else(|| ServerError::wal("compact overlay slice", "record slice overflowed"))?;
-        let chunk = load_or_create_root_chunk(blob_store, root, chunk_images, chunk_index).await?;
+        let chunk = load_or_create_root_chunk(
+            blob_store,
+            tree_store.clone(),
+            root,
+            chunk_images,
+            chunk_index,
+        )
+        .await?;
         chunk[chunk_offset..chunk_offset + copy_len]
             .copy_from_slice(&slice.record.data()[src_start..src_end]);
         copied += copy_len;
@@ -352,6 +409,7 @@ async fn apply_overlay_slice_to_chunks(
 
 async fn load_or_create_root_chunk<'a>(
     blob_store: &dyn BlobStore,
+    tree_store: Option<Arc<dyn TreeRecordStore>>,
     root: &RootSnapshot,
     chunk_images: &'a mut BTreeMap<ChunkIndex, Vec<u8>>,
     chunk_index: ChunkIndex,
@@ -359,20 +417,55 @@ async fn load_or_create_root_chunk<'a>(
     match chunk_images.entry(chunk_index) {
         Entry::Occupied(entry) => Ok(entry.into_mut()),
         Entry::Vacant(entry) => {
-            let data = match root
-                .cow_tree()
-                .and_then(|snapshot| snapshot.chunk(chunk_index))
-            {
-                Some(chunk) => {
-                    blob_store
-                        .get_blob(chunk.blob_key(), 0, TREE_CHUNK_BYTES)
-                        .await?
-                }
-                None => vec![0; TREE_CHUNK_BYTES as usize],
-            };
+            let data = load_committed_chunk(blob_store, tree_store, root, chunk_index).await?;
             Ok(entry.insert(data))
         }
     }
+}
+
+async fn load_committed_chunk(
+    blob_store: &dyn BlobStore,
+    tree_store: Option<Arc<dyn TreeRecordStore>>,
+    root: &RootSnapshot,
+    chunk_index: ChunkIndex,
+) -> Result<Vec<u8>> {
+    if let Some(chunk) = root
+        .cow_tree()
+        .and_then(|snapshot| snapshot.chunk(chunk_index))
+    {
+        return blob_store
+            .get_blob(chunk.blob_key(), 0, TREE_CHUNK_BYTES)
+            .await;
+    }
+
+    let Some(tree_store) = tree_store else {
+        return Ok(vec![0; TREE_CHUNK_BYTES as usize]);
+    };
+    let Some(tree_format) = root.tree_format() else {
+        return Ok(vec![0; TREE_CHUNK_BYTES as usize]);
+    };
+    let geometry = TreeGeometry::new(tree_format, root.size_bytes())?;
+    let reader = LazyTreeMetadataReader::new(
+        tree_store,
+        geometry,
+        ExportLayoutKind::CowImmutableTree,
+        root.root_node_id().cloned(),
+    );
+    let Some(leaf) = reader.load_leaf(chunk_index).await? else {
+        return Ok(vec![0; TREE_CHUNK_BYTES as usize]);
+    };
+    if leaf.leaf_ref().storage_kind != TreeStorageKind::ImmutableBlob {
+        return Err(ServerError::Catalog {
+            message: format!(
+                "COW tree chunk {chunk_index} has storage kind {}",
+                leaf.leaf_ref().storage_kind
+            ),
+            source: None,
+        });
+    }
+    blob_store
+        .get_blob(&leaf.leaf_ref().storage_key, 0, TREE_CHUNK_BYTES)
+        .await
 }
 
 fn validate_overlay_slice_range(
@@ -429,6 +522,318 @@ fn validate_overlay_slice_range(
         ));
     }
     Ok(())
+}
+
+async fn publish_lazy_compaction(
+    tree_store: &dyn TreeRecordStore,
+    export_id: &ExportId,
+    root: &RootSnapshot,
+    compacted_through: WalSeq,
+    chunks: Vec<CowChunkRef>,
+) -> Result<(CompactionOutcome, Option<RootSnapshot>)> {
+    if chunks.is_empty() {
+        return Ok((CompactionOutcome::NoRecords, None));
+    }
+
+    let tree_format = root.tree_format().ok_or_else(|| ServerError::Catalog {
+        message: "COW compaction root is missing tree format".to_owned(),
+        source: None,
+    })?;
+    let geometry = TreeGeometry::new(tree_format, root.size_bytes())?;
+    let mut planner = CowTreePublishPlanner::new(geometry, export_id, root.root_node_id());
+    let records = planner.plan_chunks(tree_store, &chunks).await?;
+    let next_head = ExportHead::new_with_tree_format(
+        ExportLayoutKind::CowImmutableTree,
+        Some(planner.new_root_node_id().clone()),
+        root.size_bytes(),
+        compacted_through,
+        Some(tree_format),
+    )
+    .map_err(ServerError::catalog)?;
+    let outcome = tree_store
+        .publish_tree_update(PublishTreeUpdate {
+            export_id: export_id.clone(),
+            expected_head: root.to_export_head()?,
+            next_head,
+            records,
+        })
+        .await
+        .map_err(ServerError::catalog)?;
+
+    match outcome {
+        PublishTreeUpdateOutcome::Published(record) => {
+            let published = RootSnapshot::from_head(record.head())?;
+            Ok((CompactionOutcome::Published, Some(published)))
+        }
+        PublishTreeUpdateOutcome::StaleHead(_) => Ok((CompactionOutcome::StalePlan, None)),
+    }
+}
+
+struct CowTreePublishPlanner {
+    geometry: TreeGeometry,
+    factory: TreeRecordFactory,
+    old_root_node_id: Option<NodeId>,
+    new_root_node_id: NodeId,
+    copied_parents: HashSet<String>,
+    new_internal_edges: HashMap<(String, u16), NodeId>,
+    pending_edges: HashMap<(String, u16), NodeId>,
+    records: TreeRecordBatch,
+}
+
+impl CowTreePublishPlanner {
+    fn new(
+        geometry: TreeGeometry,
+        export_id: &ExportId,
+        old_root_node_id: Option<&NodeId>,
+    ) -> Self {
+        let new_root_node_id = generated_node_id();
+        let factory = TreeRecordFactory::new(
+            geometry,
+            ExportLayoutKind::CowImmutableTree,
+            Some(export_id.clone()),
+        );
+        let mut records = TreeRecordBatch::default();
+        records
+            .nodes
+            .push(factory.root_node(new_root_node_id.clone()));
+        Self {
+            geometry,
+            factory,
+            old_root_node_id: old_root_node_id.cloned(),
+            new_root_node_id,
+            copied_parents: HashSet::new(),
+            new_internal_edges: HashMap::new(),
+            pending_edges: HashMap::new(),
+            records,
+        }
+    }
+
+    fn new_root_node_id(&self) -> &NodeId {
+        &self.new_root_node_id
+    }
+
+    async fn plan_chunks(
+        &mut self,
+        tree_store: &dyn TreeRecordStore,
+        chunks: &[CowChunkRef],
+    ) -> Result<TreeRecordBatch> {
+        for chunk in chunks {
+            self.plan_chunk(tree_store, chunk).await?;
+        }
+
+        for ((parent, slot), child) in std::mem::take(&mut self.pending_edges) {
+            self.records.edges.push(self.factory.child_edge(
+                NodeId::new(parent).map_err(ServerError::catalog)?,
+                slot,
+                child,
+            ));
+        }
+        Ok(std::mem::take(&mut self.records))
+    }
+
+    async fn plan_chunk(
+        &mut self,
+        tree_store: &dyn TreeRecordStore,
+        chunk: &CowChunkRef,
+    ) -> Result<()> {
+        let path = self.geometry.path_for_chunk(chunk.chunk_index())?;
+        let mut old_parent_id = self.old_root_node_id.clone();
+        let mut new_parent_id = self.new_root_node_id.clone();
+        let mut parent_span = self.geometry.root_span();
+
+        self.copy_existing_edges_once(
+            tree_store,
+            old_parent_id.as_ref(),
+            &new_parent_id,
+            parent_span,
+        )
+        .await?;
+
+        for slot in path.slots() {
+            let child_span = self.geometry.child_span(parent_span, *slot)?;
+            let old_child_id = match old_parent_id.as_ref() {
+                Some(parent) => load_child_edge(tree_store, parent, *slot)
+                    .await?
+                    .map(|edge| edge.child_node_id),
+                None => None,
+            };
+            let edge_key = (new_parent_id.as_str().to_owned(), *slot);
+
+            if child_span.level() == 0 {
+                let child_id = generated_node_id();
+                self.records
+                    .nodes
+                    .push(self.factory.leaf_node(child_id.clone(), child_span));
+                self.records.leaf_refs.push(self.factory.leaf_ref(
+                    child_id.clone(),
+                    TreeStorageKind::ImmutableBlob,
+                    chunk.blob_key().clone(),
+                ));
+                self.pending_edges.insert(edge_key, child_id);
+                return Ok(());
+            }
+
+            let child_id = if let Some(child_id) = self.new_internal_edges.get(&edge_key).cloned() {
+                child_id
+            } else {
+                if let Some(old_child_id) = &old_child_id {
+                    let old_child = load_required_node(tree_store, old_child_id).await?;
+                    validate_existing_node(
+                        &old_child,
+                        ExportLayoutKind::CowImmutableTree,
+                        child_span,
+                        TreeNodeKind::Internal,
+                    )?;
+                }
+                let child_id = generated_node_id();
+                self.records
+                    .nodes
+                    .push(self.factory.internal_node(child_id.clone(), child_span));
+                self.pending_edges
+                    .insert(edge_key.clone(), child_id.clone());
+                self.new_internal_edges.insert(edge_key, child_id.clone());
+                child_id
+            };
+
+            self.copy_existing_edges_once(tree_store, old_child_id.as_ref(), &child_id, child_span)
+                .await?;
+            old_parent_id = old_child_id;
+            new_parent_id = child_id;
+            parent_span = child_span;
+        }
+
+        Ok(())
+    }
+
+    async fn copy_existing_edges_once(
+        &mut self,
+        tree_store: &dyn TreeRecordStore,
+        old_parent_id: Option<&NodeId>,
+        new_parent_id: &NodeId,
+        span: TreeNodeSpan,
+    ) -> Result<()> {
+        let Some(old_parent_id) = old_parent_id else {
+            return Ok(());
+        };
+        if !self
+            .copied_parents
+            .insert(new_parent_id.as_str().to_owned())
+        {
+            return Ok(());
+        }
+
+        let old_parent = load_required_node(tree_store, old_parent_id).await?;
+        validate_existing_node(
+            &old_parent,
+            ExportLayoutKind::CowImmutableTree,
+            span,
+            TreeNodeKind::Internal,
+        )?;
+        let slots = (0..self.geometry.fanout()).collect::<Vec<_>>();
+        let edges = tree_store
+            .load_child_edges(&[TreeEdgeLookup {
+                parent_node_id: old_parent_id.clone(),
+                slots,
+            }])
+            .await
+            .map_err(ServerError::catalog)?;
+
+        for edge in edges {
+            if &edge.parent_node_id != old_parent_id {
+                return Err(ServerError::Catalog {
+                    message: format!(
+                        "node `{old_parent_id}` returned edge for mismatched parent `{}`",
+                        edge.parent_node_id
+                    ),
+                    source: None,
+                });
+            }
+            if edge.slot >= self.geometry.fanout() {
+                return Err(ServerError::Catalog {
+                    message: format!(
+                        "node `{old_parent_id}` returned edge for invalid slot {}",
+                        edge.slot
+                    ),
+                    source: None,
+                });
+            }
+            self.pending_edges.insert(
+                (new_parent_id.as_str().to_owned(), edge.slot),
+                edge.child_node_id,
+            );
+        }
+        Ok(())
+    }
+}
+
+async fn load_child_edge(
+    tree_store: &dyn TreeRecordStore,
+    parent_node_id: &NodeId,
+    slot: u16,
+) -> Result<Option<TreeEdgeRecord>> {
+    let edges = tree_store
+        .load_child_edges(&[TreeEdgeLookup {
+            parent_node_id: parent_node_id.clone(),
+            slots: vec![slot],
+        }])
+        .await
+        .map_err(ServerError::catalog)?;
+    if edges.len() > 1 {
+        return Err(ServerError::Catalog {
+            message: format!("node `{parent_node_id}` has duplicate edge for slot {slot}"),
+            source: None,
+        });
+    }
+    let edge = edges.into_iter().next();
+    if let Some(edge) = &edge {
+        if &edge.parent_node_id != parent_node_id || edge.slot != slot {
+            return Err(ServerError::Catalog {
+                message: format!(
+                    "node `{parent_node_id}` slot {slot} returned mismatched edge row"
+                ),
+                source: None,
+            });
+        }
+    }
+    Ok(edge)
+}
+
+async fn load_required_node(
+    tree_store: &dyn TreeRecordStore,
+    node_id: &NodeId,
+) -> Result<TreeNodeRecord> {
+    tree_store
+        .load_node(node_id)
+        .await
+        .map_err(ServerError::catalog)?
+        .ok_or_else(|| ServerError::Catalog {
+            message: format!("tree node `{node_id}` is missing"),
+            source: None,
+        })
+}
+
+fn validate_existing_node(
+    node: &TreeNodeRecord,
+    layout_kind: ExportLayoutKind,
+    span: TreeNodeSpan,
+    kind: TreeNodeKind,
+) -> Result<()> {
+    if node.layout_kind != layout_kind
+        || node.kind != kind
+        || node.level != span.level()
+        || node.span_start_bytes != span.start_bytes()
+        || node.span_len_bytes != span.len_bytes()
+    {
+        return Err(ServerError::Catalog {
+            message: format!("tree node `{}` does not match COW tree geometry", node.id),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
+fn generated_node_id() -> NodeId {
+    NodeId::new(Uuid::new_v4().to_string()).expect("generated node id")
 }
 
 fn snapshot_to_export_head(snapshot: &CowTreeSnapshot) -> Result<ExportHead> {
@@ -651,6 +1056,7 @@ mod tests {
                 RootSnapshot::from_cow_snapshot(snapshot),
                 Arc::new(CowTreeReader {
                     blob_store: self.blob_store.clone(),
+                    store: Arc::new(self.catalog.clone()) as Arc<dyn TreeRecordStore>,
                 }),
             )
         }
