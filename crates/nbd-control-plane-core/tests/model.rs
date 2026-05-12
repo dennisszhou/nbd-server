@@ -1,10 +1,9 @@
 use nbd_control_plane_core::{
-    ActiveExportDescriptor, BlobKey, ChunkIndex, CloneExport, CowChunkRef, CowTreeSnapshot,
-    CreateExport, ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
-    ExportName, ExportState, ListExports, NodeId, PublishCompaction, SIMPLE_CHUNK_BYTES,
-    SimpleChunkRef, TREE_CHUNK_BYTES, Timestamp, TreeFormat, TreeNodeKind, TreeStorageKind, WalSeq,
+    ActiveExportDescriptor, BlobKey, ChunkIndex, CloneExport, CowChunkRef, CreateExport,
+    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
+    ExportState, ListExports, NodeId, SIMPLE_CHUNK_BYTES, SimpleChunkRef, TREE_CHUNK_BYTES,
+    Timestamp, TreeFormat, TreeNodeKind, TreeStorageKind, WalSeq,
 };
-use std::collections::BTreeMap;
 use std::str::FromStr;
 
 #[test]
@@ -220,85 +219,6 @@ fn cow_chunk_refs_are_full_sized_blob_refs() {
             ChunkIndex::new(3),
             BlobKey::new("blob-3").expect("valid blob key"),
             TREE_CHUNK_BYTES - 1,
-        )
-        .is_err()
-    );
-}
-
-#[test]
-fn cow_tree_snapshots_validate_chunk_shape() {
-    let export_id = ExportId::new("export-cow").expect("export id");
-    let root = NodeId::new("root-cow").expect("root node");
-    let chunk = CowChunkRef::new(
-        ChunkIndex::new(0),
-        BlobKey::new("blob-0").expect("valid blob key"),
-        TREE_CHUNK_BYTES,
-    )
-    .expect("cow chunk");
-    let mut chunks = BTreeMap::new();
-    chunks.insert(chunk.chunk_index(), chunk);
-
-    let snapshot = CowTreeSnapshot::new(
-        export_id.clone(),
-        TREE_CHUNK_BYTES,
-        Some(root.clone()),
-        WalSeq::new(4),
-        chunks.clone(),
-    )
-    .expect("cow snapshot");
-    assert_eq!(snapshot.export_id(), &export_id);
-    assert_eq!(snapshot.root_node_id(), Some(&root));
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(4));
-    assert_eq!(
-        snapshot.chunk(ChunkIndex::new(0)).unwrap().len_bytes(),
-        TREE_CHUNK_BYTES
-    );
-
-    assert!(
-        CowTreeSnapshot::new(export_id, TREE_CHUNK_BYTES, None, WalSeq::new(4), chunks).is_err()
-    );
-}
-
-#[test]
-fn publish_compaction_validates_expected_base_and_chunks() {
-    let export_id = ExportId::new("export-cow").expect("export id");
-    let base = ExportHead::cow_immutable_tree(TREE_CHUNK_BYTES).expect("cow head");
-    let chunk = CowChunkRef::new(
-        ChunkIndex::new(0),
-        BlobKey::new("blob-0").expect("valid blob key"),
-        TREE_CHUNK_BYTES,
-    )
-    .expect("cow chunk");
-
-    let request = PublishCompaction::new(
-        export_id.clone(),
-        base.clone(),
-        WalSeq::new(1),
-        vec![chunk.clone()],
-    )
-    .expect("publish request");
-    assert_eq!(request.export_id(), &export_id);
-    assert_eq!(request.expected_base(), &base);
-    assert_eq!(request.compacted_through(), WalSeq::new(1));
-    assert_eq!(request.chunks(), std::slice::from_ref(&chunk));
-
-    assert!(
-        PublishCompaction::new(export_id.clone(), base.clone(), WalSeq::zero(), vec![chunk])
-            .is_err()
-    );
-    assert!(
-        PublishCompaction::new(
-            export_id,
-            ExportHead::simple_mutable_tree(TREE_CHUNK_BYTES).expect("simple head"),
-            WalSeq::new(1),
-            vec![
-                CowChunkRef::new(
-                    ChunkIndex::new(0),
-                    BlobKey::new("blob-1").expect("valid blob key"),
-                    TREE_CHUNK_BYTES,
-                )
-                .expect("cow chunk")
-            ],
         )
         .is_err()
     );

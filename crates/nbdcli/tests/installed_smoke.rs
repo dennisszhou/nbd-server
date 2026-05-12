@@ -1,4 +1,4 @@
-use nbd_control_plane::SQLiteExportCatalog;
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::env;
@@ -38,6 +38,7 @@ async fn installed_nbdcli_doctor_runs_by_name_outside_source_tree() {
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {
+    fs::File::create(runtime.catalog_path()).expect("create catalog file");
     let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");

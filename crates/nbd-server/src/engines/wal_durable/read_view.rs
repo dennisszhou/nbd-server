@@ -11,8 +11,8 @@ use crate::storage::BlobStoreHandle;
 use crate::wal::WalRecord;
 use bytes::Bytes;
 use nbd_control_plane::{
-    CowTreeSnapshot, ExportHead, ExportLayoutKind, ExportRecord, NodeId, TREE_CHUNK_BYTES,
-    TreeFormat, TreeRecordStore, TreeStorageKind, WalSeq,
+    ExportHead, ExportLayoutKind, ExportRecord, NodeId, TREE_CHUNK_BYTES, TreeFormat,
+    TreeRecordStore, TreeStorageKind, WalSeq,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -33,8 +33,6 @@ enum RootBacking {
         base_wal_seq: WalSeq,
         size_bytes: u64,
     },
-    #[cfg(test)]
-    CowTree(Arc<CowTreeSnapshot>),
     CowHead {
         root_node_id: Option<NodeId>,
         base_wal_seq: WalSeq,
@@ -91,13 +89,6 @@ impl RootSnapshot {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn from_cow_snapshot(snapshot: CowTreeSnapshot) -> Self {
-        Self {
-            backing: RootBacking::CowTree(Arc::new(snapshot)),
-        }
-    }
-
     pub(super) fn from_head(head: &ExportHead) -> Result<Self> {
         if head.layout_kind() != ExportLayoutKind::CowImmutableTree {
             return Err(ServerError::Catalog {
@@ -125,8 +116,6 @@ impl RootSnapshot {
     pub fn root_node_id(&self) -> Option<&NodeId> {
         match &self.backing {
             RootBacking::Zero { root_node_id, .. } => root_node_id.as_ref(),
-            #[cfg(test)]
-            RootBacking::CowTree(snapshot) => snapshot.root_node_id(),
             RootBacking::CowHead { root_node_id, .. } => root_node_id.as_ref(),
         }
     }
@@ -134,8 +123,6 @@ impl RootSnapshot {
     pub fn base_wal_seq(&self) -> WalSeq {
         match &self.backing {
             RootBacking::Zero { base_wal_seq, .. } => *base_wal_seq,
-            #[cfg(test)]
-            RootBacking::CowTree(snapshot) => snapshot.base_wal_seq(),
             RootBacking::CowHead { base_wal_seq, .. } => *base_wal_seq,
         }
     }
@@ -143,8 +130,6 @@ impl RootSnapshot {
     pub fn size_bytes(&self) -> u64 {
         match &self.backing {
             RootBacking::Zero { size_bytes, .. } => *size_bytes,
-            #[cfg(test)]
-            RootBacking::CowTree(snapshot) => snapshot.size_bytes(),
             RootBacking::CowHead { size_bytes, .. } => *size_bytes,
         }
     }
@@ -153,20 +138,9 @@ impl RootSnapshot {
         matches!(&self.backing, RootBacking::Zero { .. })
     }
 
-    pub(super) fn cow_tree(&self) -> Option<&CowTreeSnapshot> {
-        match &self.backing {
-            RootBacking::Zero { .. } => None,
-            #[cfg(test)]
-            RootBacking::CowTree(snapshot) => Some(snapshot.as_ref()),
-            RootBacking::CowHead { .. } => None,
-        }
-    }
-
     pub(super) fn tree_format(&self) -> Option<TreeFormat> {
         match &self.backing {
             RootBacking::Zero { .. } => None,
-            #[cfg(test)]
-            RootBacking::CowTree(_) => Some(TreeFormat::default()),
             RootBacking::CowHead { tree_format, .. } => Some(*tree_format),
         }
     }
@@ -532,19 +506,7 @@ impl TreeReader<RootSnapshot> for CowTreeReader {
             let copy_len = chunk_available.min(range.len() - copied as u64) as u32;
             let part_range = ByteRange::new(current_offset, copy_len);
 
-            if let Some(chunk) = root
-                .cow_tree()
-                .and_then(|snapshot| snapshot.chunk(chunk_index))
-            {
-                let chunk_data = self
-                    .blob_store
-                    .get_blob(chunk.blob_key(), chunk_offset, u64::from(copy_len))
-                    .await?;
-                parts.push(BlockPart::Data {
-                    range: part_range,
-                    bytes: Bytes::from(chunk_data),
-                });
-            } else if let Some(leaf) = self.load_leaf(root, chunk_index).await? {
+            if let Some(leaf) = self.load_leaf(root, chunk_index).await? {
                 if leaf.leaf_ref().storage_kind != TreeStorageKind::ImmutableBlob {
                     return Err(ServerError::Catalog {
                         message: format!(
@@ -771,13 +733,13 @@ pub(super) fn byte_range_from_bounds(start: u64, end: u64) -> Result<ByteRange> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engines::tree::TreeRecordFactory;
     use crate::storage::{LocalBlobStore, put_random_blob};
     use nbd_control_plane::{
-        ChunkIndex, CowChunkRef, ExportId, PublishTreeUpdate, PublishTreeUpdateOutcome,
-        TreeEdgeLookup, TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore,
+        ExportHead, ExportLayoutKind, PublishTreeUpdate, PublishTreeUpdateOutcome, TreeEdgeLookup,
+        TreeEdgeRecord, TreeFormat, TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore,
     };
     use nbd_test_support::TestRuntime;
-    use std::collections::BTreeMap;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1179,19 +1141,13 @@ mod tests {
         let key = put_random_blob(blob_store.as_ref(), &chunk_data)
             .await
             .expect("create blob");
-        let chunk = CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk");
-        let snapshot = CowTreeSnapshot::new(
-            ExportId::new("export-root-backed").expect("export id"),
-            4096,
-            Some(NodeId::new("root-node").expect("node id")),
-            WalSeq::new(7),
-            BTreeMap::from([(ChunkIndex::new(0), chunk)]),
-        )
-        .expect("cow snapshot");
-        let root = RootSnapshot::from_cow_snapshot(snapshot);
+        let root_node_id = NodeId::new("root-node").expect("root node id");
+        let leaf_node_id = NodeId::new("leaf-node").expect("leaf node id");
+        let root = cow_root(Some(root_node_id.clone()), 4096, WalSeq::new(7));
+        let store = static_cow_store(4096, root_node_id, leaf_node_id, key);
         let reader = CowTreeReader {
             blob_store,
-            store: unused_tree_store(),
+            store: Arc::new(store),
         };
 
         let block = reader
@@ -1214,15 +1170,7 @@ mod tests {
         let runtime = TestRuntime::new().expect("test runtime");
         let blob_store: BlobStoreHandle =
             Arc::new(LocalBlobStore::new(runtime.root_path().join("blobs")));
-        let snapshot = CowTreeSnapshot::new(
-            ExportId::new("export-root-sparse").expect("export id"),
-            TREE_CHUNK_BYTES * 2,
-            None,
-            WalSeq::new(7),
-            BTreeMap::new(),
-        )
-        .expect("cow snapshot");
-        let root = RootSnapshot::from_cow_snapshot(snapshot);
+        let root = cow_root(None, TREE_CHUNK_BYTES * 2, WalSeq::new(7));
         let reader = CowTreeReader {
             blob_store,
             store: unused_tree_store(),
@@ -1271,20 +1219,10 @@ mod tests {
             Err(ServerError::Catalog { .. }),
         ));
 
-        let empty_chunk = vec![0; 4096];
-        let key = put_random_blob(blob_store.as_ref(), &empty_chunk)
-            .await
-            .expect("create blob");
-        let chunk = CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk");
-        let cow_root = RootSnapshot::from_cow_snapshot(
-            CowTreeSnapshot::new(
-                ExportId::new("export-cow-backed").expect("export id"),
-                4096,
-                Some(NodeId::new("root-node").expect("node id")),
-                WalSeq::new(1),
-                BTreeMap::from([(ChunkIndex::new(0), chunk)]),
-            )
-            .expect("cow snapshot"),
+        let cow_root = cow_root(
+            Some(NodeId::new("root-node").expect("root node id")),
+            4096,
+            WalSeq::new(1),
         );
 
         assert!(matches!(
@@ -1297,6 +1235,45 @@ mod tests {
 
     fn zero_root(size_bytes: u64) -> RootSnapshot {
         zero_root_at(size_bytes, WalSeq::zero())
+    }
+
+    fn cow_root(
+        root_node_id: Option<NodeId>,
+        size_bytes: u64,
+        base_wal_seq: WalSeq,
+    ) -> RootSnapshot {
+        let head = ExportHead::new_with_tree_format(
+            ExportLayoutKind::CowImmutableTree,
+            root_node_id,
+            size_bytes,
+            base_wal_seq,
+            Some(TreeFormat::Bounded32V1),
+        )
+        .expect("cow head");
+        RootSnapshot::from_head(&head).expect("cow root")
+    }
+
+    fn static_cow_store(
+        size_bytes: u64,
+        root_node_id: NodeId,
+        leaf_node_id: NodeId,
+        key: nbd_control_plane::BlobKey,
+    ) -> StaticTreeRecordStore {
+        let geometry = TreeGeometry::new(TreeFormat::Bounded32V1, size_bytes).expect("geometry");
+        let factory = TreeRecordFactory::new(geometry, ExportLayoutKind::CowImmutableTree, None);
+        let root = factory.root_node(root_node_id.clone());
+        let leaf_span = geometry
+            .child_span(geometry.root_span(), 0)
+            .expect("leaf span");
+        let leaf = factory.leaf_node(leaf_node_id.clone(), leaf_span);
+        let edge = factory.child_edge(root_node_id, 0, leaf_node_id.clone());
+        let leaf_ref = factory.leaf_ref(leaf_node_id, TreeStorageKind::ImmutableBlob, key);
+        StaticTreeRecordStore {
+            root,
+            leaf,
+            edge,
+            leaf_ref,
+        }
     }
 
     fn zero_root_at(size_bytes: u64, base_wal_seq: WalSeq) -> RootSnapshot {
@@ -1329,6 +1306,13 @@ mod tests {
     }
 
     struct UnusedTreeRecordStore;
+
+    struct StaticTreeRecordStore {
+        root: TreeNodeRecord,
+        leaf: TreeNodeRecord,
+        edge: TreeEdgeRecord,
+        leaf_ref: TreeLeafRefRecord,
+    }
 
     #[async_trait::async_trait]
     impl TreeRecordStore for UnusedTreeRecordStore {
@@ -1365,6 +1349,68 @@ mod tests {
             _request: PublishTreeUpdate,
         ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
             panic!("unused tree record store should not publish tree updates")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TreeRecordStore for StaticTreeRecordStore {
+        async fn load_node(
+            &self,
+            node_id: &NodeId,
+        ) -> nbd_control_plane::Result<Option<TreeNodeRecord>> {
+            if node_id == &self.root.id {
+                return Ok(Some(self.root.clone()));
+            }
+            if node_id == &self.leaf.id {
+                return Ok(Some(self.leaf.clone()));
+            }
+            Ok(None)
+        }
+
+        async fn load_nodes(
+            &self,
+            node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeNodeRecord>> {
+            let mut nodes = Vec::new();
+            for node_id in node_ids {
+                if let Some(node) = self.load_node(node_id).await? {
+                    nodes.push(node);
+                }
+            }
+            Ok(nodes)
+        }
+
+        async fn load_child_edges(
+            &self,
+            lookups: &[TreeEdgeLookup],
+        ) -> nbd_control_plane::Result<Vec<TreeEdgeRecord>> {
+            let mut edges = Vec::new();
+            for lookup in lookups {
+                if lookup.parent_node_id == self.edge.parent_node_id
+                    && lookup.slots.contains(&self.edge.slot)
+                {
+                    edges.push(self.edge.clone());
+                }
+            }
+            Ok(edges)
+        }
+
+        async fn load_leaf_refs(
+            &self,
+            node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeLeafRefRecord>> {
+            if node_ids.contains(&self.leaf_ref.node_id) {
+                Ok(vec![self.leaf_ref.clone()])
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        async fn publish_tree_update(
+            &self,
+            _request: PublishTreeUpdate,
+        ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
+            panic!("static tree record store should not publish tree updates")
         }
     }
 

@@ -5,16 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TreeFormat {
+    #[default]
     Bounded32V1,
-}
-
-impl Default for TreeFormat {
-    fn default() -> Self {
-        Self::Bounded32V1
-    }
 }
 
 impl FromStr for TreeFormat {

@@ -3,9 +3,9 @@ use crate::error::{Result, ServerError};
 use crate::observability::{self, event, target};
 use nbd_control_plane::{
     ActiveExportDescriptor, BlobKey, ChunkIndex, ExportHead, ExportId, ExportLayoutKind, NodeId,
-    PublishTreeUpdate, PublishTreeUpdateOutcome, SimpleChunkRef, SimpleTreeSnapshot,
-    TreeEdgeLookup, TreeEdgeRecord, TreeFormat, TreeNodeKind, TreeNodeRecord, TreeRecordBatch,
-    TreeRecordStore, TreeStorageKind, WalSeq,
+    PublishTreeUpdate, PublishTreeUpdateOutcome, SimpleChunkRef, TreeEdgeLookup, TreeEdgeRecord,
+    TreeFormat, TreeNodeKind, TreeNodeRecord, TreeRecordBatch, TreeRecordStore, TreeStorageKind,
+    WalSeq,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -89,14 +89,6 @@ impl SimpleMutableTree {
 
     pub async fn size_bytes(&self) -> u64 {
         self.state.read().await.size_bytes
-    }
-
-    pub async fn snapshot(&self) -> Result<SimpleTreeSnapshot> {
-        self.state
-            .read()
-            .await
-            .to_snapshot()
-            .map_err(ServerError::catalog)
     }
 
     pub async fn export_head(&self) -> Result<ExportHead> {
@@ -250,15 +242,6 @@ impl fmt::Debug for SimpleMutableTree {
 }
 
 impl SimpleTreeState {
-    fn to_snapshot(&self) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
-        SimpleTreeSnapshot::new(
-            self.export_id.clone(),
-            self.size_bytes,
-            self.root_node_id.clone(),
-            self.chunks.clone(),
-        )
-    }
-
     fn export_head(&self) -> nbd_control_plane::Result<ExportHead> {
         ExportHead::new_with_tree_format(
             ExportLayoutKind::SimpleMutableTree,

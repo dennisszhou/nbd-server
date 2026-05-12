@@ -1,14 +1,16 @@
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    CatalogError, CatalogUrl, CowTreeMetadataStore, CreateExport, ExportCatalog, ExportEngineKind,
-    ExportName, NodeId, PublishTreeUpdate, PublishTreeUpdateOutcome, SQLiteExportCatalog,
-    TreeEdgeLookup, TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore, WalSeq,
+    CatalogError, CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, NodeId,
+    PublishTreeUpdate, PublishTreeUpdateOutcome, TreeEdgeLookup, TreeEdgeRecord, TreeLeafRefRecord,
+    TreeNodeRecord, TreeRecordStore, WalSeq,
 };
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_server::{
     ConfiguredBlobStore, ExportFactory, ExportOwner, ExportReply, LocalExportRegistry,
     LocalWalProvider, MAX_MEMORY_EXPORT_BYTES, ServerError,
 };
 use nbd_test_support::TestRuntime;
+use std::fs;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -399,12 +401,12 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
         .await
         .expect("close wal durable runtime");
     failing_tree_store.wait_for_attempt().await;
-    let snapshot = catalog_for_assert
-        .load_cow_tree(created.id())
+    let head = catalog_for_assert
+        .load_export_head(created.id())
         .await
-        .expect("load cow tree after failed compaction");
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
-    assert!(snapshot.root_node_id().is_none());
+        .expect("load head after failed compaction");
+    assert_eq!(head.base_wal_seq(), WalSeq::zero());
+    assert!(head.root_node_id().is_none());
 
     failing_tree_store.allow_future_calls();
     let reopened_owner = ExportOwner::unique_connection();
@@ -431,6 +433,7 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    fs::File::create(url.sqlite_path().expect("sqlite path")).expect("create catalog file");
     let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
         .await
         .expect("connect catalog");
@@ -470,14 +473,12 @@ fn local_registry_with_tree_record_store(
 ) -> LocalExportRegistry {
     let catalog = Arc::new(catalog);
     let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
-    let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
     let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
     let factory = Arc::new(ExportFactory::new(
         config,
         ConfiguredBlobStore::local(blob_dir(runtime)),
         export_catalog,
         tree_record_store,
-        cow_tree_store,
         wal_provider,
     ));
     LocalExportRegistry::new(catalog, factory)
@@ -628,11 +629,11 @@ async fn wait_for_checkpoint(
 ) {
     timeout(Duration::from_secs(5), async {
         loop {
-            let snapshot = catalog
-                .load_cow_tree(export_id)
+            let head = catalog
+                .load_export_head(export_id)
                 .await
-                .expect("load cow tree");
-            if snapshot.base_wal_seq() >= checkpoint && snapshot.root_node_id().is_some() {
+                .expect("load export head");
+            if head.base_wal_seq() >= checkpoint && head.root_node_id().is_some() {
                 return;
             }
             sleep(Duration::from_millis(10)).await;

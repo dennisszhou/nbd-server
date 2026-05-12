@@ -1,8 +1,9 @@
 use nbd_config::{ConfigSource, NbdConfig, ServerConfig};
 use nbd_control_plane::{
     CatalogUrl, CloneExport, CloneExportResult, CreateExport, DeleteExport, ExportCatalog,
-    ExportEngineKind, ExportName, ExportRecord, SQLiteExportCatalog,
+    ExportEngineKind, ExportName, ExportRecord,
 };
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_protocol::constants::{
     IHAVEOPT_MAGIC, INIT_PASSWD, NBD_FLAG_FIXED_NEWSTYLE, NBD_FLAG_NO_ZEROES, NBD_INFO_EXPORT,
 };
@@ -21,13 +22,15 @@ use nbd_server::NbdServer;
 use nbd_test_support::TestRuntime;
 use std::collections::HashMap;
 use std::error::Error;
+use std::fs;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 
 pub type TestResult<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -339,7 +342,8 @@ fn create_export(
 
 async fn migrated_catalog(runtime: &TestRuntime) -> TestResult<SQLiteExportCatalog> {
     let url = CatalogUrl::parse(runtime.catalog_url())?;
-    let catalog = SQLiteExportCatalog::connect(&url).await?;
+    fs::File::create(url.sqlite_path()?)?;
+    let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path()?).await?;
 
     for migration in MIGRATIONS {
         sqlx::raw_sql(migration).execute(catalog.pool()).await?;

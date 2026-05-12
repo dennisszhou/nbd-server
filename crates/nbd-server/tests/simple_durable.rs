@@ -1,8 +1,8 @@
 use nbd_control_plane::{
     BlobKey, CatalogUrl, ChunkIndex, CreateExport, ExportCatalog, ExportEngineKind, ExportName,
-    ExportRecord, InspectExport, SIMPLE_CHUNK_BYTES, SQLiteExportCatalog, SimpleChunkRef,
-    SimpleTreeMetadataStore,
+    ExportRecord, InspectExport, SIMPLE_CHUNK_BYTES, SimpleChunkRef,
 };
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_server::{
     AdmissionOp, BlobStore, ByteRange, ConcurrentExportRuntime, ExportAdmissionPolicy, ExportJob,
     ExportReply, ExportRequest, ExportRuntime, LocalBlobStore, MutableBlobStore, ServerError,
@@ -117,10 +117,9 @@ async fn simple_mutable_tree_loads_sparse_128mib_head() {
     let (_runtime, catalog, meta) = simple_tree_fixture("disk-a").await;
     let tree = load_tree(&catalog, &meta).await;
 
-    let snapshot = tree.snapshot().await.expect("snapshot");
-    assert_eq!(snapshot.size_bytes(), 128 * 1024 * 1024);
-    assert!(snapshot.root_node_id().is_none());
-    assert!(snapshot.chunks().is_empty());
+    let head = tree.export_head().await.expect("export head");
+    assert_eq!(head.size_bytes(), 128 * 1024 * 1024);
+    assert!(head.root_node_id().is_none());
     assert_eq!(
         tree.lookup_chunk(ChunkIndex::new(0))
             .await
@@ -363,6 +362,9 @@ async fn simple_tree_fixture_with_size(
 ) -> (TestRuntime, SQLiteExportCatalog, ExportRecord) {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    fs::File::create(url.sqlite_path().expect("sqlite path"))
+        .await
+        .expect("create catalog file");
     let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
         .await
         .expect("connect catalog");
@@ -454,12 +456,10 @@ async fn simple_chunk_key(
     meta: &ExportRecord,
     index: u64,
 ) -> BlobKey {
-    catalog
-        .load_simple_tree(meta.id())
+    load_tree(catalog, meta)
         .await
-        .expect("load simple tree")
-        .chunk(ChunkIndex::new(index))
+        .lookup_chunk(ChunkIndex::new(index))
+        .await
+        .expect("lookup simple chunk")
         .expect("materialized chunk")
-        .blob_key()
-        .clone()
 }

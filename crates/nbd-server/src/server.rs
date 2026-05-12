@@ -6,7 +6,7 @@ use crate::registry::{ExportFactory, LocalExportRegistry};
 use crate::storage::ConfiguredBlobStore;
 use crate::wal::LocalWalProvider;
 use nbd_config::NbdConfig;
-use nbd_control_plane::{CatalogProvider, CatalogUrl, open_catalog};
+use nbd_control_plane::{CatalogUrl, open_catalog};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -39,7 +39,7 @@ impl NbdServer {
             service = observability::SERVICE_NAME,
             server_instance_id = observability::server_instance_id(),
             pid = observability::pid(),
-            catalog_provider = catalog_provider_name(catalog_url.provider()),
+            catalog_provider = catalog_url.provider().as_str(),
         );
         let catalog = open_catalog(&catalog_url)
             .await
@@ -50,11 +50,10 @@ impl NbdServer {
             service = observability::SERVICE_NAME,
             server_instance_id = observability::server_instance_id(),
             pid = observability::pid(),
-            catalog_provider = catalog_provider_name(catalog_url.provider()),
+            catalog_provider = catalog_url.provider().as_str(),
         );
         let export_catalog = catalog.export_catalog();
         let tree_record_store = catalog.tree_record_store();
-        let cow_tree_store = catalog.cow_tree_store();
         let blob_store = ConfiguredBlobStore::open(&config).await?;
         let wal_provider = Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone()));
         let factory = Arc::new(ExportFactory::new(
@@ -62,7 +61,6 @@ impl NbdServer {
             blob_store,
             export_catalog.clone(),
             tree_record_store,
-            cow_tree_store,
             wal_provider,
         ));
         let registry = Arc::new(LocalExportRegistry::new(export_catalog, factory));
@@ -174,13 +172,6 @@ impl NbdServer {
             listen_addr = %self.addr,
         );
         Ok(())
-    }
-}
-
-fn catalog_provider_name(provider: CatalogProvider) -> &'static str {
-    match provider {
-        CatalogProvider::Sqlite => "sqlite",
-        CatalogProvider::Postgres => "postgres",
     }
 }
 

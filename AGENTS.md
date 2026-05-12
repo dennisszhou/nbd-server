@@ -12,8 +12,11 @@ this file only records local facts and conventions.
 - Main workspace crates:
   - `crates/nbd-server`: TCP NBD server, connection runtime, export runtime,
     admission, registry, memory engine, simple durable engine.
-  - `crates/nbd-control-plane`: catalog domain model, SQLite catalog, tree
-    metadata APIs.
+  - `crates/nbd-control-plane`: public catalog facade and provider factory.
+  - `crates/nbd-control-plane-core`: storage-neutral catalog domain types,
+    traits, diagnostics, and errors.
+  - `crates/nbd-control-plane-sqlite`: SQLite catalog adapter, SQL row
+    mapping, transaction handling, and SQLite integration tests.
   - `crates/nbd-config`: runtime config loading and default config generation.
   - `crates/nbd-protocol`: wire constants, parsing, and encoding.
   - `crates/nbd-us-client`: userspace validation client.
@@ -37,16 +40,19 @@ this file only records local facts and conventions.
   - `crates/nbd-server/tests/admission.rs`
 - Catalog or schema work:
   - `docs/architecture/export-catalog-architecture.md`
-  - `crates/nbd-control-plane/src/model.rs`
-  - `crates/nbd-control-plane/src/sqlite.rs`
-  - `crates/nbd-control-plane/tests/sqlite_catalog.rs`
+  - `docs/plans/2026-05-12-control-plane-storage-adapter-boundary.md`
+  - `crates/nbd-control-plane/src/lib.rs`
+  - `crates/nbd-control-plane-core/src/`
+  - `crates/nbd-control-plane-sqlite/src/`
+  - `crates/nbd-control-plane-sqlite/tests/sqlite_catalog.rs`
   - `prisma/schema.prisma`
   - `prisma/migrations/`
 - Simple durable engine work:
   - `docs/plans/2026-05-04-simple-durable-engine.md`
   - `docs/architecture/export-tree-metadata.md`
   - `docs/architecture/storage-engine-architecture.md`
-  - `crates/nbd-server/src/simple_durable.rs`
+  - `crates/nbd-server/src/engines/simple_durable/`
+  - `crates/nbd-server/src/engines/tree/`
   - `crates/nbd-server/tests/simple_durable.rs`
 - Config work:
   - `crates/nbd-config/src/lib.rs`
@@ -81,8 +87,11 @@ this file only records local facts and conventions.
 - `ExportEngine` executes only `AdmittedExportRequest`; storage access should
   not bypass admission.
 - `MemoryExportEngine` relies on admission for range safety.
-- `SimpleDurableEngine` stores sparse 32 MiB chunks in a local blob directory
-  and stores simple mutable tree metadata in SQLite.
+- Durable engines store sparse 32 MiB chunks behind the configured blob store
+  and persist tree metadata through storage-neutral catalog traits.
+- `nbd-control-plane` is the public catalog facade. Concrete database
+  implementation details live in adapter crates such as
+  `nbd-control-plane-sqlite`.
 
 ## Current Sharp Edges
 
@@ -116,6 +125,11 @@ this file only records local facts and conventions.
   cookies, sockets, reply queues, or connection task lifecycle.
 - Catalog code owns durable metadata and schema interpretation. Runtime code
   should go through catalog traits rather than direct SQL.
+- Server and CLI production source should call the `nbd-control-plane` facade
+  and must not import concrete catalog adapters, `sqlx`, or catalog table names.
+- Tree geometry, lazy traversal, and tree mutation planning belong in
+  `nbd-server` engine code. Catalog adapters persist bounded row reads and
+  atomic head updates; they do not choose sparse tree update plans.
 - Keep new policy decisions behind explicit boundaries. Avoid scattering config,
   logging, scheduling, or storage policy through request-path call sites.
 
@@ -185,11 +199,16 @@ nbd-client -d /dev/nbd0 || true
 - Prisma schema and migrations live under `prisma/`.
 - The active head table is `export_heads`; do not reintroduce the old
   `export_generations` model.
+- Tree-backed `export_heads` rows carry `tree_format`; memory heads must not.
+- `nbd-control-plane-core` owns storage-neutral export, tree, tree-format,
+  service, diagnostic, and error contracts. It must not depend on `sqlx`.
+- SQLite-specific opening, SQL, row mapping, and schema checks live in
+  `nbd-control-plane-sqlite`.
 - Simple durable uses `layout_kind = simple_mutable_tree`.
 - Future WAL/COW work should use a different layout meaning rather than
   reinterpret simple mutable rows as immutable history.
 - Catalog schema changes need focused tests in
-  `crates/nbd-control-plane/tests/sqlite_catalog.rs`.
+  `crates/nbd-control-plane-sqlite/tests/sqlite_catalog.rs`.
 
 ## Testing Guidance
 

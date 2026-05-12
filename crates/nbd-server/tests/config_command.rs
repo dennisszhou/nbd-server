@@ -1,5 +1,5 @@
 use nbd_config::ConfigFile;
-use nbd_control_plane::{CatalogUrl, SQLiteExportCatalog};
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::env;
@@ -10,9 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 
 #[test]
 fn config_command_prints_missing_explicit_defaults_without_writing() {
@@ -280,23 +281,13 @@ fn doctor_command_rejects_missing_catalog_without_creating_it() {
 
 #[test]
 fn doctor_command_rejects_unmigrated_catalog() {
-    let temp = TempRoot::new();
-    let config_path = temp.path().join("config.toml");
-    let catalog_path = temp.path().join("catalog.db");
-    let config = ConfigFile::explicit(&config_path)
-        .default_config()
-        .expect("default config");
-    fs::write(
-        &config_path,
-        config.to_toml_string().expect("serialize config"),
-    )
-    .expect("write config");
-    fs::File::create(&catalog_path).expect("create unmigrated catalog file");
+    let runtime = TestRuntime::new().expect("test runtime");
+    fs::File::create(runtime.catalog_path()).expect("create catalog file");
 
     let output = Command::new(env!("CARGO_BIN_EXE_nbd-server"))
         .arg("doctor")
         .arg("--config")
-        .arg(&config_path)
+        .arg(runtime.config_path())
         .arg("--json")
         .output()
         .expect("run nbd-server doctor");
@@ -308,8 +299,8 @@ fn doctor_command_rejects_unmigrated_catalog() {
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {
-    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    fs::File::create(runtime.catalog_path()).expect("create catalog file");
+    let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");
 

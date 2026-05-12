@@ -2,10 +2,13 @@ Title: Compaction Manager Architecture
 Date: 2026-05-01
 Status: superseded
 
-Superseded by `docs/plans/2026-05-06-export-head-ownership-compaction.md`.
+Superseded by `docs/plans/2026-05-06-export-head-ownership-compaction.md`
+and `docs/plans/2026-05-12-control-plane-storage-adapter-boundary.md`.
 The live implementation uses an engine-owned compaction coordinator over a
 direct `CowCompactor`; it no longer has a global `CompactionManager` queue or
-background worker shutdown lifecycle. This document is retained only as
+background worker shutdown lifecycle. Compaction publication now goes through
+the storage-neutral `TreeRecordStore::publish_tree_update` boundary, not the
+old catalog compaction-publish API. This document is retained only as
 historical context for the earlier queue-based design.
 
 # Problem
@@ -93,7 +96,6 @@ struct CompactionResult {
 
 enum CompactionOutcome {
     Published,
-    AlreadyCovered,
     StalePlan,
     NoRecords,
 }
@@ -199,7 +201,7 @@ receive CompactExport(export_id, requested target)
   -> capture base_root, base_wal_seq, size, and layout from the DB head
   -> open the export WAL through WalProvider
   -> clamp target WAL sequence S to the durable WAL high watermark
-  -> if S <= base_wal_seq: return AlreadyCovered or NoRecords
+  -> if S <= base_wal_seq: return NoRecords
   -> verify S is durable and contiguous after base_wal_seq
   -> build CompactionPlan(base head, S)
   -> read WAL records (base_wal_seq + 1)..S
@@ -210,12 +212,12 @@ receive CompactExport(export_id, requested target)
        write new immutable leaf blob through BlobStore
        create new leaf node metadata
   -> create new internal nodes along affected paths
-  -> ExportCatalog.publish_compaction(plan base, new tree batch, S)
+  -> TreeRecordStore.publish_tree_update(expected head, next head, records)
   -> optionally notify active Export/ExportReadView of the checkpoint
 ```
 
 If no WAL records are available after the current checkpoint, compaction should
-return `NoRecords` or `AlreadyCovered` and should not advance the export head.
+return `NoRecords` and should not advance the export head.
 
 # Checkpoint Selection
 
@@ -285,35 +287,33 @@ records newer than the selected target checkpoint.
 
 # Catalog Publication
 
-`CompactionManager` writes immutable blob files before catalog publication.
-Tree metadata insertion and export head advancement should happen in one
-catalog transaction so the database never exposes a partial tree.
+The current `CowCompactor` writes immutable blob files before catalog
+publication. Server compaction code plans COW path-copy records, then asks the
+catalog tree store to insert those records and advance the head in one
+transaction so the database never exposes a partial tree.
 
-Publication uses a compare/publish request:
+Publication uses the storage-neutral tree-record boundary:
 
 ```rust
-ExportCatalog::publish_compaction(PublishCompaction)
+TreeRecordStore::publish_tree_update(PublishTreeUpdate)
 ```
 
-`ExportCatalog` loads the current export head internally. The request carries
-the base root, checkpoint, size, and layout that the compaction plan used.
-Publication outcomes are:
+The request carries the expected prior `ExportHead`, the next `ExportHead`, and
+the planned `TreeRecordBatch`. Publication outcomes are:
 
 ```text
-current.base_wal_seq >= compacted_through
-  -> AlreadyCovered, no head change
+current head != expected head
+  -> StaleHead, rollback inserted tree metadata
 
-current root/checkpoint/size/layout != expected base
-  -> StalePlan, no head change
-
-current root/checkpoint/size/layout == expected base
+current head == expected head
   -> insert immutable tree metadata
   -> advance export_heads to new_root/checkpoint
 ```
 
-`AlreadyCovered` is a successful no-op. `StalePlan` is retryable by discarding
-unpublished output and replanning from the current database head through the
-original target. This makes duplicate and racing compaction attempts safe.
+The engine maps a stale publish to `CompactionOutcome::StalePlan`. It discards
+unpublished output and can replan from the current database head through the
+original target if retrying is useful. A no-record compaction returns
+`CompactionOutcome::NoRecords` and does not advance the export head.
 
 If publication fails after blobs or metadata were written, those objects are
 unpublished garbage. Future GC is responsible for deleting them.
@@ -397,7 +397,7 @@ leave the export recoverable from the previous catalog checkpoint plus WAL.
 - Unchanged subtrees are shared.
 - Catalog root publication happens after blobs and metadata are written.
 - Catalog publication compares against the current database head before
-  advancing `export_heads`.
+  advancing `export_heads` through `TreeRecordStore::publish_tree_update`.
 - Compaction does not directly retire `ExportReadView` overlay entries.
 - Read-view notification failure delays cleanup but does not invalidate the
   published catalog checkpoint.
@@ -410,7 +410,7 @@ leave the export recoverable from the previous catalog checkpoint plus WAL.
 - No-op compaction does not advance the export head.
 - Failed unpublished compaction output is garbage-collectable later.
 - Duplicate and racing compactions are safe because stale publication attempts
-  no-op or retry from the current database head.
+  leave the head unchanged and can retry from the current database head.
 
 # Open Questions
 

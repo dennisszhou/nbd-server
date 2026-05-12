@@ -1,16 +1,18 @@
 use nbd_control_plane::{
-    CatalogError, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, CreateExport,
-    ExportCatalog, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
-    ExportRecord, ExportState, NodeId, PublishCompaction, PublishTreeUpdate,
-    PublishTreeUpdateOutcome, SQLiteExportCatalog, TREE_CHUNK_BYTES, Timestamp, TreeEdgeLookup,
-    TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore, WalSeq,
+    CatalogError, CatalogUrl, ChunkIndex, CowChunkRef, CreateExport, ExportCatalog,
+    ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName, ExportRecord,
+    ExportState, NodeId, PublishTreeUpdate, PublishTreeUpdateOutcome, TREE_CHUNK_BYTES, Timestamp,
+    TreeEdgeLookup, TreeEdgeRecord, TreeLeafRefRecord, TreeNodeKind, TreeNodeRecord,
+    TreeRecordBatch, TreeRecordStore, TreeStorageKind, WalSeq,
 };
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_server::{
     BlobStoreHandle, ConcurrentExportRuntime, ExportJob, ExportReply, ExportRequest, ExportRuntime,
     ExportWalHandle, LocalBlobStore, LocalWalProvider, OpenWal, Result, ServerError, WalDomain,
     WalDurableEngine, WalProvider, WalRequest, put_random_blob,
 };
 use nbd_test_support::TestRuntime;
+use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -231,20 +233,13 @@ async fn wal_durable_engine_uses_current_cow_root_from_descriptor() {
     )
     .await
     .expect("append second");
-    catalog
-        .publish_compaction(
-            PublishCompaction::new(
-                created.id().clone(),
-                created.head().clone(),
-                WalSeq::new(2),
-                vec![
-                    CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk"),
-                ],
-            )
-            .expect("publish compaction"),
-        )
-        .await
-        .expect("publish cow checkpoint");
+    publish_cow_root(
+        &catalog,
+        &created,
+        2,
+        vec![CowChunkRef::new(ChunkIndex::new(0), key, TREE_CHUNK_BYTES).expect("cow chunk")],
+    )
+    .await;
     wal.append(
         WalRequest::new(nbd_server::ByteRange::new(5, 2), b"ZZ".to_vec())
             .expect("overlay WAL request"),
@@ -347,12 +342,12 @@ async fn wal_durable_engine_close_compacts_applied_writes_and_advances_read_view
 
     export_runtime.close().await.expect("close runtime");
 
-    let snapshot = catalog
-        .load_cow_tree(created.id())
+    let compacted_head = catalog
+        .load_export_head(created.id())
         .await
-        .expect("load compacted snapshot");
-    assert!(snapshot.root_node_id().is_some());
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
+        .expect("load compacted head");
+    assert!(compacted_head.root_node_id().is_some());
+    assert_eq!(compacted_head.base_wal_seq(), WalSeq::new(2));
     assert_eq!(
         engine
             .export_head()
@@ -451,23 +446,18 @@ async fn wal_durable_compaction_preserves_unchanged_committed_chunks() {
     let second_key = put_random_blob(blob_store.as_ref(), &second_chunk)
         .await
         .expect("write second chunk");
-    catalog
-        .publish_compaction(
-            PublishCompaction::new(
-                created.id().clone(),
-                created.head().clone(),
-                WalSeq::new(1),
-                vec![
-                    CowChunkRef::new(ChunkIndex::new(0), first_key, TREE_CHUNK_BYTES)
-                        .expect("first cow chunk"),
-                    CowChunkRef::new(ChunkIndex::new(1), second_key, TREE_CHUNK_BYTES)
-                        .expect("second cow chunk"),
-                ],
-            )
-            .expect("publish base compaction"),
-        )
-        .await
-        .expect("publish base checkpoint");
+    publish_cow_root(
+        &catalog,
+        &created,
+        1,
+        vec![
+            CowChunkRef::new(ChunkIndex::new(0), first_key, TREE_CHUNK_BYTES)
+                .expect("first cow chunk"),
+            CowChunkRef::new(ChunkIndex::new(1), second_key, TREE_CHUNK_BYTES)
+                .expect("second cow chunk"),
+        ],
+    )
+    .await;
 
     let engine = Arc::new(
         WalDurableEngine::open_with_cow_tree(
@@ -501,12 +491,13 @@ async fn wal_durable_compaction_preserves_unchanged_committed_chunks() {
     );
     export_runtime.close().await.expect("close runtime");
 
-    let snapshot = catalog
-        .load_cow_tree(created.id())
+    let compacted_head = catalog
+        .load_export_head(created.id())
         .await
-        .expect("load compacted tree");
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
-    let preserved = snapshot.chunk(ChunkIndex::new(0)).expect("chunk zero");
+        .expect("load compacted head");
+    assert_eq!(compacted_head.base_wal_seq(), WalSeq::new(2));
+    let root = compacted_head.root_node_id().expect("compacted root");
+    let preserved = load_cow_chunk(&catalog, root, 0).await.expect("chunk zero");
     assert_eq!(
         blob_store
             .get_blob(preserved.blob_key(), 0, 4)
@@ -514,7 +505,7 @@ async fn wal_durable_compaction_preserves_unchanged_committed_chunks() {
             .expect("read preserved chunk"),
         b"keep",
     );
-    let rewritten = snapshot.chunk(ChunkIndex::new(1)).expect("chunk one");
+    let rewritten = load_cow_chunk(&catalog, root, 1).await.expect("chunk one");
     assert_eq!(
         blob_store
             .get_blob(rewritten.blob_key(), 4, 4)
@@ -654,9 +645,9 @@ async fn wal_durable_write_pressure_compacts_when_debt_reaches_threshold() {
     assert_eq!(engine.wal_debt_bytes().await, 4);
     assert_eq!(
         catalog
-            .load_cow_tree(created.id())
+            .load_export_head(created.id())
             .await
-            .expect("load pre-threshold tree")
+            .expect("load pre-threshold head")
             .base_wal_seq(),
         WalSeq::zero(),
     );
@@ -674,12 +665,12 @@ async fn wal_durable_write_pressure_compacts_when_debt_reaches_threshold() {
         ExportReply::Done,
     );
 
-    let snapshot = catalog
-        .load_cow_tree(created.id())
+    let compacted_head = catalog
+        .load_export_head(created.id())
         .await
-        .expect("load compacted tree");
-    assert!(snapshot.root_node_id().is_some());
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::new(2));
+        .expect("load compacted head");
+    assert!(compacted_head.root_node_id().is_some());
+    assert_eq!(compacted_head.base_wal_seq(), WalSeq::new(2));
     assert_eq!(engine.wal_debt_bytes().await, 0);
     assert_eq!(
         wal.bounds().await.expect("WAL bounds").pruned_through,
@@ -726,12 +717,12 @@ async fn wal_durable_write_pressure_failure_preserves_successful_write() {
     );
     failing_store.wait_for_attempt().await;
 
-    let snapshot = catalog
-        .load_cow_tree(created.id())
+    let head = catalog
+        .load_export_head(created.id())
         .await
-        .expect("load tree after failed compaction");
-    assert_eq!(snapshot.base_wal_seq(), WalSeq::zero());
-    assert!(snapshot.root_node_id().is_none());
+        .expect("load head after failed compaction");
+    assert_eq!(head.base_wal_seq(), WalSeq::zero());
+    assert!(head.root_node_id().is_none());
     assert_eq!(engine.wal_debt_bytes().await, 5);
     assert_eq!(
         execute_request(&export_runtime, ExportRequest::Read { offset: 0, len: 5 })
@@ -963,6 +954,113 @@ async fn wal_durable_cow_runtime(
     (created, wal, engine, export_runtime)
 }
 
+async fn publish_cow_root(
+    catalog: &SQLiteExportCatalog,
+    export: &ExportRecord,
+    checkpoint: u64,
+    chunks: Vec<CowChunkRef>,
+) -> ExportRecord {
+    let root = NodeId::new(format!("{}-root-{checkpoint}", export.id())).expect("root node");
+    let mut nodes = vec![TreeNodeRecord {
+        id: root.clone(),
+        layout_kind: ExportLayoutKind::CowImmutableTree,
+        owner_export_id: None,
+        kind: TreeNodeKind::Internal,
+        level: 1,
+        span_start_bytes: 0,
+        span_len_bytes: export.size_bytes(),
+    }];
+    let mut edges = Vec::new();
+    let mut leaf_refs = Vec::new();
+    for chunk in chunks {
+        let chunk_start = chunk.chunk_index().get() * TREE_CHUNK_BYTES;
+        let slot = u16::try_from(chunk.chunk_index().get()).expect("test chunk slot");
+        let leaf = NodeId::new(format!(
+            "{}-leaf-{checkpoint}-{}",
+            export.id(),
+            chunk.chunk_index()
+        ))
+        .expect("leaf node");
+        nodes.push(TreeNodeRecord {
+            id: leaf.clone(),
+            layout_kind: ExportLayoutKind::CowImmutableTree,
+            owner_export_id: None,
+            kind: TreeNodeKind::Leaf,
+            level: 0,
+            span_start_bytes: chunk_start,
+            span_len_bytes: TREE_CHUNK_BYTES.min(export.size_bytes() - chunk_start),
+        });
+        edges.push(TreeEdgeRecord {
+            parent_node_id: root.clone(),
+            slot,
+            child_node_id: leaf.clone(),
+        });
+        leaf_refs.push(TreeLeafRefRecord {
+            node_id: leaf,
+            storage_kind: TreeStorageKind::ImmutableBlob,
+            storage_key: chunk.blob_key().clone(),
+            len_bytes: chunk.len_bytes(),
+        });
+    }
+    let next_head = ExportHead::new_with_tree_format(
+        ExportLayoutKind::CowImmutableTree,
+        Some(root),
+        export.size_bytes(),
+        WalSeq::new(checkpoint),
+        export.head().tree_format(),
+    )
+    .expect("next head");
+    let outcome = catalog
+        .publish_tree_update(PublishTreeUpdate {
+            export_id: export.id().clone(),
+            expected_head: export.head().clone(),
+            next_head,
+            records: TreeRecordBatch {
+                nodes,
+                edges,
+                leaf_refs,
+            },
+        })
+        .await
+        .expect("publish COW root");
+    match outcome {
+        PublishTreeUpdateOutcome::Published(record) => record,
+        outcome => panic!("expected COW root publish, got {outcome:?}"),
+    }
+}
+
+async fn load_cow_chunk(
+    catalog: &SQLiteExportCatalog,
+    root: &NodeId,
+    slot: u64,
+) -> Option<CowChunkRef> {
+    let slot = u16::try_from(slot).expect("test chunk slot");
+    let edge = catalog
+        .load_child_edges(&[TreeEdgeLookup {
+            parent_node_id: root.clone(),
+            slots: vec![slot],
+        }])
+        .await
+        .expect("load child edge")
+        .into_iter()
+        .next()?;
+    let leaf_ref = catalog
+        .load_leaf_refs(&[edge.child_node_id])
+        .await
+        .expect("load leaf ref")
+        .into_iter()
+        .next()?;
+    assert_eq!(leaf_ref.storage_kind, TreeStorageKind::ImmutableBlob);
+    Some(
+        CowChunkRef::new(
+            ChunkIndex::new(u64::from(slot)),
+            leaf_ref.storage_key,
+            leaf_ref.len_bytes,
+        )
+        .expect("cow chunk"),
+    )
+}
+
 async fn execute_request(
     export_runtime: &ConcurrentExportRuntime,
     request: ExportRequest,
@@ -1182,6 +1280,7 @@ impl TreeRecordStore for BlockingTreeRecordStore {
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
+    fs::File::create(url.sqlite_path().expect("sqlite path")).expect("create catalog file");
     let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
         .await
         .expect("connect catalog");

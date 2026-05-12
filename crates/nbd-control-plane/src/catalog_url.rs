@@ -51,6 +51,15 @@ impl CatalogUrl {
     }
 }
 
+impl CatalogProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+        }
+    }
+}
+
 impl FromStr for CatalogUrl {
     type Err = CatalogError;
 

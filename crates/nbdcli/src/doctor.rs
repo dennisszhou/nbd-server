@@ -1,5 +1,5 @@
 use nbd_config::{ConfigFile, NbdConfig};
-use nbd_control_plane::{CatalogProvider, CatalogUrl, ListExports, open_catalog};
+use nbd_control_plane::{CatalogDoctorCheck, CatalogDoctorStatus, CatalogUrl, doctor_catalog};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -60,6 +60,14 @@ impl DoctorStatus {
             Self::Failed => "failed",
         }
     }
+
+    fn from_catalog(status: CatalogDoctorStatus) -> Self {
+        match status {
+            CatalogDoctorStatus::Ok => Self::Ok,
+            CatalogDoctorStatus::Warning => Self::Warning,
+            CatalogDoctorStatus::Failed => Self::Failed,
+        }
+    }
 }
 
 impl DoctorCheck {
@@ -82,6 +90,15 @@ impl DoctorCheck {
             status: DoctorStatus::Failed,
             detail: Some(detail.into()),
             remediation: Some(remediation.into()),
+        }
+    }
+
+    fn from_catalog(check: CatalogDoctorCheck) -> Self {
+        Self {
+            name: check.name(),
+            status: DoctorStatus::from_catalog(check.status()),
+            detail: check.detail().map(ToOwned::to_owned),
+            remediation: check.remediation().map(ToOwned::to_owned),
         }
     }
 
@@ -161,17 +178,7 @@ fn check_catalog_url(config: &NbdConfig, checks: &mut Vec<DoctorCheck>) -> Optio
     match CatalogUrl::parse(&config.catalog.url) {
         Ok(url) => {
             checks.push(DoctorCheck::ok("catalog_url", url.as_str().to_owned()));
-            if url.provider() == CatalogProvider::Sqlite {
-                checks.push(DoctorCheck::ok("catalog_provider", "sqlite"));
-                Some(url)
-            } else {
-                checks.push(DoctorCheck::failed(
-                    "catalog_provider",
-                    format!("{:?}", url.provider()),
-                    "use a file: SQLite catalog URL; Postgres is not implemented",
-                ));
-                None
-            }
+            Some(url)
         }
         Err(error) => {
             checks.push(DoctorCheck::failed(
@@ -185,45 +192,10 @@ fn check_catalog_url(config: &NbdConfig, checks: &mut Vec<DoctorCheck>) -> Optio
 }
 
 async fn check_catalog(url: &CatalogUrl, checks: &mut Vec<DoctorCheck>) {
-    let Ok(path) = url.sqlite_path() else {
-        return;
-    };
-
-    if !path.exists() {
-        checks.push(DoctorCheck::failed(
-            "catalog_file",
-            format!("{} is missing", path.display()),
-            "create and migrate the SQLite catalog",
-        ));
-        return;
-    }
-    if !path.is_file() {
-        checks.push(DoctorCheck::failed(
-            "catalog_file",
-            format!("{} is not a regular file", path.display()),
-            "set catalog.url to a SQLite database file",
-        ));
-        return;
-    }
-    checks.push(DoctorCheck::ok("catalog_file", path.display().to_string()));
-
-    match open_catalog(url).await {
-        Ok(handle) => match handle
-            .export_catalog()
-            .list_exports(ListExports::new(false))
+    checks.extend(
+        doctor_catalog(url)
             .await
-        {
-            Ok(_) => checks.push(DoctorCheck::ok("catalog_schema", "ready")),
-            Err(error) => checks.push(DoctorCheck::failed(
-                "catalog_schema",
-                error.to_string(),
-                "apply the catalog migrations",
-            )),
-        },
-        Err(error) => checks.push(DoctorCheck::failed(
-            "catalog_open",
-            error.to_string(),
-            "check catalog.url and SQLite file permissions",
-        )),
-    }
+            .into_iter()
+            .map(DoctorCheck::from_catalog),
+    );
 }

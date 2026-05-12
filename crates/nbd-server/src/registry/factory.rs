@@ -8,8 +8,8 @@ use crate::storage::{BlobStoreHandle, ConfiguredBlobStore};
 use crate::wal::{ExportWalHandle, OpenWal, WalDomain, WalProvider};
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
-    ActiveExportDescriptor, CowTreeMetadataStore, ExportCatalog, ExportEngineKind, ExportId,
-    ExportRecord, TreeRecordStore,
+    ActiveExportDescriptor, ExportCatalog, ExportEngineKind, ExportId, ExportRecord,
+    TreeRecordStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -34,7 +34,6 @@ impl ExportFactory {
         blob_store: ConfiguredBlobStore,
         catalog: Arc<dyn ExportCatalog>,
         tree_record_store: Arc<dyn TreeRecordStore>,
-        _cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
     ) -> Self {
         Self {

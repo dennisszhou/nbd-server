@@ -1,43 +1,49 @@
 Title: Export Catalog Architecture
-Date: 2026-05-01
-Status: draft
+Date: 2026-05-12
+Status: approved
 
 # Problem
 
 The system needs a durable metadata source for export lifecycle, current
-serving heads, WAL checkpoints, simple mutable tree metadata, and future
-immutable COW tree metadata. This metadata is shared by
-`ExportLifecycleManager`, `LocalExportRegistry`, `CommittedTreeReader`,
-`SimpleMutableTree`, and `CompactionManager`.
+serving heads, tree metadata, and WAL checkpoints. That metadata is consumed by
+operator commands, `LocalExportRegistry`, simple durable storage, and WAL
+durable compaction.
 
-The API should avoid long parameter lists. Callers should pass structured
-requests and receive structured records.
+The public catalog API must hide the backing database. Production callers use
+the `nbd-control-plane` facade and storage-neutral traits; concrete SQLite
+details stay inside `nbd-control-plane-sqlite` so a future PostgreSQL adapter
+can implement the same contracts.
+
+# Ownership
+
+`nbd-control-plane` is the public facade. It parses `CatalogUrl`, exposes
+`open_catalog` and `doctor_catalog`, re-exports storage-neutral API types, and
+chooses a concrete adapter.
+
+`nbd-control-plane-core` owns storage-neutral domain values, request and
+response structs, service traits, diagnostic records, and catalog errors. It
+must not depend on `sqlx`, SQLite, PostgreSQL, migration SQL, table-specific
+row structs, or runtime tree geometry.
+
+`nbd-control-plane-sqlite` owns SQLite connection handling, SQL statements, row
+mapping, transaction boundaries, SQLite diagnostics, schema assumptions, and
+SQLite integration tests.
+
+`nbd-server` owns runtime behavior: export admission, engine execution, tree
+geometry derived from stored `TreeFormat` ids, lazy tree traversal, simple
+mutable writes, WAL read views, COW compaction planning, and blob/WAL I/O.
+Server production source must not import concrete catalog adapters, `sqlx`,
+catalog table names, or adapter row types.
 
 # Terminology
 
 The NBD protocol calls a named network block device an export. The
 architecture keeps `Export`, `ExportCatalog`, and the `exports` table for that
-protocol-aligned concept. In product language, an export is the durable network
-block device that clients mount by name.
+protocol-aligned concept.
 
 `exports` owns stable identity and lifecycle. `export_heads` owns the current
 serving view for each export. There is no separate export generation table in
 the active catalog model.
-
-# Goal
-
-Define `ExportCatalog` as the durable metadata API for:
-
-- creating exports;
-- cloning exports from the latest committed checkpoint;
-- loading exports for NBD open;
-- listing and inspecting exports;
-- marking exports deleted when lifecycle orchestration has acquired the
-  per-export lease;
-- storing the current export head;
-- inserting simple mutable tree metadata for `SimpleDurableEngine`;
-- inserting immutable tree metadata for WAL/COW compaction;
-- publishing root/checkpoint updates by advancing `export_heads`.
 
 # Catalog-Owned State
 
@@ -58,8 +64,9 @@ export_heads
   export_id primary key
   layout_kind
   root_node_id
-  base_wal_seq
+  tree_format
   size_bytes
+  base_wal_seq
   updated_at
 
 tree_nodes
@@ -86,11 +93,11 @@ tree_leaf_refs
 ```
 
 `root_node_id = null` on `export_heads` represents an all-zero current tree.
-This avoids creating malformed empty internal nodes.
+`tree_format = null` is valid only for `memory_empty` heads. Tree-backed heads
+must carry a stored `TreeFormat`, currently `bounded_32_v1`.
 
-`export_heads` is the serving source of truth. Normal `simple_mutable_tree`
-writes do not append root history, and future COW checkpoint publication
-should advance the current head rather than reintroducing a generation table.
+`export_heads` is the serving source of truth. Simple mutable writes and WAL
+compaction advance the current head rather than appending generation rows.
 
 The catalog stores one-component blob references. Blob bytes live behind the
 configured `BlobStore`, which resolves those ids to local files or S3 objects
@@ -101,29 +108,8 @@ from process config.
 Use explicit structs at API boundaries.
 
 ```rust
-struct ExportDescriptor {
-    id: ExportId,
-    name: ExportName,
-    block_size: u64,
-    engine_kind: ExportEngineKind,
-    state: ExportState,
-    created_at: Timestamp,
-    updated_at: Timestamp,
-    deleted_at: Option<Timestamp>,
-}
-
-struct ActiveExportDescriptor(ExportDescriptor);
-
-struct ExportRecord {
-    id: ExportId,
-    name: ExportName,
-    block_size: u64,
-    engine_kind: ExportEngineKind,
-    state: ExportState,
-    head: ExportHead,
-    created_at: Timestamp,
-    updated_at: Timestamp,
-    deleted_at: Option<Timestamp>,
+enum TreeFormat {
+    Bounded32V1,
 }
 
 enum ExportHead {
@@ -139,150 +125,118 @@ struct MemoryExportHead {
 struct SimpleMutableTreeHead {
     size_bytes: u64,
     root_node_id: Option<NodeId>,
+    tree_format: TreeFormat,
 }
 
 struct CowImmutableTreeHead {
     size_bytes: u64,
     root_node_id: Option<NodeId>,
     base_wal_seq: WalSeq,
-}
-
-enum ExportLayoutKind {
-    MemoryEmpty,
-    SimpleMutableTree,
-    CowImmutableTree,
-}
-
-enum ExportState {
-    Active,
-    Deleted,
+    tree_format: TreeFormat,
 }
 ```
-
-`ExportDescriptor` is exports-only row metadata. It must not carry
-`export_heads` root or checkpoint state.
-
-`ActiveExportDescriptor` is the serving/open capability. It wraps an active
-descriptor after the catalog has rejected deleted exports. Durable engines load
-their current head/tree snapshot separately so compaction can advance
-`export_heads` without invalidating an open already holding a descriptor.
-
-`ExportRecord` remains the operator-facing joined view used by create, inspect,
-list, and publication outcomes.
 
 `ExportHead` is typed by layout so memory heads cannot carry root nodes or WAL
 state, simple mutable heads cannot carry WAL state, and COW immutable heads
-carry the committed `base_wal_seq`.
+carry the committed `base_wal_seq`. Tree-backed heads carry `tree_format`
+because tree shape is durable state, not an adapter default.
 
-Lifecycle request structs:
-
-```rust
-struct CreateExport {
-    name: ExportName,
-    size_bytes: u64,
-    block_size: u64,
-    engine_kind: ExportEngineKind,
-}
-
-struct CloneExport {
-    source: ExportName,
-    destination: ExportName,
-}
-
-struct CloneExportResult {
-    source: ExportRecord,
-    destination: ExportRecord,
-}
-
-struct DeleteExport {
-    name: ExportName,
-}
-```
-
-Tree publication structs:
+Tree record structs are storage-neutral rows. They describe what should be
+persisted, not how to traverse or update the tree.
 
 ```rust
-struct SimpleChunkRef {
-    chunk_index: ChunkIndex,
-    blob_key: BlobKey,
-    len_bytes: u64,
-}
-
 struct TreeNodeRecord {
     id: NodeId,
     layout_kind: ExportLayoutKind,
-    kind: NodeKind,
-    level: u8,
+    owner_export_id: Option<ExportId>,
+    kind: TreeNodeKind,
+    level: u16,
     span_start_bytes: u64,
     span_len_bytes: u64,
-    blob_key: Option<BlobKey>,
 }
 
 struct TreeEdgeRecord {
     parent_node_id: NodeId,
-    slot: u8,
+    slot: u16,
     child_node_id: NodeId,
 }
 
-struct TreeBatch {
+struct TreeLeafRefRecord {
+    node_id: NodeId,
+    storage_kind: TreeStorageKind,
+    storage_key: BlobKey,
+    len_bytes: u64,
+}
+
+struct TreeRecordBatch {
     nodes: Vec<TreeNodeRecord>,
     edges: Vec<TreeEdgeRecord>,
-}
-
-struct PublishCompaction {
-    export_id: ExportId,
-    expected_base: ExportHead,
-    tree_batch: TreeBatch,
-    new_root_node_id: Option<NodeId>,
-    compacted_through: WalSeq,
-}
-
-enum PublishCompactionOutcome {
-    Published(ExportRecord),
-    AlreadyCovered(ExportRecord),
-    StalePlan(ExportRecord),
+    leaf_refs: Vec<TreeLeafRefRecord>,
 }
 ```
 
 # API Shape
 
-Conceptual API:
+The facade opens storage-neutral service handles:
+
+```rust
+async fn open_catalog(url: &CatalogUrl) -> Result<CatalogHandle>;
+async fn doctor_catalog(url: &CatalogUrl) -> Vec<CatalogDoctorCheck>;
+
+struct CatalogHandle {
+    export_catalog: Arc<dyn ExportCatalog>,
+    tree_record_store: Arc<dyn TreeRecordStore>,
+}
+```
+
+`ExportCatalog` owns export lifecycle and current-head reads:
 
 ```rust
 trait ExportCatalog {
     async fn create_export(&self, request: CreateExport)
         -> Result<ExportRecord>;
-
     async fn clone_export(&self, request: CloneExport)
         -> Result<CloneExportResult>;
-
     async fn delete_export(&self, request: DeleteExport)
         -> Result<()>;
-
     async fn load_export(&self, name: ExportName)
         -> Result<ExportRecord>;
-
     async fn load_export_descriptor(&self, name: ExportName)
         -> Result<ActiveExportDescriptor>;
-
     async fn load_export_head(&self, export_id: &ExportId)
         -> Result<ExportHead>;
-
-    async fn list_exports(&self, filter: ExportListFilter)
+    async fn inspect_export(&self, request: InspectExport)
+        -> Result<ExportRecord>;
+    async fn list_exports(&self, request: ListExports)
         -> Result<Vec<ExportRecord>>;
-
-    async fn publish_compaction(&self, update: PublishCompaction)
-        -> Result<PublishCompactionOutcome>;
 }
 ```
 
-The simple durable request path should use a narrower metadata boundary, such
-as `SimpleTreeMetadataStore`, so only `SimpleMutableTree` mutates simple tree
-rows on behalf of the engine.
+`TreeRecordStore` owns bounded row reads and atomic publication:
+
+```rust
+trait TreeRecordStore {
+    async fn load_node(&self, node_id: &NodeId)
+        -> Result<Option<TreeNodeRecord>>;
+    async fn load_nodes(&self, node_ids: &[NodeId])
+        -> Result<Vec<TreeNodeRecord>>;
+    async fn load_child_edges(&self, lookups: &[TreeEdgeLookup])
+        -> Result<Vec<TreeEdgeRecord>>;
+    async fn load_leaf_refs(&self, node_ids: &[NodeId])
+        -> Result<Vec<TreeLeafRefRecord>>;
+    async fn publish_tree_update(&self, request: PublishTreeUpdate)
+        -> Result<PublishTreeUpdateOutcome>;
+}
+```
+
+The adapter reads only bounded sets of rows requested by the caller. It does
+not expose "load all descendants", "load whole tree", or "expand this format"
+operations. Server tree code decides which paths to traverse, which records to
+create, and which head to publish.
 
 # Create Export
 
-Create initializes a new export with a current head and empty WAL checkpoint:
+Create initializes a new export and current head in one catalog transaction:
 
 ```text
 insert exports row:
@@ -293,157 +247,109 @@ insert exports row:
 insert export_heads row:
   layout_kind = layout implied by engine_kind
   root_node_id = null
+  tree_format = null for memory_empty
+  tree_format = bounded_32_v1 for tree-backed layouts
   base_wal_seq = 0
   size_bytes = requested size
 ```
 
-`root_node_id = null` means the current tree is all zeroes.
-
 `memory` creates `layout_kind = memory_empty`. `simple_durable` creates
-`layout_kind = simple_mutable_tree`.
+`layout_kind = simple_mutable_tree`. `wal_durable` creates
+`layout_kind = cow_immutable_tree`.
 
 # Clone Export
 
 Clone is a `cow_immutable_tree` operation. It copies the source export's latest
-committed COW root. It does not include the source export's uncheckpointed WAL.
+committed COW root and tree format. It does not include the source export's
+uncheckpointed WAL.
 
 Clone requires the source head to have a non-null `root_node_id`. A null root
-is the all-zero committed tree, so clone should reject it with an operator
-error that the source snapshot is empty rather than silently creating another
-empty export.
+is the all-zero committed tree, so clone rejects it with an operator error
+instead of silently creating another empty export.
 
-```text
-source = load active source export
-verify source.root_node_id is not null
-insert destination exports row
-insert destination export_heads row:
-  layout_kind = cow_immutable_tree
-  root_node_id = source.root_node_id
-  base_wal_seq = 0
-```
+# Tree Publication
 
-The destination has a new export identity and its own WAL. Future writes to the
-destination replay from its own WAL on top of the shared committed root.
-
-# Delete Export
-
-`ExportCatalog.delete_export` marks catalog state deleted. It does not inspect
-etcd leases by itself.
-
-The current local prototype lets `nbdcli delete` call this catalog primitive
-directly because the lease/lifecycle layer is not implemented yet. That is a
-prototype shortcut. The target delete path goes through
-`ExportLifecycleManager` before calling the catalog.
-
-Delete flow:
-
-```text
-ExportLifecycleManager acquires the per-export delete lease
-  -> if lease acquisition fails, return ExportBusy
-  -> ExportCatalog marks state = deleted
-  -> ExportLifecycleManager releases the delete lease
-```
-
-This keeps the catalog as a metadata primitive. Open/delete race prevention
-belongs to `ExportLifecycleManager`, which composes the catalog with
-`ExportLeaseStore`.
-
-Physical deletion of tree nodes, blobs, and WAL records belongs to future GC.
-Delete never immediately removes committed data because future COW exports may
-share the same immutable nodes and blobs, and simple durable may leave orphan
-mutable blobs after file-first failures.
-
-# Root And Checkpoint Publication
-
-`publish_compaction` is a WAL/COW operation. It is called after compaction has
-written any new blobs. It inserts immutable tree metadata and
-advances the current head in one transaction so the catalog never exposes a
-partially published tree. Publication must preserve the size from the head it
-compacted unless compaction explicitly observes and incorporates a newer resize
-head.
-
-Publication advances the current head in a single catalog transaction:
+`publish_tree_update` is the catalog transaction boundary for both simple
+mutable tree commits and WAL/COW compaction. It inserts new tree records and
+advances `export_heads` with an expected prior head in one transaction.
 
 ```text
 begin transaction
-  load latest export row
-  load current export_heads row
+  load latest export row and head
   verify state = active
-  if current.base_wal_seq >= compacted_through:
-    return AlreadyCovered
-  if current root/checkpoint/size/layout != expected_base:
-    return StalePlan
-  insert tree metadata batch
-  update export_heads:
-    root_node_id = new_root_node_id
-    base_wal_seq = compacted_through
-    size_bytes = current.size_bytes
+  if current head != expected_head:
+    rollback and return StaleHead(current)
+  insert tree node, edge, and leaf-ref records
+  update export_heads where current columns still match expected_head
+  if no head row was updated:
+    rollback and return StaleHead(current)
+  update exports.updated_at
 commit
 ```
 
-`AlreadyCovered` is a successful no-op for duplicate or slower compaction jobs.
-`StalePlan` tells the caller to discard unpublished output and replan from the
-current database head if the original target is still useful. This keeps racing
-compaction attempts idempotent without adding a separate generation table.
+If a publish sees a stale head, none of that request's new tree rows become
+reachable from a published head. Already-written blob files may remain as
+future-GC garbage, but a failed or racing publication must not expose partial
+tree metadata through the catalog head.
 
-Callers should not insert immutable compaction tree metadata separately from
-head publication. A failed or racing publication may leave already-written
-blob files as future-GC garbage, but it must not expose partial tree metadata
-through the catalog head.
+# Server Tree Ownership
 
-Future resize should update the current head with the new `size_bytes` and may
-need its own fencing against checkpoint publication.
-If resize and compaction can run concurrently, checkpoint publication must avoid
-publishing a head update that rolls the size backward. That conflict policy
-needs a dedicated resize design before online resize is implemented.
+Tree format ids are catalog state. Runtime geometry and algorithms are server
+behavior.
 
-# Close-Time Compaction
+Current owners:
 
-Close-time compaction is an intended feature. When an export mount closes
-cleanly, the server should enqueue background compaction for that export as
-part of the close workflow.
+- `crates/nbd-server/src/engines/tree/geometry.rs` interprets stored
+  `TreeFormat` ids as runtime fanout, levels, spans, and paths.
+- `crates/nbd-server/src/engines/tree/read.rs` loads metadata lazily for the
+  requested paths and treats missing paths as zero-filled data.
+- `crates/nbd-server/src/engines/simple_durable/mutable_tree.rs` owns simple
+  mutable tree commits and cache refresh.
+- `crates/nbd-server/src/engines/wal_durable/compaction.rs` owns COW path-copy,
+  unchanged-subtree reuse, changed-chunk selection, and checkpoint publication.
 
-Close-time compaction goal:
+# Doctor
 
-- reduce WAL replay work for the next open;
-- move recent writes into the committed copy-on-write tree;
-- advance `base_wal_seq` when compaction succeeds.
+`doctor_catalog` is the facade entry point for catalog diagnostics. Binaries
+parse their config and translate `CatalogDoctorCheck` records into their local
+report format.
 
-Close does not wait for compaction to finish. If close-time compaction fails,
-the export can stay closed as long as acknowledged writes remain durable in the
-WAL. Startup recovery will replay records after the last catalog checkpoint.
-
-This makes close-time compaction an operational quality feature, not part of
-the write durability contract.
+SQLite diagnostics live in `nbd-control-plane-sqlite`: the adapter checks that
+the catalog file exists, that it is a regular file, that it can be opened, and
+that the expected schema can answer a lightweight catalog query. SQLite opening
+uses `create_if_missing(false)` because Prisma migrations own database
+creation and schema setup.
 
 # Invariants
 
-- `ExportCatalog` is the durable metadata source.
-- API calls use structured request/response types.
 - `exports` owns stable identity and lifecycle.
-- `export_heads` owns the current serving layout, root, size, and checkpoint.
+- `export_heads` owns the current serving layout, root, size, tree format, and
+  checkpoint.
 - Every export has exactly one current head.
 - New exports create the current head transactionally with the export row.
-- `simple_mutable_tree` writes update simple tree metadata through
-  `SimpleMutableTree`, not by appending generations.
-- Cloned COW exports create their own head and checkpoint zero.
-- Clone copies the latest non-empty committed root only.
-- Clone rejects a source with `root_node_id = null` as an empty committed
-  snapshot.
-- Clone does not include source uncheckpointed WAL records.
+- Tree-backed heads carry a stored `TreeFormat`.
 - `root_node_id = null` means an all-zero current tree.
-- Root/checkpoint publication advances the current head.
-- `publish_compaction` inserts immutable tree metadata and advances the current
-  head transactionally.
-- `base_wal_seq` advances monotonically.
-- Clean export close enqueues background close-time compaction.
-- Delete race prevention belongs to `ExportLifecycleManager`.
-- Delete is logical; physical cleanup belongs to GC.
-- The catalog stores blob references, not blob bytes.
+- Tree metadata is loaded on demand by path or bounded lookup lists.
+- The adapter does not infer fanout, expand subtrees, or choose sparse tree
+  update plans.
+- `simple_mutable_tree` records are export-private and may reference mutable
+  blobs.
+- `cow_immutable_tree` records are immutable after publication and may be
+  shared by cloned exports.
+- Tree record insertion and head publication are atomic with respect to the
+  expected prior head.
+- Clone copies the latest non-empty committed COW root and source tree format.
+- Clone does not include source uncheckpointed WAL records.
+- Delete race prevention belongs to future lifecycle orchestration.
+- Delete is logical; physical cleanup belongs to future GC.
 - Blob bytes live behind the configured `BlobStore`.
+- Production server and CLI source do not import concrete catalog adapters,
+  `sqlx`, adapter row types, or catalog table names.
 
 # Open Questions
 
-- Whether the first catalog implementation should use SQLite or structured
-  files.
-- Exact catalog error type for stale or no-op checkpoint publication attempts.
+- PostgreSQL adapter implementation and migrations.
+- Tree garbage collection for unreachable rows and blobs.
+- Historical checkpoint browsing.
+- Cross-format clone, once more than one tree format exists.
+- Lifecycle lease integration for open/delete race prevention.

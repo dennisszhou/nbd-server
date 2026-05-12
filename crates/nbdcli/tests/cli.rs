@@ -1,8 +1,11 @@
 use nbd_config::{ConfigFile, default_config_path_for_home};
 use nbd_control_plane::{
-    BlobKey, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
-    InspectExport, PublishCompaction, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
+    BlobKey, ChunkIndex, CowChunkRef, ExportCatalog, ExportHead, ExportLayoutKind, ExportName,
+    InspectExport, NodeId, PublishTreeUpdate, PublishTreeUpdateOutcome, TREE_CHUNK_BYTES,
+    TreeEdgeRecord, TreeLeafRefRecord, TreeNodeKind, TreeNodeRecord, TreeRecordBatch,
+    TreeRecordStore, TreeStorageKind, WalSeq,
 };
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::env;
@@ -369,7 +372,7 @@ fn cli_doctor_rejects_unmigrated_catalog() {
         config.to_toml_string().expect("serialize config"),
     )
     .expect("write config");
-    fs::File::create(&catalog_path).expect("create unmigrated catalog file");
+    fs::File::create(&catalog_path).expect("create catalog file");
 
     let output = Command::new(env!("CARGO_BIN_EXE_nbdcli"))
         .arg("--config")
@@ -386,6 +389,7 @@ fn cli_doctor_rejects_unmigrated_catalog() {
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {
+    fs::File::create(runtime.catalog_path()).expect("create catalog file");
     let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");
@@ -406,19 +410,62 @@ async fn publish_cow_root(runtime: &TestRuntime, name: &str, checkpoint: u64) ->
         .inspect_export(InspectExport::new(export_name(name)))
         .await
         .expect("inspect source export");
-    let published = catalog
-        .publish_compaction(
-            PublishCompaction::new(
-                export.id().clone(),
-                export.head().clone(),
-                WalSeq::new(checkpoint),
-                vec![cow_chunk(0, "source-root")],
-            )
-            .expect("publish request"),
-        )
+    let root = NodeId::new(format!("{}-root-{checkpoint}", export.id())).expect("root node");
+    let leaf = NodeId::new(format!("{}-leaf-{checkpoint}", export.id())).expect("leaf node");
+    let chunk = cow_chunk(0, "source-root");
+    let next_head = ExportHead::new_with_tree_format(
+        ExportLayoutKind::CowImmutableTree,
+        Some(root.clone()),
+        export.size_bytes(),
+        WalSeq::new(checkpoint),
+        export.head().tree_format(),
+    )
+    .expect("next head");
+    let outcome = catalog
+        .publish_tree_update(PublishTreeUpdate {
+            export_id: export.id().clone(),
+            expected_head: export.head().clone(),
+            next_head,
+            records: TreeRecordBatch {
+                nodes: vec![
+                    TreeNodeRecord {
+                        id: root.clone(),
+                        layout_kind: ExportLayoutKind::CowImmutableTree,
+                        owner_export_id: None,
+                        kind: TreeNodeKind::Internal,
+                        level: 1,
+                        span_start_bytes: 0,
+                        span_len_bytes: export.size_bytes(),
+                    },
+                    TreeNodeRecord {
+                        id: leaf.clone(),
+                        layout_kind: ExportLayoutKind::CowImmutableTree,
+                        owner_export_id: None,
+                        kind: TreeNodeKind::Leaf,
+                        level: 0,
+                        span_start_bytes: 0,
+                        span_len_bytes: TREE_CHUNK_BYTES.min(export.size_bytes()),
+                    },
+                ],
+                edges: vec![TreeEdgeRecord {
+                    parent_node_id: root.clone(),
+                    slot: 0,
+                    child_node_id: leaf.clone(),
+                }],
+                leaf_refs: vec![TreeLeafRefRecord {
+                    node_id: leaf,
+                    storage_kind: TreeStorageKind::ImmutableBlob,
+                    storage_key: chunk.blob_key().clone(),
+                    len_bytes: chunk.len_bytes(),
+                }],
+            },
+        })
         .await
-        .expect("publish source root")
-        .into_record();
+        .expect("publish source root");
+    let published = match outcome {
+        PublishTreeUpdateOutcome::Published(record) => record,
+        outcome => panic!("expected published root, got {outcome:?}"),
+    };
 
     Value::String(
         published

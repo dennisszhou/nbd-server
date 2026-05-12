@@ -404,7 +404,7 @@ impl CompactionCoordinator {
         blob_store: BlobStoreHandle,
         read_view: Arc<ExportReadView>,
     ) -> Self {
-        let compactor = CowCompactor::new_lazy(tree_store, blob_store);
+        let compactor = CowCompactor::new(tree_store, blob_store);
         Self {
             export_id,
             export_name,
@@ -587,7 +587,6 @@ impl CompactionCoordinator {
                     .await?;
                 self.prune_published_wal(prune_through).await;
             }
-            CompactionOutcome::AlreadyCovered => {}
             CompactionOutcome::StalePlan | CompactionOutcome::NoRecords => {}
         }
         Ok(())
@@ -744,19 +743,18 @@ mod tests {
     use crate::storage::LocalBlobStore;
     use crate::wal::{LocalWalProvider, OpenWal, WalDomain, WalProvider};
     use nbd_control_plane::{
-        CatalogUrl, CreateExport, ExportCatalog, ExportEngineKind, ExportName, PublishTreeUpdate,
-        PublishTreeUpdateOutcome, SQLiteExportCatalog, TREE_CHUNK_BYTES, TreeEdgeLookup,
-        TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord,
+        ActiveExportDescriptor, CatalogError, CloneExport, CloneExportResult, CreateExport,
+        DeleteExport, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportId, ExportName,
+        ExportRecord, ExportState, InspectExport, ListExports, PublishTreeUpdate,
+        PublishTreeUpdateOutcome, TREE_CHUNK_BYTES, Timestamp, TreeEdgeLookup, TreeEdgeRecord,
+        TreeLeafRefRecord, TreeNodeRecord,
     };
     use nbd_test_support::TestRuntime;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
     use tokio::time::timeout;
-
-    const MIGRATIONS: &[&str] = &[
-        include_str!("../../../../../prisma/migrations/20260506000000_baseline/migration.sql"),
-        include_str!("../../../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
-    ];
 
     #[tokio::test]
     async fn background_tick_skips_below_soft_threshold() {
@@ -868,7 +866,7 @@ mod tests {
 
     struct BackgroundTickFixture {
         _runtime: TestRuntime,
-        catalog: SQLiteExportCatalog,
+        catalog: TestCatalog,
         export_id: ExportId,
         engine: Arc<WalDurableEngine>,
     }
@@ -912,7 +910,7 @@ mod tests {
 
         async fn new_with_store(
             runtime: TestRuntime,
-            catalog: SQLiteExportCatalog,
+            catalog: TestCatalog,
             name: &str,
             policy: CompactionPolicy,
             interval: Duration,
@@ -966,15 +964,249 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct TestCatalog {
+        state: Arc<Mutex<TestCatalogState>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct TestCatalogState {
+        exports: HashMap<ExportId, ExportRecord>,
+        names: HashMap<String, ExportId>,
+        nodes: HashMap<NodeId, TreeNodeRecord>,
+        edges: HashMap<(NodeId, u16), TreeEdgeRecord>,
+        leaf_refs: HashMap<NodeId, TreeLeafRefRecord>,
+    }
+
+    #[async_trait::async_trait]
+    impl ExportCatalog for TestCatalog {
+        async fn create_export(
+            &self,
+            request: CreateExport,
+        ) -> nbd_control_plane::Result<ExportRecord> {
+            let mut state = self.state.lock().expect("test catalog lock");
+            if state.names.contains_key(request.name().as_str()) {
+                return Err(CatalogError::ExportAlreadyExists {
+                    name: request.name().clone(),
+                });
+            }
+            let export_id =
+                ExportId::new(format!("{}-id", request.name().as_str())).expect("export id");
+            let head = match request.engine_kind() {
+                ExportEngineKind::Memory => ExportHead::memory_empty(request.size_bytes())?,
+                ExportEngineKind::SimpleDurable => {
+                    ExportHead::simple_mutable_tree(request.size_bytes())?
+                }
+                ExportEngineKind::WalDurable => {
+                    ExportHead::cow_immutable_tree(request.size_bytes())?
+                }
+            };
+            let now = Timestamp::new("now").expect("timestamp");
+            let record = ExportRecord::new(
+                export_id.clone(),
+                request.name().clone(),
+                request.block_size(),
+                request.engine_kind(),
+                ExportState::Active,
+                head,
+                now.clone(),
+                now,
+                None,
+            )?;
+            state
+                .names
+                .insert(record.name().as_str().to_owned(), export_id.clone());
+            state.exports.insert(export_id, record.clone());
+            Ok(record)
+        }
+
+        async fn clone_export(
+            &self,
+            _request: CloneExport,
+        ) -> nbd_control_plane::Result<CloneExportResult> {
+            unimplemented!("background compaction unit tests do not clone exports")
+        }
+
+        async fn delete_export(&self, _request: DeleteExport) -> nbd_control_plane::Result<()> {
+            unimplemented!("background compaction unit tests do not delete exports")
+        }
+
+        async fn load_export(&self, name: ExportName) -> nbd_control_plane::Result<ExportRecord> {
+            let state = self.state.lock().expect("test catalog lock");
+            let export_id = state
+                .names
+                .get(name.as_str())
+                .ok_or_else(|| CatalogError::ExportNotFound { name: name.clone() })?;
+            let record = state
+                .exports
+                .get(export_id)
+                .expect("name points at export")
+                .clone();
+            if record.state() == ExportState::Deleted {
+                Err(CatalogError::ExportDeleted { name })
+            } else {
+                Ok(record)
+            }
+        }
+
+        async fn load_export_descriptor(
+            &self,
+            name: ExportName,
+        ) -> nbd_control_plane::Result<ActiveExportDescriptor> {
+            let record = self.load_export(name).await?;
+            ActiveExportDescriptor::new(ExportDescriptor::new(
+                record.id().clone(),
+                record.name().clone(),
+                record.block_size(),
+                record.engine_kind(),
+                record.state(),
+                record.created_at().clone(),
+                record.updated_at().clone(),
+                record.deleted_at().cloned(),
+            )?)
+        }
+
+        async fn load_export_head(
+            &self,
+            export_id: &ExportId,
+        ) -> nbd_control_plane::Result<ExportHead> {
+            let state = self.state.lock().expect("test catalog lock");
+            state
+                .exports
+                .get(export_id)
+                .map(|record| record.head().clone())
+                .ok_or_else(|| CatalogError::database(format!("export `{export_id}` not found")))
+        }
+
+        async fn inspect_export(
+            &self,
+            request: InspectExport,
+        ) -> nbd_control_plane::Result<ExportRecord> {
+            self.load_export(request.name().clone()).await
+        }
+
+        async fn list_exports(
+            &self,
+            _request: ListExports,
+        ) -> nbd_control_plane::Result<Vec<ExportRecord>> {
+            let state = self.state.lock().expect("test catalog lock");
+            Ok(state.exports.values().cloned().collect())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TreeRecordStore for TestCatalog {
+        async fn load_node(
+            &self,
+            node_id: &NodeId,
+        ) -> nbd_control_plane::Result<Option<TreeNodeRecord>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("test catalog lock")
+                .nodes
+                .get(node_id)
+                .cloned())
+        }
+
+        async fn load_nodes(
+            &self,
+            node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeNodeRecord>> {
+            let state = self.state.lock().expect("test catalog lock");
+            Ok(node_ids
+                .iter()
+                .filter_map(|node_id| state.nodes.get(node_id).cloned())
+                .collect())
+        }
+
+        async fn load_child_edges(
+            &self,
+            lookups: &[TreeEdgeLookup],
+        ) -> nbd_control_plane::Result<Vec<TreeEdgeRecord>> {
+            let state = self.state.lock().expect("test catalog lock");
+            let mut edges = Vec::new();
+            for lookup in lookups {
+                for slot in &lookup.slots {
+                    if let Some(edge) = state
+                        .edges
+                        .get(&(lookup.parent_node_id.clone(), *slot))
+                        .cloned()
+                    {
+                        edges.push(edge);
+                    }
+                }
+            }
+            Ok(edges)
+        }
+
+        async fn load_leaf_refs(
+            &self,
+            node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeLeafRefRecord>> {
+            let state = self.state.lock().expect("test catalog lock");
+            Ok(node_ids
+                .iter()
+                .filter_map(|node_id| state.leaf_refs.get(node_id).cloned())
+                .collect())
+        }
+
+        async fn publish_tree_update(
+            &self,
+            request: PublishTreeUpdate,
+        ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
+            let mut state = self.state.lock().expect("test catalog lock");
+            let current = state
+                .exports
+                .get(&request.export_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CatalogError::database(format!("export `{}` not found", request.export_id))
+                })?;
+            if current.state() == ExportState::Deleted {
+                return Err(CatalogError::ExportDeleted {
+                    name: current.name().clone(),
+                });
+            }
+            if current.head() != &request.expected_head {
+                return Ok(PublishTreeUpdateOutcome::StaleHead(current));
+            }
+            for node in request.records.nodes {
+                state.nodes.insert(node.id.clone(), node);
+            }
+            for edge in request.records.edges {
+                state
+                    .edges
+                    .insert((edge.parent_node_id.clone(), edge.slot), edge);
+            }
+            for leaf_ref in request.records.leaf_refs {
+                state.leaf_refs.insert(leaf_ref.node_id.clone(), leaf_ref);
+            }
+            let updated = ExportRecord::new(
+                current.id().clone(),
+                current.name().clone(),
+                current.block_size(),
+                current.engine_kind(),
+                current.state(),
+                request.next_head,
+                current.created_at().clone(),
+                Timestamp::new("updated").expect("timestamp"),
+                current.deleted_at().cloned(),
+            )?;
+            state.exports.insert(request.export_id, updated.clone());
+            Ok(PublishTreeUpdateOutcome::Published(updated))
+        }
+    }
+
     struct BlockingTreeRecordStore {
-        inner: SQLiteExportCatalog,
+        inner: TestCatalog,
         publish_count: AtomicUsize,
         publish_started: Notify,
         release_publish: Notify,
     }
 
     impl BlockingTreeRecordStore {
-        fn new(inner: SQLiteExportCatalog) -> Self {
+        fn new(inner: TestCatalog) -> Self {
             Self {
                 inner,
                 publish_count: AtomicUsize::new(0),
@@ -1078,20 +1310,8 @@ mod tests {
         .expect("wait for catalog base");
     }
 
-    async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
-        let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-        let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
-            .await
-            .expect("connect catalog");
-
-        for migration in MIGRATIONS {
-            sqlx::raw_sql(migration)
-                .execute(catalog.pool())
-                .await
-                .expect("apply migration");
-        }
-
-        catalog
+    async fn migrated_catalog(_runtime: &TestRuntime) -> TestCatalog {
+        TestCatalog::default()
     }
 
     fn compaction_policy(soft: u64, hard: u64) -> CompactionPolicy {

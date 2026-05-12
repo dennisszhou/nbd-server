@@ -344,9 +344,9 @@ mod lazy_tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum StoreCall {
-        LoadNode(String),
-        LoadChildEdges { parent: String, slots: Vec<u16> },
-        LoadLeafRefs(Vec<String>),
+        Node(String),
+        ChildEdges { parent: String, slots: Vec<u16> },
+        LeafRefs(Vec<String>),
     }
 
     #[derive(Debug, Default)]
@@ -393,7 +393,7 @@ mod lazy_tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push(StoreCall::LoadNode(node_id.as_str().to_owned()));
+                .push(StoreCall::Node(node_id.as_str().to_owned()));
             Ok(self.nodes.lock().unwrap().get(node_id.as_str()).cloned())
         }
 
@@ -416,7 +416,7 @@ mod lazy_tests {
         ) -> nbd_control_plane::Result<Vec<TreeEdgeRecord>> {
             let mut edges = Vec::new();
             for lookup in lookups {
-                self.calls.lock().unwrap().push(StoreCall::LoadChildEdges {
+                self.calls.lock().unwrap().push(StoreCall::ChildEdges {
                     parent: lookup.parent_node_id.as_str().to_owned(),
                     slots: lookup.slots.clone(),
                 });
@@ -439,7 +439,7 @@ mod lazy_tests {
             &self,
             node_ids: &[NodeId],
         ) -> nbd_control_plane::Result<Vec<TreeLeafRefRecord>> {
-            self.calls.lock().unwrap().push(StoreCall::LoadLeafRefs(
+            self.calls.lock().unwrap().push(StoreCall::LeafRefs(
                 node_ids
                     .iter()
                     .map(|node_id| node_id.as_str().to_owned())
@@ -526,23 +526,23 @@ mod lazy_tests {
         assert_eq!(
             store.calls(),
             vec![
-                StoreCall::LoadNode("root".to_owned()),
-                StoreCall::LoadChildEdges {
+                StoreCall::Node("root".to_owned()),
+                StoreCall::ChildEdges {
                     parent: "root".to_owned(),
                     slots: vec![31],
                 },
-                StoreCall::LoadNode("internal-l2".to_owned()),
-                StoreCall::LoadChildEdges {
+                StoreCall::Node("internal-l2".to_owned()),
+                StoreCall::ChildEdges {
                     parent: "internal-l2".to_owned(),
                     slots: vec![31],
                 },
-                StoreCall::LoadNode("internal-l1".to_owned()),
-                StoreCall::LoadChildEdges {
+                StoreCall::Node("internal-l1".to_owned()),
+                StoreCall::ChildEdges {
                     parent: "internal-l1".to_owned(),
                     slots: vec![31],
                 },
-                StoreCall::LoadNode("leaf".to_owned()),
-                StoreCall::LoadLeafRefs(vec!["leaf".to_owned()]),
+                StoreCall::Node("leaf".to_owned()),
+                StoreCall::LeafRefs(vec!["leaf".to_owned()]),
             ]
         );
     }
@@ -572,8 +572,8 @@ mod lazy_tests {
         assert_eq!(
             store.calls(),
             vec![
-                StoreCall::LoadNode("root".to_owned()),
-                StoreCall::LoadChildEdges {
+                StoreCall::Node("root".to_owned()),
+                StoreCall::ChildEdges {
                     parent: "root".to_owned(),
                     slots: vec![1],
                 },

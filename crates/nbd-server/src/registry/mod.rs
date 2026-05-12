@@ -227,12 +227,10 @@ mod tests {
     use crate::wal::{ExportWalHandle, OpenWal, WalProvider};
     use nbd_config::ServerConfig;
     use nbd_control_plane::{
-        ActiveExportDescriptor, CatalogError, CloneExport, CloneExportResult, CowTreeMetadataStore,
-        CowTreeSnapshot, CreateExport, DeleteExport, ExportEngineKind, ExportHead, ExportId,
-        ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-        PublishCompactionOutcome, PublishTreeUpdate, PublishTreeUpdateOutcome, SimpleChunkRef,
-        SimpleTreeMetadataStore, SimpleTreeSnapshot, Timestamp, TreeEdgeLookup, TreeEdgeRecord,
-        TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore,
+        ActiveExportDescriptor, CatalogError, CloneExport, CloneExportResult, CreateExport,
+        DeleteExport, ExportEngineKind, ExportHead, ExportId, ExportRecord, ExportState,
+        InspectExport, ListExports, NodeId, PublishTreeUpdate, PublishTreeUpdateOutcome, Timestamp,
+        TreeEdgeLookup, TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore,
     };
     use std::path::PathBuf;
 
@@ -265,13 +263,11 @@ mod tests {
         let catalog = Arc::new(UnusedCatalog);
         let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
         let tree_record_store: Arc<dyn TreeRecordStore> = catalog.clone();
-        let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
         let factory = Arc::new(ExportFactory::new(
             ServerConfig::default(),
             ConfiguredBlobStore::local(PathBuf::from(".")),
             export_catalog.clone(),
             tree_record_store,
-            cow_tree_store,
             Arc::new(UnusedWalProvider),
         ));
         let mut active = HashMap::new();
@@ -378,24 +374,6 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl SimpleTreeMetadataStore for UnusedCatalog {
-        async fn load_simple_tree(
-            &self,
-            _export_id: &ExportId,
-        ) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
-            Err(unused_catalog_error())
-        }
-
-        async fn commit_simple_chunks(
-            &self,
-            _export_id: &ExportId,
-            _chunks: Vec<SimpleChunkRef>,
-        ) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
-            Err(unused_catalog_error())
-        }
-    }
-
-    #[async_trait::async_trait]
     impl TreeRecordStore for UnusedCatalog {
         async fn load_node(
             &self,
@@ -429,23 +407,6 @@ mod tests {
             &self,
             _request: PublishTreeUpdate,
         ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
-            Err(unused_catalog_error())
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CowTreeMetadataStore for UnusedCatalog {
-        async fn load_cow_tree(
-            &self,
-            _export_id: &ExportId,
-        ) -> nbd_control_plane::Result<CowTreeSnapshot> {
-            Err(unused_catalog_error())
-        }
-
-        async fn publish_compaction(
-            &self,
-            _request: PublishCompaction,
-        ) -> nbd_control_plane::Result<PublishCompactionOutcome> {
             Err(unused_catalog_error())
         }
     }

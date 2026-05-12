@@ -6,8 +6,7 @@ use crate::export::{
     ExportId, ExportName, ExportRecord, InspectExport, ListExports,
 };
 use crate::tree::{
-    CowTreeSnapshot, NodeId, PublishCompaction, PublishCompactionOutcome, PublishTreeUpdate,
-    PublishTreeUpdateOutcome, SimpleChunkRef, SimpleTreeSnapshot, TreeEdgeLookup, TreeEdgeRecord,
+    NodeId, PublishTreeUpdate, PublishTreeUpdateOutcome, TreeEdgeLookup, TreeEdgeRecord,
     TreeLeafRefRecord, TreeNodeRecord,
 };
 use std::sync::Arc;
@@ -44,27 +43,6 @@ pub trait ExportCatalog: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub trait SimpleTreeMetadataStore: Send + Sync {
-    async fn load_simple_tree(&self, export_id: &ExportId) -> Result<SimpleTreeSnapshot>;
-
-    async fn commit_simple_chunks(
-        &self,
-        export_id: &ExportId,
-        chunks: Vec<SimpleChunkRef>,
-    ) -> Result<SimpleTreeSnapshot>;
-}
-
-#[async_trait::async_trait]
-pub trait CowTreeMetadataStore: Send + Sync {
-    async fn load_cow_tree(&self, export_id: &ExportId) -> Result<CowTreeSnapshot>;
-
-    async fn publish_compaction(
-        &self,
-        request: PublishCompaction,
-    ) -> Result<PublishCompactionOutcome>;
-}
-
-#[async_trait::async_trait]
 pub trait TreeRecordStore: Send + Sync {
     async fn load_node(&self, node_id: &NodeId) -> Result<Option<TreeNodeRecord>>;
 
@@ -84,36 +62,22 @@ pub trait TreeRecordStore: Send + Sync {
 #[derive(Clone)]
 pub struct CatalogHandle {
     export_catalog: Arc<dyn ExportCatalog>,
-    simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
-    cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     tree_record_store: Arc<dyn TreeRecordStore>,
 }
 
 impl CatalogHandle {
     pub fn new(
         export_catalog: Arc<dyn ExportCatalog>,
-        simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
-        cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         tree_record_store: Arc<dyn TreeRecordStore>,
     ) -> Self {
         Self {
             export_catalog,
-            simple_tree_store,
-            cow_tree_store,
             tree_record_store,
         }
     }
 
     pub fn export_catalog(&self) -> Arc<dyn ExportCatalog> {
         Arc::clone(&self.export_catalog)
-    }
-
-    pub fn simple_tree_store(&self) -> Arc<dyn SimpleTreeMetadataStore> {
-        Arc::clone(&self.simple_tree_store)
-    }
-
-    pub fn cow_tree_store(&self) -> Arc<dyn CowTreeMetadataStore> {
-        Arc::clone(&self.cow_tree_store)
     }
 
     pub fn tree_record_store(&self) -> Arc<dyn TreeRecordStore> {
