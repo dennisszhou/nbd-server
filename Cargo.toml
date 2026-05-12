@@ -3,6 +3,7 @@ members = [
     "crates/nbd-config",
     "crates/nbd-control-plane",
     "crates/nbd-control-plane-core",
+    "crates/nbd-control-plane-sqlite",
     "crates/nbd-us-client",
     "crates/nbd-protocol",
     "crates/nbd-server",

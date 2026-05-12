@@ -1,18 +1,18 @@
 //! SQLite implementation of the export catalog.
 
-use crate::{
-    ActiveExportDescriptor, BlobKey, CatalogError, CatalogProvider, CatalogUrl, ChunkIndex,
-    CloneExport, CloneExportResult, CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot,
-    CreateExport, DeleteExport, ExportCatalog, ExportDescriptor, ExportEngineKind, ExportHead,
-    ExportId, ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports,
-    NodeId, PublishCompaction, PublishCompactionOutcome, Result, SIMPLE_CHUNK_BYTES,
-    SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp,
-    WalSeq,
+use nbd_control_plane_core::{
+    ActiveExportDescriptor, BlobKey, CatalogError, ChunkIndex, CloneExport, CloneExportResult,
+    CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, DeleteExport, ExportCatalog,
+    ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
+    ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+    PublishCompactionOutcome, Result, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore,
+    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, WalSeq,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -23,16 +23,9 @@ pub struct SQLiteExportCatalog {
 }
 
 impl SQLiteExportCatalog {
-    pub async fn connect(url: &CatalogUrl) -> Result<Self> {
-        if url.provider() != CatalogProvider::Sqlite {
-            return Err(CatalogError::unsupported_catalog_provider(
-                url.as_str(),
-                "SQLiteExportCatalog requires a file: catalog URL",
-            ));
-        }
-
+    pub async fn connect_path(path: impl AsRef<Path>) -> Result<Self> {
         let options = SqliteConnectOptions::new()
-            .filename(url.sqlite_path()?)
+            .filename(path)
             .create_if_missing(true)
             .foreign_keys(true)
             .disable_statement_logging();

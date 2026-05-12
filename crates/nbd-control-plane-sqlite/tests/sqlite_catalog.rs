@@ -1,10 +1,11 @@
-use nbd_control_plane::{
-    BlobKey, CatalogError, CatalogUrl, ChunkIndex, CloneExport, CowChunkRef, CowTreeMetadataStore,
+use nbd_control_plane_core::{
+    BlobKey, CatalogError, ChunkIndex, CloneExport, CowChunkRef, CowTreeMetadataStore,
     CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName,
     ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-    PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SQLiteExportCatalog, SimpleChunkRef,
-    SimpleTreeMetadataStore, TREE_CHUNK_BYTES, WalSeq,
+    PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore,
+    TREE_CHUNK_BYTES, WalSeq,
 };
+use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
 use sqlx::Row;
 use std::error::Error as _;
@@ -1106,8 +1107,7 @@ async fn cow_tree_publish_rejects_deleted_and_wrong_layout_exports() {
 
 async fn migrated_catalog() -> (TestRuntime, SQLiteExportCatalog) {
     let runtime = TestRuntime::new().expect("test runtime");
-    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");
 

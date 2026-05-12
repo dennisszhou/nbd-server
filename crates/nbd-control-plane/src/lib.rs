@@ -5,7 +5,6 @@
 pub mod catalog_url;
 pub mod error;
 pub mod model;
-pub mod sqlite;
 
 pub use catalog_url::{CatalogProvider, CatalogUrl};
 pub use error::{CatalogError, Result};
@@ -19,14 +18,14 @@ pub use model::{
 pub use nbd_control_plane_core::{
     CatalogHandle, CowTreeMetadataStore, ExportCatalog, SimpleTreeMetadataStore,
 };
-pub use sqlite::SQLiteExportCatalog;
+pub use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use std::sync::Arc;
 
 /// Open catalog services from a runtime catalog URL.
 pub async fn open_catalog(url: &CatalogUrl) -> Result<CatalogHandle> {
     match url.provider() {
         CatalogProvider::Sqlite => {
-            let catalog = Arc::new(SQLiteExportCatalog::connect(url).await?);
+            let catalog = Arc::new(SQLiteExportCatalog::connect_path(url.sqlite_path()?).await?);
             let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
             let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
             let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog;

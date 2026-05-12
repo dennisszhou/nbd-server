@@ -1,5 +1,5 @@
 [package]
-name = "nbd-control-plane"
+name = "nbd-control-plane-sqlite"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = "0.1"
 nbd-control-plane-core = { path = "../nbd-control-plane-core" }
-nbd-control-plane-sqlite = { path = "../nbd-control-plane-sqlite" }
-serde = { version = "1.0", features = ["derive"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+uuid = { version = "1.8", features = ["v4"] }
 
 [dev-dependencies]
 nbd-test-support = { path = "../nbd-test-support" }
