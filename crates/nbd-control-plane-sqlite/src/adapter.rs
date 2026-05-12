@@ -6,7 +6,7 @@ use nbd_control_plane_core::{
     ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
     ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
     PublishCompactionOutcome, Result, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore,
-    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, WalSeq,
+    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, TreeFormat, WalSeq,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
@@ -60,6 +60,7 @@ impl SQLiteExportCatalog {
               e.deleted_at,
               h.layout_kind,
               h.root_node_id,
+              h.tree_format,
               h.size_bytes,
               h.base_wal_seq
             FROM exports e
@@ -149,15 +150,16 @@ impl ExportCatalog for SQLiteExportCatalog {
         sqlx::query(
             r#"
             INSERT INTO export_heads (
-              export_id, layout_kind, root_node_id, size_bytes,
+              export_id, layout_kind, root_node_id, tree_format, size_bytes,
               base_wal_seq, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(export_id.as_str())
         .bind(head.layout_kind().to_string())
         .bind(head.root_node_id().map(NodeId::as_str))
+        .bind(head.tree_format().map(|format| format.to_string()))
         .bind(size_bytes)
         .bind(u64_to_i64("base_wal_seq", head.base_wal_seq().get())?)
         .bind(now.as_str())
@@ -234,14 +236,23 @@ impl ExportCatalog for SQLiteExportCatalog {
         sqlx::query(
             r#"
             INSERT INTO export_heads (
-              export_id, layout_kind, root_node_id, size_bytes,
+              export_id, layout_kind, root_node_id, tree_format, size_bytes,
               base_wal_seq, updated_at
             )
-            VALUES (?, 'cow_immutable_tree', ?, ?, 0, ?)
+            VALUES (?, 'cow_immutable_tree', ?, ?, ?, 0, ?)
             "#,
         )
         .bind(destination_id.as_str())
         .bind(source_root.as_str())
+        .bind(
+            source
+                .head()
+                .tree_format()
+                .ok_or_else(|| {
+                    CatalogError::invalid_field("tree_format", "clone source missing tree format")
+                })?
+                .to_string(),
+        )
         .bind(u64_to_i64("size_bytes", source.size_bytes())?)
         .bind(now.as_str())
         .execute(&mut *tx)
@@ -326,6 +337,7 @@ impl ExportCatalog for SQLiteExportCatalog {
               e.deleted_at,
               h.layout_kind,
               h.root_node_id,
+              h.tree_format,
               h.size_bytes,
               h.base_wal_seq
             FROM exports e
@@ -374,7 +386,7 @@ impl SimpleTreeMetadataStore for SQLiteExportCatalog {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let row = sqlx::query(
             r#"
-            SELECT layout_kind, root_node_id, size_bytes
+            SELECT layout_kind, root_node_id, tree_format, size_bytes
             FROM export_heads
             WHERE export_id = ?
             "#,
@@ -923,7 +935,7 @@ async fn load_cow_tree_snapshot(
 ) -> Result<CowTreeSnapshot> {
     let row = sqlx::query(
         r#"
-        SELECT layout_kind, root_node_id, size_bytes, base_wal_seq
+        SELECT layout_kind, root_node_id, tree_format, size_bytes, base_wal_seq
         FROM export_heads
         WHERE export_id = ?
         "#,
@@ -1262,7 +1274,7 @@ fn export_head_not_found(export_id: &ExportId) -> CatalogError {
 async fn load_export_head(pool: &SqlitePool, export_id: &ExportId) -> Result<ExportHead> {
     let row = sqlx::query(
         r#"
-        SELECT layout_kind, root_node_id, size_bytes, base_wal_seq
+        SELECT layout_kind, root_node_id, tree_format, size_bytes, base_wal_seq
         FROM export_heads
         WHERE export_id = ?
         "#,
@@ -1293,6 +1305,7 @@ async fn fetch_export_record_by_id_in_tx(
           e.deleted_at,
           h.layout_kind,
           h.root_node_id,
+          h.tree_format,
           h.size_bytes,
           h.base_wal_seq
         FROM exports e
@@ -1327,6 +1340,7 @@ async fn fetch_export_record_by_name_in_tx(
           e.deleted_at,
           h.layout_kind,
           h.root_node_id,
+          h.tree_format,
           h.size_bytes,
           h.base_wal_seq
         FROM exports e
@@ -1361,6 +1375,7 @@ async fn fetch_export_record_by_id(
           e.deleted_at,
           h.layout_kind,
           h.root_node_id,
+          h.tree_format,
           h.size_bytes,
           h.base_wal_seq
         FROM exports e
@@ -1406,10 +1421,21 @@ fn row_to_export_descriptor(row: &SqliteRow) -> Result<ExportDescriptor> {
 
 fn row_to_export_head(row: &SqliteRow) -> Result<ExportHead> {
     let layout_kind: String = row.try_get("layout_kind").map_err(map_sqlx_error)?;
+    let layout_kind = layout_kind.parse::<ExportLayoutKind>()?;
     let root_node_id: Option<String> = row.try_get("root_node_id").map_err(map_sqlx_error)?;
+    let tree_format: Option<String> = row.try_get("tree_format").map_err(map_sqlx_error)?;
+    let tree_format = match layout_kind {
+        ExportLayoutKind::MemoryEmpty => None,
+        ExportLayoutKind::SimpleMutableTree | ExportLayoutKind::CowImmutableTree => {
+            let tree_format = tree_format.ok_or_else(|| {
+                CatalogError::invalid_field("tree_format", "tree-backed export head missing format")
+            })?;
+            Some(tree_format.parse::<TreeFormat>()?)
+        }
+    };
 
-    ExportHead::new(
-        layout_kind.parse::<ExportLayoutKind>()?,
+    ExportHead::new_with_tree_format(
+        layout_kind,
         root_node_id.map(NodeId::new).transpose()?,
         i64_to_u64(
             "size_bytes",
@@ -1419,6 +1445,7 @@ fn row_to_export_head(row: &SqliteRow) -> Result<ExportHead> {
             "base_wal_seq",
             row.try_get("base_wal_seq").map_err(map_sqlx_error)?,
         )?),
+        tree_format,
     )
 }
 

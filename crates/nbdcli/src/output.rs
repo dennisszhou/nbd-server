@@ -51,11 +51,12 @@ impl ErrorContext {
 pub fn print_created(export: &ExportRecord, mode: OutputMode) -> Result<(), Box<dyn Error>> {
     match mode {
         OutputMode::Human => println!(
-            "created export {} size={} block_size={} engine={}",
+            "created export {} size={} block_size={} engine={} tree_format={}",
             export.name(),
             export.size_bytes(),
             export.block_size(),
-            export.engine_kind()
+            export.engine_kind(),
+            format_tree_format(export)
         ),
         OutputMode::Json => print_json_value(&serde_json::json!({
             "status": "created",
@@ -70,13 +71,14 @@ pub fn print_export_list(exports: &[ExportRecord], mode: OutputMode) -> Result<(
         OutputMode::Human => {
             for export in exports {
                 println!(
-                    "{}\t{}\tsize={}\tblock_size={}\tengine={}\tlayout={}",
+                    "{}\t{}\tsize={}\tblock_size={}\tengine={}\tlayout={}\ttree_format={}",
                     export.name(),
                     export.state(),
                     export.size_bytes(),
                     export.block_size(),
                     export.engine_kind(),
-                    export.head().layout_kind()
+                    export.head().layout_kind(),
+                    format_tree_format(export)
                 );
             }
         }
@@ -94,6 +96,7 @@ pub fn print_export(export: &ExportRecord, mode: OutputMode) -> Result<(), Box<d
             println!("block_size: {}", export.block_size());
             println!("engine: {}", export.engine_kind());
             println!("layout: {}", export.head().layout_kind());
+            println!("tree_format: {}", format_tree_format(export));
             println!("base_wal_seq: {}", export.head().base_wal_seq());
             match export.head().root_node_id() {
                 Some(root_node_id) => println!("root_node_id: {root_node_id}"),
@@ -187,6 +190,14 @@ pub fn print_error(error: &(dyn Error + 'static), mode: OutputMode, context: &Er
             );
         }
     }
+}
+
+fn format_tree_format(export: &ExportRecord) -> String {
+    export
+        .head()
+        .tree_format()
+        .map(|format| format.to_string())
+        .unwrap_or_else(|| "<none>".to_owned())
 }
 
 fn error_code(error: &(dyn Error + 'static)) -> &'static str {

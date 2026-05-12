@@ -1,4 +1,4 @@
-use nbd_control_plane::{CatalogUrl, SQLiteExportCatalog};
+use nbd_control_plane::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
 use serde_json::Value;
 use std::env;
@@ -9,9 +9,10 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::test]
@@ -37,8 +38,7 @@ async fn installed_nbdcli_doctor_runs_by_name_outside_source_tree() {
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {
-    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");
 

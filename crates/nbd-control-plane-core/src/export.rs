@@ -2,6 +2,7 @@
 
 use crate::error::{CatalogError, Result};
 use crate::tree::{NodeId, Timestamp, WalSeq};
+use crate::tree_format::TreeFormat;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -52,6 +53,7 @@ pub struct MemoryExportHead {
 pub struct SimpleMutableTreeHead {
     size_bytes: u64,
     root_node_id: Option<NodeId>,
+    tree_format: TreeFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +61,7 @@ pub struct CowImmutableTreeHead {
     size_bytes: u64,
     root_node_id: Option<NodeId>,
     base_wal_seq: WalSeq,
+    tree_format: TreeFormat,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,16 +170,40 @@ impl ExportHead {
         size_bytes: u64,
         base_wal_seq: WalSeq,
     ) -> Result<Self> {
+        Self::new_with_tree_format(layout_kind, root_node_id, size_bytes, base_wal_seq, None)
+    }
+
+    pub fn new_with_tree_format(
+        layout_kind: ExportLayoutKind,
+        root_node_id: Option<NodeId>,
+        size_bytes: u64,
+        base_wal_seq: WalSeq,
+        tree_format: Option<TreeFormat>,
+    ) -> Result<Self> {
         match layout_kind {
             ExportLayoutKind::MemoryEmpty => {
+                if tree_format.is_some() {
+                    return Err(CatalogError::invalid_field(
+                        "tree_format",
+                        "memory_empty export heads must not carry a tree format",
+                    ));
+                }
                 Self::memory_empty_with_base(size_bytes, root_node_id, base_wal_seq)
             }
             ExportLayoutKind::SimpleMutableTree => {
-                Self::simple_mutable_tree_with_root_and_base(size_bytes, root_node_id, base_wal_seq)
+                Self::simple_mutable_tree_with_root_base_and_format(
+                    size_bytes,
+                    root_node_id,
+                    base_wal_seq,
+                    tree_format.unwrap_or_default(),
+                )
             }
-            ExportLayoutKind::CowImmutableTree => {
-                Self::cow_immutable_tree_with_root(size_bytes, root_node_id, base_wal_seq)
-            }
+            ExportLayoutKind::CowImmutableTree => Self::cow_immutable_tree_with_root_and_format(
+                size_bytes,
+                root_node_id,
+                base_wal_seq,
+                tree_format.unwrap_or_default(),
+            ),
         }
     }
 
@@ -196,7 +223,12 @@ impl ExportHead {
         size_bytes: u64,
         root_node_id: Option<NodeId>,
     ) -> Result<Self> {
-        Self::simple_mutable_tree_with_root_and_base(size_bytes, root_node_id, WalSeq::zero())
+        Self::simple_mutable_tree_with_root_base_and_format(
+            size_bytes,
+            root_node_id,
+            WalSeq::zero(),
+            TreeFormat::default(),
+        )
     }
 
     pub fn cow_immutable_tree_with_root(
@@ -204,11 +236,26 @@ impl ExportHead {
         root_node_id: Option<NodeId>,
         base_wal_seq: WalSeq,
     ) -> Result<Self> {
+        Self::cow_immutable_tree_with_root_and_format(
+            size_bytes,
+            root_node_id,
+            base_wal_seq,
+            TreeFormat::default(),
+        )
+    }
+
+    pub fn cow_immutable_tree_with_root_and_format(
+        size_bytes: u64,
+        root_node_id: Option<NodeId>,
+        base_wal_seq: WalSeq,
+        tree_format: TreeFormat,
+    ) -> Result<Self> {
         validate_non_zero("size_bytes", size_bytes)?;
         Ok(Self::CowImmutableTree(CowImmutableTreeHead {
             size_bytes,
             root_node_id,
             base_wal_seq,
+            tree_format,
         }))
     }
 
@@ -243,6 +290,14 @@ impl ExportHead {
         }
     }
 
+    pub fn tree_format(&self) -> Option<TreeFormat> {
+        match self {
+            Self::MemoryEmpty(_) => None,
+            Self::SimpleMutableTree(head) => Some(head.tree_format),
+            Self::CowImmutableTree(head) => Some(head.tree_format),
+        }
+    }
+
     fn memory_empty_with_base(
         size_bytes: u64,
         root_node_id: Option<NodeId>,
@@ -264,10 +319,11 @@ impl ExportHead {
         Ok(Self::MemoryEmpty(MemoryExportHead { size_bytes }))
     }
 
-    fn simple_mutable_tree_with_root_and_base(
+    fn simple_mutable_tree_with_root_base_and_format(
         size_bytes: u64,
         root_node_id: Option<NodeId>,
         base_wal_seq: WalSeq,
+        tree_format: TreeFormat,
     ) -> Result<Self> {
         validate_non_zero("size_bytes", size_bytes)?;
         if base_wal_seq != WalSeq::zero() {
@@ -279,6 +335,7 @@ impl ExportHead {
         Ok(Self::SimpleMutableTree(SimpleMutableTreeHead {
             size_bytes,
             root_node_id,
+            tree_format,
         }))
     }
 }

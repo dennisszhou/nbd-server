@@ -21,3 +21,4 @@ pub use tree::{
     PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeSnapshot,
     TREE_CHUNK_BYTES, Timestamp, WalSeq,
 };
+pub use tree_format::TreeFormat;

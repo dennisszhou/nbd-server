@@ -13,7 +13,7 @@ pub use model::{
     CowTreeSnapshot, CreateExport, DeleteExport, ExportDescriptor, ExportEngineKind, ExportHead,
     ExportId, ExportLayoutKind, ExportName, ExportRecord, ExportState, InspectExport, ListExports,
     NodeId, PublishCompaction, PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef,
-    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, WalSeq,
+    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, TreeFormat, WalSeq,
 };
 pub use nbd_control_plane_core::{
     CatalogHandle, CowTreeMetadataStore, ExportCatalog, SimpleTreeMetadataStore,

@@ -1,6 +1,6 @@
 use nbd_config::{ConfigFile, default_config_path_for_home};
 use nbd_control_plane::{
-    BlobKey, CatalogUrl, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
+    BlobKey, ChunkIndex, CowChunkRef, CowTreeMetadataStore, ExportCatalog, ExportName,
     InspectExport, PublishCompaction, SQLiteExportCatalog, TREE_CHUNK_BYTES, WalSeq,
 };
 use nbd_test_support::TestRuntime;
@@ -12,9 +12,10 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::test]
@@ -385,8 +386,7 @@ fn cli_doctor_rejects_unmigrated_catalog() {
 }
 
 async fn migrate_catalog(runtime: &TestRuntime) {
-    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");
 
@@ -399,8 +399,7 @@ async fn migrate_catalog(runtime: &TestRuntime) {
 }
 
 async fn publish_cow_root(runtime: &TestRuntime, name: &str, checkpoint: u64) -> Value {
-    let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(runtime.catalog_path())
         .await
         .expect("connect catalog");
     let export = catalog

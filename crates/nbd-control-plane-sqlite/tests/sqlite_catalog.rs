@@ -3,16 +3,17 @@ use nbd_control_plane_core::{
     CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName,
     ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
     PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore,
-    TREE_CHUNK_BYTES, WalSeq,
+    TREE_CHUNK_BYTES, TreeFormat, WalSeq,
 };
 use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
 use sqlx::Row;
 use std::error::Error as _;
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 
 #[tokio::test]
 async fn sqlite_errors_preserve_database_source() {
@@ -47,6 +48,7 @@ async fn create_export_initializes_memory_head() {
     assert!(created.head().root_node_id().is_none());
     assert_eq!(created.head().size_bytes(), 1024 * 1024);
     assert_eq!(created.head().base_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().tree_format(), None);
 
     let inspected = catalog
         .inspect_export(InspectExport::new(export_name("disk-a")))
@@ -76,6 +78,7 @@ async fn create_export_initializes_simple_durable_head() {
     );
     assert!(created.head().root_node_id().is_none());
     assert_eq!(created.head().base_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().tree_format(), Some(TreeFormat::Bounded32V1));
 
     let snapshot = catalog
         .load_simple_tree(created.id())
@@ -107,6 +110,7 @@ async fn create_export_initializes_wal_durable_head() {
     );
     assert!(created.head().root_node_id().is_none());
     assert_eq!(created.head().base_wal_seq(), WalSeq::zero());
+    assert_eq!(created.head().tree_format(), Some(TreeFormat::Bounded32V1));
 
     let snapshot = catalog
         .load_cow_tree(created.id())
@@ -704,6 +708,10 @@ async fn clone_export_copies_root_and_reuses_unchanged_nodes() {
     );
     assert_eq!(destination.head().root_node_id(), Some(source_root));
     assert_eq!(destination.head().base_wal_seq(), WalSeq::zero());
+    assert_eq!(
+        destination.head().tree_format(),
+        source.head().tree_format()
+    );
     assert_eq!(destination.size_bytes(), source.size_bytes());
     assert_eq!(destination.block_size(), source.block_size());
 

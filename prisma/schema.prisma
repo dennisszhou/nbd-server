@@ -22,6 +22,7 @@ model ExportHead {
   exportId   String    @id @map("export_id")
   layoutKind String    @map("layout_kind")
   rootNodeId String?   @map("root_node_id")
+  treeFormat String?   @map("tree_format")
   sizeBytes  BigInt    @map("size_bytes")
   baseWalSeq BigInt    @map("base_wal_seq")
   updatedAt  String    @map("updated_at")

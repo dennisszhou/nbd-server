@@ -2,7 +2,7 @@ use nbd_control_plane_core::{
     ActiveExportDescriptor, BlobKey, ChunkIndex, CloneExport, CowChunkRef, CowTreeSnapshot,
     CreateExport, ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
     ExportName, ExportState, ListExports, NodeId, PublishCompaction, SIMPLE_CHUNK_BYTES,
-    SimpleChunkRef, TREE_CHUNK_BYTES, Timestamp, WalSeq,
+    SimpleChunkRef, TREE_CHUNK_BYTES, Timestamp, TreeFormat, WalSeq,
 };
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -83,6 +83,7 @@ fn export_head_can_represent_empty_memory() {
     assert!(head.root_node_id().is_none());
     assert_eq!(head.size_bytes(), 4096);
     assert_eq!(head.base_wal_seq(), WalSeq::zero());
+    assert_eq!(head.tree_format(), None);
     assert!(ExportHead::memory_empty(0).is_err());
     assert!(
         ExportHead::new(
@@ -104,6 +105,7 @@ fn export_head_can_represent_simple_mutable_tree() {
     assert!(head.root_node_id().is_none());
     assert_eq!(head.size_bytes(), 4096);
     assert_eq!(head.base_wal_seq(), WalSeq::zero());
+    assert_eq!(head.tree_format(), Some(TreeFormat::Bounded32V1));
     assert!(ExportHead::simple_mutable_tree(0).is_err());
     assert!(
         ExportHead::new(
@@ -124,6 +126,7 @@ fn export_head_can_represent_empty_cow_tree() {
     assert!(head.root_node_id().is_none());
     assert_eq!(head.size_bytes(), 4096);
     assert_eq!(head.base_wal_seq(), WalSeq::zero());
+    assert_eq!(head.tree_format(), Some(TreeFormat::Bounded32V1));
     assert!(ExportHead::cow_immutable_tree(0).is_err());
 
     let root = NodeId::new("root").expect("node id");
@@ -136,6 +139,17 @@ fn export_head_can_represent_empty_cow_tree() {
     .expect("cow tree head with base");
     assert_eq!(head.root_node_id(), Some(&root));
     assert_eq!(head.base_wal_seq(), WalSeq::new(7));
+    assert_eq!(head.tree_format(), Some(TreeFormat::Bounded32V1));
+}
+
+#[test]
+fn tree_format_round_trips_catalog_values() {
+    assert_eq!(
+        TreeFormat::from_str("bounded_32_v1").unwrap(),
+        TreeFormat::Bounded32V1
+    );
+    assert_eq!(TreeFormat::Bounded32V1.to_string(), "bounded_32_v1");
+    assert!(TreeFormat::from_str("bounded_64_v2").is_err());
 }
 
 #[test]
