@@ -1,6 +1,6 @@
 //! Error types for catalog operations.
 
-use crate::model::ExportName;
+use crate::export::ExportName;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use thiserror::Error;
