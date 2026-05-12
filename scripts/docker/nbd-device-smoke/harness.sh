@@ -5,6 +5,7 @@ CLONE_EXPORT_NAME="${NBD_DEVICE_SMOKE_CLONE_EXPORT:-${KERNEL_SMOKE_CLONE_EXPORT:
 SIZE_BYTES="${NBD_DEVICE_SMOKE_SIZE_BYTES:-${KERNEL_SMOKE_SIZE_BYTES:-67108864}}"
 PORT="${NBD_DEVICE_SMOKE_PORT:-${KERNEL_SMOKE_PORT:-10809}}"
 DEVICE="${NBD_DEVICE_SMOKE_DEVICE:-${KERNEL_SMOKE_DEVICE:-/dev/nbd0}}"
+CLONE_DEVICE="${NBD_DEVICE_SMOKE_CLONE_DEVICE:-${KERNEL_SMOKE_CLONE_DEVICE:-/dev/nbd1}}"
 ARTIFACT_DIR="${NBD_DEVICE_SMOKE_ARTIFACT_DIR:-${KERNEL_SMOKE_ARTIFACT_DIR:-}}"
 RUST_LOG_FILTER="${NBD_DEVICE_SMOKE_RUST_LOG:-${KERNEL_SMOKE_RUST_LOG:-info,nbd_server::storage=info}}"
 COMPACTION_SETTLE_SECONDS="${NBD_DEVICE_SMOKE_COMPACTION_SETTLE_SECONDS:-${KERNEL_SMOKE_COMPACTION_SETTLE_SECONDS:-0.2}}"
@@ -28,9 +29,12 @@ CLONE_PROBE_EXPECTED="${ROOT}/probe-clone.expected"
 SERVER_STDOUT="${ROOT}/server.stdout.log"
 SERVER_STDERR="${ROOT}/server.stderr.log"
 MOUNT_DIR="/mnt/nbd-smoke"
+CLONE_MOUNT_DIR="/mnt/nbd-smoke-clone"
 SERVER_PID=""
 DEVICE_CONNECTED=0
+CLONE_DEVICE_CONNECTED=0
 MOUNT_CREATED=0
+CLONE_MOUNT_CREATED=0
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 NBDCLI="${CARGO_TARGET_DIR}/debug/nbdcli"
 NBD_SERVER="${CARGO_TARGET_DIR}/debug/nbd-server"
@@ -50,8 +54,14 @@ nbd_device_progress() {
 
 cleanup() {
     set +e
+    if [ "${CLONE_MOUNT_CREATED}" = "1" ]; then
+        umount "${CLONE_MOUNT_DIR}"
+    fi
     if [ "${MOUNT_CREATED}" = "1" ]; then
         umount "${MOUNT_DIR}"
+    fi
+    if [ "${CLONE_DEVICE_CONNECTED}" = "1" ]; then
+        "${NBD_CLIENT}" -d "${CLONE_DEVICE}" >/dev/null 2>&1
     fi
     if [ "${DEVICE_CONNECTED}" = "1" ]; then
         "${NBD_CLIENT}" -d "${DEVICE}" >/dev/null 2>&1
@@ -74,8 +84,13 @@ require_kernel_nbd() {
         echo "kernel NBD major is not registered in /proc/devices" >&2
         return 1
     fi
-    if [ ! -b "${DEVICE}" ]; then
-        echo "${DEVICE} is not available in this privileged container" >&2
+}
+
+require_nbd_device_available() {
+    local device="$1"
+
+    if [ ! -b "${device}" ]; then
+        echo "${device} is not available in this privileged container" >&2
         return 1
     fi
 }
@@ -140,35 +155,79 @@ wait_for_process_exit() {
 
 connect_device() {
     local export_name="${1:-${EXPORT_NAME}}"
+    local device="${2:-${DEVICE}}"
 
-    nbd_device_progress "connect ${DEVICE} to ${export_name}"
-    "${NBD_CLIENT}" 127.0.0.1 "${PORT}" "${DEVICE}" \
+    nbd_device_progress "connect ${device} to ${export_name}"
+    "${NBD_CLIENT}" 127.0.0.1 "${PORT}" "${device}" \
         -name "${export_name}" \
         -block-size 4096
-    DEVICE_CONNECTED=1
+    set_device_connected "${device}" 1
 }
 
 disconnect_device() {
-    nbd_device_progress "disconnect ${DEVICE}"
-    "${NBD_CLIENT}" -d "${DEVICE}"
-    DEVICE_CONNECTED=0
+    local device="${1:-${DEVICE}}"
+
+    nbd_device_progress "disconnect ${device}"
+    "${NBD_CLIENT}" -d "${device}"
+    set_device_connected "${device}" 0
 }
 
 mount_device() {
-    nbd_device_progress "mount ${DEVICE}"
-    mount -t ext4 "${DEVICE}" "${MOUNT_DIR}"
-    MOUNT_CREATED=1
+    local device="${1:-${DEVICE}}"
+    local mount_dir="${2:-${MOUNT_DIR}}"
+    local mount_options="${3:-}"
+
+    if [ -n "${mount_options}" ]; then
+        nbd_device_progress "mount ${device} at ${mount_dir} (${mount_options})"
+        mount -t ext4 -o "${mount_options}" "${device}" "${mount_dir}"
+    else
+        nbd_device_progress "mount ${device} at ${mount_dir}"
+        mount -t ext4 "${device}" "${mount_dir}"
+    fi
+    set_mount_created "${mount_dir}" 1
 }
 
 unmount_device() {
-    nbd_device_progress "unmount ${DEVICE}"
-    umount "${MOUNT_DIR}"
-    MOUNT_CREATED=0
+    local mount_dir="${1:-${MOUNT_DIR}}"
+
+    nbd_device_progress "unmount ${mount_dir}"
+    umount "${mount_dir}"
+    set_mount_created "${mount_dir}" 0
 }
 
 format_device() {
-    nbd_device_progress "format ${DEVICE}"
-    mkfs.ext4 -F -E nodiscard "${DEVICE}"
+    local device="${1:-${DEVICE}}"
+
+    nbd_device_progress "format ${device}"
+    mkfs.ext4 -F -E nodiscard "${device}"
+}
+
+set_device_connected() {
+    local device="$1"
+    local connected="$2"
+
+    if [ "${device}" = "${DEVICE}" ]; then
+        DEVICE_CONNECTED="${connected}"
+    elif [ "${device}" = "${CLONE_DEVICE}" ]; then
+        CLONE_DEVICE_CONNECTED="${connected}"
+    else
+        echo "internal smoke error: untracked NBD device ${device}" >&2
+        return 1
+    fi
+}
+
+set_mount_created() {
+    local mount_dir="$1"
+    local created="$2"
+
+    if [ "${mount_dir}" = "${MOUNT_DIR}" ]; then
+        MOUNT_CREATED="${created}"
+    elif [ "${mount_dir}" = "${CLONE_MOUNT_DIR}" ]; then
+        CLONE_MOUNT_CREATED="${created}"
+    else
+        echo "internal smoke error: untracked mount dir ${mount_dir}" >&2
+        return 1
+    fi
 }
 
 drop_page_cache() {
@@ -293,29 +352,33 @@ write_and_verify_probe() {
     local expected_path="$1"
     local prefix="$2"
     local target_name="$3"
+    local mount_dir="${4:-${MOUNT_DIR}}"
 
-    nbd_device_progress "write ${target_name}"
+    nbd_device_progress "write ${target_name} on ${mount_dir}"
     write_probe_lines "${expected_path}" "${prefix}"
-    cp "${expected_path}" "${MOUNT_DIR}/${target_name}"
+    cp "${expected_path}" "${mount_dir}/${target_name}"
     sync
-    verify_probe "${expected_path}" "${target_name}"
+    verify_probe "${expected_path}" "${target_name}" "${mount_dir}"
 }
 
 verify_probe() {
     local expected_path="$1"
     local target_name="$2"
+    local mount_dir="${3:-${MOUNT_DIR}}"
 
-    nbd_device_progress "verify ${target_name}"
+    nbd_device_progress "verify ${target_name} on ${mount_dir}"
     drop_page_cache
-    cmp "${expected_path}" "${MOUNT_DIR}/${target_name}"
+    cmp "${expected_path}" "${mount_dir}/${target_name}"
 }
 
 verify_absent() {
     local target_name="$1"
+    local mount_dir="${2:-${MOUNT_DIR}}"
 
-    nbd_device_progress "verify absent ${target_name}"
-    if [ -e "${MOUNT_DIR}/${target_name}" ]; then
-        echo "${target_name} unexpectedly exists on mounted export" >&2
+    nbd_device_progress "verify absent ${target_name} on ${mount_dir}"
+    drop_page_cache
+    if [ -e "${mount_dir}/${target_name}" ]; then
+        echo "${target_name} unexpectedly exists under ${mount_dir}" >&2
         return 1
     fi
 }
@@ -375,21 +438,13 @@ export_artifacts() {
 
 prepare_nbd_device_smoke() {
     nbd_device_progress "prepare NBD device smoke workspace"
-    mkdir -p "${MOUNT_DIR}"
     mkdir -p "$(dirname "${LOG_FILE}")"
     rm -f "${LOG_FILE}"
 
     nbd_device_progress "check kernel NBD prerequisites"
     require_kernel_nbd
     require_executable "${NBD_CLIENT}"
-    if mountpoint -q "${MOUNT_DIR}"; then
-        echo "${MOUNT_DIR} is already a mount point" >&2
-        exit 1
-    fi
-    if "${NBD_CLIENT}" -c "${DEVICE}" >/dev/null 2>&1; then
-        echo "${DEVICE} is already connected" >&2
-        exit 1
-    fi
+    prepare_nbd_target "${DEVICE}" "${MOUNT_DIR}"
 
     mkdir -p "$(dirname "${CATALOG}")"
     nbd_device_progress "run catalog migrations"
@@ -398,6 +453,36 @@ prepare_nbd_device_smoke() {
     require_executable "${NBDCLI}"
     require_executable "${NBD_SERVER}"
     initialize_smoke_config
+}
+
+prepare_clone_nbd_device() {
+    if [ "${CLONE_DEVICE}" = "${DEVICE}" ]; then
+        echo "clone device must differ from source device: ${CLONE_DEVICE}" >&2
+        return 1
+    fi
+    if [ "${CLONE_MOUNT_DIR}" = "${MOUNT_DIR}" ]; then
+        echo "clone mount dir must differ from source mount dir: ${CLONE_MOUNT_DIR}" >&2
+        return 1
+    fi
+
+    nbd_device_progress "check clone NBD target ${CLONE_DEVICE}"
+    prepare_nbd_target "${CLONE_DEVICE}" "${CLONE_MOUNT_DIR}"
+}
+
+prepare_nbd_target() {
+    local device="$1"
+    local mount_dir="$2"
+
+    require_nbd_device_available "${device}"
+    mkdir -p "${mount_dir}"
+    if mountpoint -q "${mount_dir}"; then
+        echo "${mount_dir} is already a mount point" >&2
+        return 1
+    fi
+    if "${NBD_CLIENT}" -c "${device}" >/dev/null 2>&1; then
+        echo "${device} is already connected" >&2
+        return 1
+    fi
 }
 
 build_smoke_binaries() {

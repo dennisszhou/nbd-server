@@ -150,8 +150,11 @@ make docker-smoke NBD_DEVICE_SMOKE_SCENARIO=memory-basic \
 - `make test-protocol` runs the userspace TCP protocol integration baseline.
 - `make docker-smoke` runs the privileged NBD device smoke path through the
   Linux kernel NBD client. It defaults to the `wal-durable-basic` scenario,
-  verifies reattach and close compaction, and exports logs and inspect
-  snapshots under `./.tmp/docker-smoke`.
+  verifies reattach, clone isolation, and close compaction, and exports logs and
+  inspect snapshots under `./.tmp/docker-smoke`.
+- WAL clone smoke scenarios use `NBD_DEVICE_SMOKE_DEVICE` (default `/dev/nbd0`)
+  for the source export and `NBD_DEVICE_SMOKE_CLONE_DEVICE` (default
+  `/dev/nbd1`) for the clone export.
 - `NBD_DEVICE_SMOKE_SCENARIO=memory-basic make docker-smoke` checks the volatile
   engine path. Current scenarios are `memory-basic`, `simple-durable-basic`,
   and `wal-durable-basic`.
@@ -177,10 +180,11 @@ make docker-smoke NBD_DEVICE_SMOKE_SCENARIO=memory-basic \
 ```text
 umount /mnt/nbd-demo || true
 nbd-client -d /dev/nbd0 || true
+nbd-client -d /dev/nbd1 || true
 ```
 
-- A mounted or connected `/dev/nbd0` can wedge Docker container shutdown. Check
-  the mount and device before repeatedly killing Docker.
+- A mounted or connected `/dev/nbd0` or `/dev/nbd1` can wedge Docker container
+  shutdown. Check the mounts and devices before repeatedly killing Docker.
 - `mkfs.ext4` can write metadata beyond the first 32 MiB chunk. Seeing multiple
   simple durable blobs after formatting a block device is expected.
 

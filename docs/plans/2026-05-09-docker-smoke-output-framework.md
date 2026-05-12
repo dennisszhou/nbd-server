@@ -136,6 +136,7 @@ Data model / API shape
   - `NBD_DEVICE_SMOKE_CARGO_FEATURES`
   - `NBD_DEVICE_SMOKE_PORT`
   - `NBD_DEVICE_SMOKE_DEVICE`
+  - `NBD_DEVICE_SMOKE_CLONE_DEVICE`
   - `NBD_DEVICE_SMOKE_RUST_LOG`
   - `NBD_DEVICE_SMOKE_COMPACTION_SETTLE_SECONDS`
   - `NBD_DEVICE_SMOKE_S3_ENDPOINT_URL`
@@ -294,8 +295,8 @@ Invariants
   cleanup after both success and failure.
 - The scripts pass the same smoke scenario variables, S3 endpoint, bucket,
   region, key prefix, and credentials that the Makefile targets pass today.
-- The inner NBD device smoke harness remains the only owner of `/dev/nbd0`,
-  mount cleanup, server shutdown, and scenario-level artifacts.
+- The inner NBD device smoke harness remains the only owner of configured NBD
+  devices, mount cleanup, server shutdown, and scenario-level artifacts.
 - The Make targets remain the operator API and exit with the runner status.
 
 Operational and lifecycle contracts

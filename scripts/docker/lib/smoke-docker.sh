@@ -121,6 +121,9 @@ docker_smoke_set_nbd_device_env_args() {
         "NBD_DEVICE_SMOKE_DEVICE" \
         "${NBD_DEVICE_SMOKE_DEVICE:-${KERNEL_SMOKE_DEVICE:-}}"
     docker_smoke_add_env_if_set \
+        "NBD_DEVICE_SMOKE_CLONE_DEVICE" \
+        "${NBD_DEVICE_SMOKE_CLONE_DEVICE:-${KERNEL_SMOKE_CLONE_DEVICE:-}}"
+    docker_smoke_add_env_if_set \
         "NBD_DEVICE_SMOKE_RUST_LOG" \
         "${NBD_DEVICE_SMOKE_RUST_LOG:-${KERNEL_SMOKE_RUST_LOG:-}}"
     docker_smoke_add_env_if_set \

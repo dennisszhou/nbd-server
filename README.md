@@ -120,7 +120,10 @@ KERNEL_SMOKE_SCENARIO=simple-durable-basic make docker-smoke
 KERNEL_SMOKE_SCENARIO=wal-durable-basic make docker-smoke
 ```
 
-Smoke artifacts are written under `.tmp/docker-smoke` by default.
+Smoke artifacts are written under `.tmp/docker-smoke` by default. WAL clone
+scenarios use `/dev/nbd0` for the source export and `/dev/nbd1` for the clone by
+default; override them with `NBD_DEVICE_SMOKE_DEVICE` and
+`NBD_DEVICE_SMOKE_CLONE_DEVICE`.
 
 S3/RustFS smoke test:
 
@@ -132,7 +135,8 @@ This target builds the smoke image, creates an isolated Docker network, starts
 a RustFS sidecar with alias `rustfs`, runs the privileged kernel NBD lifecycle
 against the `wal-durable-s3-basic` scenario, then verifies through the S3 API
 that the configured bucket/prefix contains readable committed objects. Artifacts
-are written under `.tmp/docker-smoke-s3`.
+are written under `.tmp/docker-smoke-s3`. The S3 WAL clone scenario uses the same
+source and clone NBD device defaults as `docker-smoke`.
 
 For S3 client compatibility without the kernel NBD lifecycle:
 
