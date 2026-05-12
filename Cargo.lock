@@ -1644,11 +1644,22 @@ name = "nbd-control-plane"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "nbd-control-plane-core",
  "nbd-test-support",
  "serde",
  "sqlx",
  "thiserror",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "nbd-control-plane-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror",
  "uuid",
 ]
 

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1"
+nbd-control-plane-core = { path = "../nbd-control-plane-core" }
 serde = { version = "1.0", features = ["derive"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 thiserror.workspace = true
