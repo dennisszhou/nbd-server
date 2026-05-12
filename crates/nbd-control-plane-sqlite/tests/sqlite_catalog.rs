@@ -1,9 +1,11 @@
 use nbd_control_plane_core::{
     BlobKey, CatalogError, ChunkIndex, CloneExport, CowChunkRef, CowTreeMetadataStore,
-    CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportLayoutKind, ExportName,
-    ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-    PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore,
-    TREE_CHUNK_BYTES, TreeFormat, WalSeq,
+    CreateExport, DeleteExport, ExportCatalog, ExportEngineKind, ExportHead, ExportLayoutKind,
+    ExportName, ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+    PublishCompactionOutcome, PublishTreeUpdate, PublishTreeUpdateOutcome, SIMPLE_CHUNK_BYTES,
+    SimpleChunkRef, SimpleTreeMetadataStore, TREE_CHUNK_BYTES, TreeEdgeLookup, TreeEdgeRecord,
+    TreeFormat, TreeLeafRefRecord, TreeNodeKind, TreeNodeRecord, TreeRecordBatch, TreeRecordStore,
+    TreeStorageKind, WalSeq,
 };
 use nbd_control_plane_sqlite::SQLiteExportCatalog;
 use nbd_test_support::TestRuntime;
@@ -522,6 +524,146 @@ async fn simple_tree_rejects_foreign_root() {
         .await
         .expect_err("simple roots must remain export-private");
     assert!(error.to_string().contains("not owned by export"));
+}
+
+#[tokio::test]
+async fn tree_record_store_reads_rows_and_rolls_back_stale_publish() {
+    let (_runtime, catalog) = migrated_catalog().await;
+    let export = catalog
+        .create_export(create_export_with_engine(
+            "lazy-tree",
+            128 * 1024 * 1024,
+            4096,
+            ExportEngineKind::SimpleDurable,
+        ))
+        .await
+        .expect("create export");
+    let root = node_id("lazy-root");
+    let leaf = node_id("lazy-leaf");
+    let missing = node_id("missing-node");
+    let next_head = ExportHead::new_with_tree_format(
+        ExportLayoutKind::SimpleMutableTree,
+        Some(root.clone()),
+        export.size_bytes(),
+        WalSeq::zero(),
+        export.head().tree_format(),
+    )
+    .expect("next head");
+
+    let published = catalog
+        .publish_tree_update(PublishTreeUpdate {
+            export_id: export.id().clone(),
+            expected_head: export.head().clone(),
+            next_head: next_head.clone(),
+            records: TreeRecordBatch {
+                nodes: vec![
+                    TreeNodeRecord {
+                        id: root.clone(),
+                        layout_kind: ExportLayoutKind::SimpleMutableTree,
+                        owner_export_id: Some(export.id().clone()),
+                        kind: TreeNodeKind::Internal,
+                        level: 1,
+                        span_start_bytes: 0,
+                        span_len_bytes: export.size_bytes(),
+                    },
+                    TreeNodeRecord {
+                        id: leaf.clone(),
+                        layout_kind: ExportLayoutKind::SimpleMutableTree,
+                        owner_export_id: Some(export.id().clone()),
+                        kind: TreeNodeKind::Leaf,
+                        level: 0,
+                        span_start_bytes: 0,
+                        span_len_bytes: SIMPLE_CHUNK_BYTES,
+                    },
+                ],
+                edges: vec![TreeEdgeRecord {
+                    parent_node_id: root.clone(),
+                    slot: 0,
+                    child_node_id: leaf.clone(),
+                }],
+                leaf_refs: vec![TreeLeafRefRecord {
+                    node_id: leaf.clone(),
+                    storage_kind: TreeStorageKind::MutableBlob,
+                    storage_key: blob_key("lazy-blob"),
+                    len_bytes: SIMPLE_CHUNK_BYTES,
+                }],
+            },
+        })
+        .await
+        .expect("publish tree update");
+
+    assert!(matches!(published, PublishTreeUpdateOutcome::Published(_)));
+    assert_eq!(published.record().head(), &next_head);
+    assert_eq!(catalog.load_node(&root).await.unwrap().unwrap().id, root);
+    assert_eq!(
+        catalog
+            .load_nodes(&[root.clone(), missing.clone()])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        catalog
+            .load_child_edges(&[TreeEdgeLookup {
+                parent_node_id: root.clone(),
+                slots: vec![0, 1],
+            }])
+            .await
+            .unwrap(),
+        vec![TreeEdgeRecord {
+            parent_node_id: root.clone(),
+            slot: 0,
+            child_node_id: leaf.clone(),
+        }]
+    );
+    assert_eq!(
+        catalog
+            .load_leaf_refs(&[leaf.clone(), missing.clone()])
+            .await
+            .unwrap(),
+        vec![TreeLeafRefRecord {
+            node_id: leaf.clone(),
+            storage_kind: TreeStorageKind::MutableBlob,
+            storage_key: blob_key("lazy-blob"),
+            len_bytes: SIMPLE_CHUNK_BYTES,
+        }]
+    );
+
+    let stale_root = node_id("stale-root");
+    let stale_head = ExportHead::new_with_tree_format(
+        ExportLayoutKind::SimpleMutableTree,
+        Some(stale_root.clone()),
+        export.size_bytes(),
+        WalSeq::zero(),
+        export.head().tree_format(),
+    )
+    .expect("stale head");
+    let stale = catalog
+        .publish_tree_update(PublishTreeUpdate {
+            export_id: export.id().clone(),
+            expected_head: export.head().clone(),
+            next_head: stale_head,
+            records: TreeRecordBatch {
+                nodes: vec![TreeNodeRecord {
+                    id: stale_root.clone(),
+                    layout_kind: ExportLayoutKind::SimpleMutableTree,
+                    owner_export_id: Some(export.id().clone()),
+                    kind: TreeNodeKind::Internal,
+                    level: 1,
+                    span_start_bytes: 0,
+                    span_len_bytes: export.size_bytes(),
+                }],
+                edges: Vec::new(),
+                leaf_refs: Vec::new(),
+            },
+        })
+        .await
+        .expect("stale publish");
+
+    assert!(matches!(stale, PublishTreeUpdateOutcome::StaleHead(_)));
+    assert_eq!(stale.record().head(), &next_head);
+    assert!(catalog.load_node(&stale_root).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -1189,10 +1331,18 @@ fn create_export_with_engine(
         .expect("valid create export request")
 }
 
+fn node_id(id: &str) -> NodeId {
+    NodeId::new(id).expect("valid node id")
+}
+
+fn blob_key(key: &str) -> BlobKey {
+    BlobKey::new(key).expect("valid blob key")
+}
+
 fn cow_chunk(index: u64, blob_key: &str) -> CowChunkRef {
     CowChunkRef::new(
         ChunkIndex::new(index),
-        BlobKey::new(blob_key).expect("valid blob key"),
+        self::blob_key(blob_key),
         TREE_CHUNK_BYTES,
     )
     .expect("valid cow chunk")

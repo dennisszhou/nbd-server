@@ -15,10 +15,14 @@ pub use export::{
     ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
     ExportRecord, ExportState, InspectExport, ListExports,
 };
-pub use service::{CatalogHandle, CowTreeMetadataStore, ExportCatalog, SimpleTreeMetadataStore};
+pub use service::{
+    CatalogHandle, CowTreeMetadataStore, ExportCatalog, SimpleTreeMetadataStore, TreeRecordStore,
+};
 pub use tree::{
     BlobKey, ChunkIndex, CowChunkRef, CowTreeSnapshot, NodeId, PublishCompaction,
-    PublishCompactionOutcome, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeSnapshot,
-    TREE_CHUNK_BYTES, Timestamp, WalSeq,
+    PublishCompactionOutcome, PublishTreeUpdate, PublishTreeUpdateOutcome, SIMPLE_CHUNK_BYTES,
+    SimpleChunkRef, SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, TreeEdgeLookup,
+    TreeEdgeRecord, TreeLeafRefRecord, TreeNodeKind, TreeNodeRecord, TreeRecordBatch,
+    TreeStorageKind, WalSeq,
 };
 pub use tree_format::TreeFormat;

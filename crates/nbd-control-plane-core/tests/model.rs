@@ -2,7 +2,7 @@ use nbd_control_plane_core::{
     ActiveExportDescriptor, BlobKey, ChunkIndex, CloneExport, CowChunkRef, CowTreeSnapshot,
     CreateExport, ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind,
     ExportName, ExportState, ListExports, NodeId, PublishCompaction, SIMPLE_CHUNK_BYTES,
-    SimpleChunkRef, TREE_CHUNK_BYTES, Timestamp, TreeFormat, WalSeq,
+    SimpleChunkRef, TREE_CHUNK_BYTES, Timestamp, TreeFormat, TreeNodeKind, TreeStorageKind, WalSeq,
 };
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -150,6 +150,22 @@ fn tree_format_round_trips_catalog_values() {
     );
     assert_eq!(TreeFormat::Bounded32V1.to_string(), "bounded_32_v1");
     assert!(TreeFormat::from_str("bounded_64_v2").is_err());
+}
+
+#[test]
+fn tree_record_kinds_round_trip_catalog_values() {
+    assert_eq!(
+        TreeNodeKind::from_str("internal").unwrap(),
+        TreeNodeKind::Internal
+    );
+    assert_eq!(TreeNodeKind::Leaf.to_string(), "leaf");
+    assert_eq!(
+        TreeStorageKind::from_str("immutable_blob").unwrap(),
+        TreeStorageKind::ImmutableBlob
+    );
+    assert_eq!(TreeStorageKind::MutableBlob.to_string(), "mutable_blob");
+    assert!(TreeNodeKind::from_str("branch").is_err());
+    assert!(TreeStorageKind::from_str("object").is_err());
 }
 
 #[test]

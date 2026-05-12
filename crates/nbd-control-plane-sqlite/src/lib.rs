@@ -3,5 +3,7 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod transaction;
+mod tree_rows;
 
 pub use adapter::SQLiteExportCatalog;

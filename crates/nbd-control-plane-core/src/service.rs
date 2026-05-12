@@ -6,8 +6,9 @@ use crate::export::{
     ExportId, ExportName, ExportRecord, InspectExport, ListExports,
 };
 use crate::tree::{
-    CowTreeSnapshot, PublishCompaction, PublishCompactionOutcome, SimpleChunkRef,
-    SimpleTreeSnapshot,
+    CowTreeSnapshot, NodeId, PublishCompaction, PublishCompactionOutcome, PublishTreeUpdate,
+    PublishTreeUpdateOutcome, SimpleChunkRef, SimpleTreeSnapshot, TreeEdgeLookup, TreeEdgeRecord,
+    TreeLeafRefRecord, TreeNodeRecord,
 };
 use std::sync::Arc;
 
@@ -63,12 +64,29 @@ pub trait CowTreeMetadataStore: Send + Sync {
     ) -> Result<PublishCompactionOutcome>;
 }
 
+#[async_trait::async_trait]
+pub trait TreeRecordStore: Send + Sync {
+    async fn load_node(&self, node_id: &NodeId) -> Result<Option<TreeNodeRecord>>;
+
+    async fn load_nodes(&self, node_ids: &[NodeId]) -> Result<Vec<TreeNodeRecord>>;
+
+    async fn load_child_edges(&self, lookups: &[TreeEdgeLookup]) -> Result<Vec<TreeEdgeRecord>>;
+
+    async fn load_leaf_refs(&self, node_ids: &[NodeId]) -> Result<Vec<TreeLeafRefRecord>>;
+
+    async fn publish_tree_update(
+        &self,
+        request: PublishTreeUpdate,
+    ) -> Result<PublishTreeUpdateOutcome>;
+}
+
 /// Opened catalog service handles for runtime consumers.
 #[derive(Clone)]
 pub struct CatalogHandle {
     export_catalog: Arc<dyn ExportCatalog>,
     simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+    tree_record_store: Arc<dyn TreeRecordStore>,
 }
 
 impl CatalogHandle {
@@ -76,11 +94,13 @@ impl CatalogHandle {
         export_catalog: Arc<dyn ExportCatalog>,
         simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
+        tree_record_store: Arc<dyn TreeRecordStore>,
     ) -> Self {
         Self {
             export_catalog,
             simple_tree_store,
             cow_tree_store,
+            tree_record_store,
         }
     }
 
@@ -94,5 +114,9 @@ impl CatalogHandle {
 
     pub fn cow_tree_store(&self) -> Arc<dyn CowTreeMetadataStore> {
         Arc::clone(&self.cow_tree_store)
+    }
+
+    pub fn tree_record_store(&self) -> Arc<dyn TreeRecordStore> {
+        Arc::clone(&self.tree_record_store)
     }
 }

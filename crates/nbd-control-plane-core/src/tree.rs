@@ -5,6 +5,7 @@ use crate::export::{ExportHead, ExportId, ExportLayoutKind, ExportRecord};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub const TREE_CHUNK_BYTES: u64 = 32 * 1024 * 1024;
@@ -24,6 +25,20 @@ pub struct WalSeq(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChunkIndex(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeNodeKind {
+    Internal,
+    Leaf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeStorageKind {
+    MutableBlob,
+    ImmutableBlob,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimpleChunkRef {
@@ -69,6 +84,59 @@ pub enum PublishCompactionOutcome {
     Published(ExportRecord),
     AlreadyCovered(ExportRecord),
     StalePlan(ExportRecord),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeNodeRecord {
+    pub id: NodeId,
+    pub layout_kind: ExportLayoutKind,
+    pub owner_export_id: Option<ExportId>,
+    pub kind: TreeNodeKind,
+    pub level: u16,
+    pub span_start_bytes: u64,
+    pub span_len_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeEdgeRecord {
+    pub parent_node_id: NodeId,
+    pub slot: u16,
+    pub child_node_id: NodeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeLeafRefRecord {
+    pub node_id: NodeId,
+    pub storage_kind: TreeStorageKind,
+    pub storage_key: BlobKey,
+    pub len_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeRecordBatch {
+    pub nodes: Vec<TreeNodeRecord>,
+    pub edges: Vec<TreeEdgeRecord>,
+    pub leaf_refs: Vec<TreeLeafRefRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeEdgeLookup {
+    pub parent_node_id: NodeId,
+    pub slots: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishTreeUpdate {
+    pub export_id: ExportId,
+    pub expected_head: ExportHead,
+    pub next_head: ExportHead,
+    pub records: TreeRecordBatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublishTreeUpdateOutcome {
+    Published(ExportRecord),
+    StaleHead(ExportRecord),
 }
 
 impl NodeId {
@@ -151,6 +219,56 @@ impl ChunkIndex {
 
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl FromStr for TreeNodeKind {
+    type Err = CatalogError;
+
+    fn from_str(kind: &str) -> Result<Self> {
+        match kind {
+            "internal" => Ok(Self::Internal),
+            "leaf" => Ok(Self::Leaf),
+            kind => Err(CatalogError::invalid_field(
+                "kind",
+                format!("invalid tree node kind `{kind}`"),
+            )),
+        }
+    }
+}
+
+impl FromStr for TreeStorageKind {
+    type Err = CatalogError;
+
+    fn from_str(kind: &str) -> Result<Self> {
+        match kind {
+            "mutable_blob" => Ok(Self::MutableBlob),
+            "immutable_blob" => Ok(Self::ImmutableBlob),
+            kind => Err(CatalogError::invalid_field(
+                "storage_kind",
+                format!("invalid tree storage kind `{kind}`"),
+            )),
+        }
+    }
+}
+
+impl TreeRecordBatch {
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty() && self.leaf_refs.is_empty()
+    }
+}
+
+impl PublishTreeUpdateOutcome {
+    pub fn record(&self) -> &ExportRecord {
+        match self {
+            Self::Published(record) | Self::StaleHead(record) => record,
+        }
+    }
+
+    pub fn into_record(self) -> ExportRecord {
+        match self {
+            Self::Published(record) | Self::StaleHead(record) => record,
+        }
     }
 }
 
@@ -431,6 +549,24 @@ impl fmt::Display for WalSeq {
 impl fmt::Display for ChunkIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.get())
+    }
+}
+
+impl fmt::Display for TreeNodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Internal => f.write_str("internal"),
+            Self::Leaf => f.write_str("leaf"),
+        }
+    }
+}
+
+impl fmt::Display for TreeStorageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MutableBlob => f.write_str("mutable_blob"),
+            Self::ImmutableBlob => f.write_str("immutable_blob"),
+        }
     }
 }
 

@@ -1,13 +1,21 @@
 //! SQLite implementation of the export catalog.
 
-use nbd_control_plane_core::{
-    ActiveExportDescriptor, BlobKey, CatalogError, ChunkIndex, CloneExport, CloneExportResult,
-    CowChunkRef, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, DeleteExport, ExportCatalog,
+use nbd_control_plane_core::error::{CatalogError, Result};
+use nbd_control_plane_core::export::{
+    ActiveExportDescriptor, CloneExport, CloneExportResult, CreateExport, DeleteExport,
     ExportDescriptor, ExportEngineKind, ExportHead, ExportId, ExportLayoutKind, ExportName,
-    ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
-    PublishCompactionOutcome, Result, SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore,
-    SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, TreeFormat, WalSeq,
+    ExportRecord, ExportState, InspectExport, ListExports,
 };
+use nbd_control_plane_core::service::{
+    CowTreeMetadataStore, ExportCatalog, SimpleTreeMetadataStore, TreeRecordStore,
+};
+use nbd_control_plane_core::tree::{
+    BlobKey, ChunkIndex, CowChunkRef, CowTreeSnapshot, NodeId, PublishCompaction,
+    PublishCompactionOutcome, PublishTreeUpdate, PublishTreeUpdateOutcome, SIMPLE_CHUNK_BYTES,
+    SimpleChunkRef, SimpleTreeSnapshot, TREE_CHUNK_BYTES, Timestamp, TreeEdgeLookup,
+    TreeEdgeRecord, TreeLeafRefRecord, TreeNodeRecord, WalSeq,
+};
+use nbd_control_plane_core::tree_format::TreeFormat;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
 use sqlx::{ConnectOptions, Row, SqlitePool};
 use std::collections::{BTreeMap, BTreeSet};
@@ -771,6 +779,181 @@ impl CowTreeMetadataStore for SQLiteExportCatalog {
     }
 }
 
+#[async_trait::async_trait]
+impl TreeRecordStore for SQLiteExportCatalog {
+    async fn load_node(&self, node_id: &NodeId) -> Result<Option<TreeNodeRecord>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+              id, layout_kind, owner_export_id, kind, level,
+              span_start_bytes, span_len_bytes
+            FROM tree_nodes
+            WHERE id = ?
+            "#,
+        )
+        .bind(node_id.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        row.as_ref().map(crate::tree_rows::row_to_node).transpose()
+    }
+
+    async fn load_nodes(&self, node_ids: &[NodeId]) -> Result<Vec<TreeNodeRecord>> {
+        let mut records = Vec::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            if let Some(record) = self.load_node(node_id).await? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    async fn load_child_edges(&self, lookups: &[TreeEdgeLookup]) -> Result<Vec<TreeEdgeRecord>> {
+        let mut records = Vec::new();
+        for lookup in lookups {
+            for slot in &lookup.slots {
+                let row = sqlx::query(
+                    r#"
+                    SELECT parent_node_id, slot, child_node_id
+                    FROM tree_edges
+                    WHERE parent_node_id = ? AND slot = ?
+                    "#,
+                )
+                .bind(lookup.parent_node_id.as_str())
+                .bind(crate::tree_rows::edge_slot_to_i64(*slot))
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+
+                if let Some(row) = row {
+                    records.push(crate::tree_rows::row_to_edge(&row)?);
+                }
+            }
+        }
+        Ok(records)
+    }
+
+    async fn load_leaf_refs(&self, node_ids: &[NodeId]) -> Result<Vec<TreeLeafRefRecord>> {
+        let mut records = Vec::with_capacity(node_ids.len());
+        for node_id in node_ids {
+            let row = sqlx::query(
+                r#"
+                SELECT node_id, storage_kind, storage_key, len_bytes
+                FROM tree_leaf_refs
+                WHERE node_id = ?
+                "#,
+            )
+            .bind(node_id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            if let Some(row) = row {
+                records.push(crate::tree_rows::row_to_leaf_ref(&row)?);
+            }
+        }
+        Ok(records)
+    }
+
+    async fn publish_tree_update(
+        &self,
+        request: PublishTreeUpdate,
+    ) -> Result<PublishTreeUpdateOutcome> {
+        let now = current_timestamp()?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let current = fetch_export_record_by_id_in_tx(&mut tx, &request.export_id).await?;
+        if current.state() == ExportState::Deleted {
+            return Err(CatalogError::ExportDeleted {
+                name: current.name().clone(),
+            });
+        }
+        if current.head() != &request.expected_head {
+            tx.commit().await.map_err(map_sqlx_error)?;
+            return Ok(PublishTreeUpdateOutcome::StaleHead(current));
+        }
+
+        crate::transaction::insert_tree_records(&mut tx, &request.records, &now).await?;
+
+        let next_root = request.next_head.root_node_id().map(NodeId::as_str);
+        let next_format = request
+            .next_head
+            .tree_format()
+            .map(|format| format.to_string());
+        let expected_root = request.expected_head.root_node_id().map(NodeId::as_str);
+        let expected_format = request
+            .expected_head
+            .tree_format()
+            .map(|format| format.to_string());
+
+        let result = sqlx::query(
+            r#"
+            UPDATE export_heads
+            SET
+                layout_kind = ?,
+                root_node_id = ?,
+                tree_format = ?,
+                size_bytes = ?,
+                base_wal_seq = ?,
+                updated_at = ?
+            WHERE export_id = ?
+              AND layout_kind = ?
+              AND root_node_id IS ?
+              AND tree_format IS ?
+              AND size_bytes = ?
+              AND base_wal_seq = ?
+            "#,
+        )
+        .bind(request.next_head.layout_kind().to_string())
+        .bind(next_root)
+        .bind(next_format)
+        .bind(u64_to_i64("size_bytes", request.next_head.size_bytes())?)
+        .bind(u64_to_i64(
+            "base_wal_seq",
+            request.next_head.base_wal_seq().get(),
+        )?)
+        .bind(now.as_str())
+        .bind(request.export_id.as_str())
+        .bind(request.expected_head.layout_kind().to_string())
+        .bind(expected_root)
+        .bind(expected_format)
+        .bind(u64_to_i64(
+            "size_bytes",
+            request.expected_head.size_bytes(),
+        )?)
+        .bind(u64_to_i64(
+            "base_wal_seq",
+            request.expected_head.base_wal_seq().get(),
+        )?)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_sqlx_error)?;
+            let current = fetch_export_record_by_id(&self.pool, &request.export_id).await?;
+            return Ok(PublishTreeUpdateOutcome::StaleHead(current));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE exports
+            SET updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(now.as_str())
+        .bind(request.export_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        let record = fetch_export_record_by_id_in_tx(&mut tx, &request.export_id).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(PublishTreeUpdateOutcome::Published(record))
+    }
+}
+
 async fn load_simple_tree_snapshot(
     pool: &SqlitePool,
     export_id: &ExportId,
@@ -1464,7 +1647,7 @@ fn current_timestamp() -> Result<Timestamp> {
     Timestamp::new(format!("unix_us:{}", duration.as_micros()))
 }
 
-fn u64_to_i64(field: &'static str, value: u64) -> Result<i64> {
+pub(crate) fn u64_to_i64(field: &'static str, value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| {
         CatalogError::invalid_field(
             field,
@@ -1473,9 +1656,19 @@ fn u64_to_i64(field: &'static str, value: u64) -> Result<i64> {
     })
 }
 
-fn i64_to_u64(field: &'static str, value: i64) -> Result<u64> {
+pub(crate) fn i64_to_u64(field: &'static str, value: i64) -> Result<u64> {
     u64::try_from(value).map_err(|_| {
         CatalogError::invalid_field(field, format!("database value {value} is negative"))
+    })
+}
+
+pub(crate) fn u16_to_i64(value: u16) -> i64 {
+    i64::from(value)
+}
+
+pub(crate) fn i64_to_u16(field: &'static str, value: i64) -> Result<u16> {
+    u16::try_from(value).map_err(|_| {
+        CatalogError::invalid_field(field, format!("database value {value} does not fit in u16"))
     })
 }
 
@@ -1486,6 +1679,6 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
-fn map_sqlx_error(error: sqlx::Error) -> CatalogError {
+pub(crate) fn map_sqlx_error(error: sqlx::Error) -> CatalogError {
     CatalogError::database_source(format!("database error: {error}"), error)
 }
