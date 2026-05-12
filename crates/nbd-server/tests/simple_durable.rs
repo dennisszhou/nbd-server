@@ -12,9 +12,10 @@ use nbd_test_support::TestRuntime;
 use std::sync::Arc;
 use tokio::fs;
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 
 #[tokio::test]
 async fn local_blob_store_creates_and_reads_blob_ranges() {
@@ -362,7 +363,7 @@ async fn simple_tree_fixture_with_size(
 ) -> (TestRuntime, SQLiteExportCatalog, ExportRecord) {
     let runtime = TestRuntime::new().expect("test runtime");
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
         .await
         .expect("connect catalog");
 

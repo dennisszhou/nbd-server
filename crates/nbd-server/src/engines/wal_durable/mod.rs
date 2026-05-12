@@ -751,9 +751,10 @@ mod tests {
     use tokio::sync::Notify;
     use tokio::time::timeout;
 
-    const MIGRATIONS: &[&str] = &[include_str!(
-        "../../../../../prisma/migrations/20260506000000_baseline/migration.sql"
-    )];
+    const MIGRATIONS: &[&str] = &[
+        include_str!("../../../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+        include_str!("../../../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+    ];
 
     #[tokio::test]
     async fn background_tick_skips_below_soft_threshold() {
@@ -1051,7 +1052,7 @@ mod tests {
 
     async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
         let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-        let catalog = SQLiteExportCatalog::connect(&url)
+        let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
             .await
             .expect("connect catalog");
 
