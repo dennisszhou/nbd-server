@@ -229,9 +229,10 @@ mod tests {
     use nbd_control_plane::{
         ActiveExportDescriptor, CatalogError, CloneExport, CloneExportResult, CowTreeMetadataStore,
         CowTreeSnapshot, CreateExport, DeleteExport, ExportEngineKind, ExportHead, ExportId,
-        ExportRecord, ExportState, InspectExport, ListExports, PublishCompaction,
-        PublishCompactionOutcome, SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot,
-        Timestamp,
+        ExportRecord, ExportState, InspectExport, ListExports, NodeId, PublishCompaction,
+        PublishCompactionOutcome, PublishTreeUpdate, PublishTreeUpdateOutcome, SimpleChunkRef,
+        SimpleTreeMetadataStore, SimpleTreeSnapshot, Timestamp, TreeEdgeLookup, TreeEdgeRecord,
+        TreeLeafRefRecord, TreeNodeRecord, TreeRecordStore,
     };
     use std::path::PathBuf;
 
@@ -263,13 +264,13 @@ mod tests {
     ) -> LocalExportRegistry {
         let catalog = Arc::new(UnusedCatalog);
         let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
-        let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
+        let tree_record_store: Arc<dyn TreeRecordStore> = catalog.clone();
         let cow_tree_store: Arc<dyn CowTreeMetadataStore> = catalog.clone();
         let factory = Arc::new(ExportFactory::new(
             ServerConfig::default(),
             ConfiguredBlobStore::local(PathBuf::from(".")),
             export_catalog.clone(),
-            simple_tree_store,
+            tree_record_store,
             cow_tree_store,
             Arc::new(UnusedWalProvider),
         ));
@@ -390,6 +391,44 @@ mod tests {
             _export_id: &ExportId,
             _chunks: Vec<SimpleChunkRef>,
         ) -> nbd_control_plane::Result<SimpleTreeSnapshot> {
+            Err(unused_catalog_error())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TreeRecordStore for UnusedCatalog {
+        async fn load_node(
+            &self,
+            _node_id: &NodeId,
+        ) -> nbd_control_plane::Result<Option<TreeNodeRecord>> {
+            Err(unused_catalog_error())
+        }
+
+        async fn load_nodes(
+            &self,
+            _node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeNodeRecord>> {
+            Err(unused_catalog_error())
+        }
+
+        async fn load_child_edges(
+            &self,
+            _lookups: &[TreeEdgeLookup],
+        ) -> nbd_control_plane::Result<Vec<TreeEdgeRecord>> {
+            Err(unused_catalog_error())
+        }
+
+        async fn load_leaf_refs(
+            &self,
+            _node_ids: &[NodeId],
+        ) -> nbd_control_plane::Result<Vec<TreeLeafRefRecord>> {
+            Err(unused_catalog_error())
+        }
+
+        async fn publish_tree_update(
+            &self,
+            _request: PublishTreeUpdate,
+        ) -> nbd_control_plane::Result<PublishTreeUpdateOutcome> {
             Err(unused_catalog_error())
         }
     }

@@ -9,7 +9,7 @@ use crate::wal::{ExportWalHandle, OpenWal, WalDomain, WalProvider};
 use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     ActiveExportDescriptor, CowTreeMetadataStore, ExportCatalog, ExportEngineKind, ExportId,
-    ExportRecord, SimpleTreeMetadataStore,
+    ExportRecord, TreeRecordStore,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub struct ExportFactory {
     config: ServerConfig,
     blob_store: ConfiguredBlobStore,
     catalog: Arc<dyn ExportCatalog>,
-    simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+    tree_record_store: Arc<dyn TreeRecordStore>,
     cow_tree_store: Arc<dyn CowTreeMetadataStore>,
     wal_provider: Arc<dyn WalProvider>,
 }
@@ -34,7 +34,7 @@ impl ExportFactory {
         config: ServerConfig,
         blob_store: ConfiguredBlobStore,
         catalog: Arc<dyn ExportCatalog>,
-        simple_tree_store: Arc<dyn SimpleTreeMetadataStore>,
+        tree_record_store: Arc<dyn TreeRecordStore>,
         cow_tree_store: Arc<dyn CowTreeMetadataStore>,
         wal_provider: Arc<dyn WalProvider>,
     ) -> Self {
@@ -42,7 +42,7 @@ impl ExportFactory {
             config,
             blob_store,
             catalog,
-            simple_tree_store,
+            tree_record_store,
             cow_tree_store,
             wal_provider,
         }
@@ -122,10 +122,16 @@ impl ExportFactory {
                                 .to_owned(),
                             source: None,
                         })?;
+                let head = self
+                    .catalog
+                    .load_export_head(descriptor.id())
+                    .await
+                    .map_err(ServerError::catalog)?;
                 let engine = SimpleDurableEngine::load(
                     descriptor,
                     blob_store,
-                    self.simple_tree_store.clone(),
+                    self.tree_record_store.clone(),
+                    head,
                 )
                 .await?;
                 let head = engine.export_head().await?;

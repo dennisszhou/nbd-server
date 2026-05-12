@@ -14,8 +14,8 @@ use crate::export::{
 use crate::range::ByteRange;
 use crate::storage::{MutableBlobStoreHandle, put_random_blob};
 use nbd_control_plane::{
-    ActiveExportDescriptor, ChunkIndex, ExportHead, ExportLayoutKind, ExportName,
-    SIMPLE_CHUNK_BYTES, SimpleChunkRef, SimpleTreeMetadataStore, SimpleTreeSnapshot, WalSeq,
+    ActiveExportDescriptor, ChunkIndex, ExportHead, ExportName, SIMPLE_CHUNK_BYTES, SimpleChunkRef,
+    TreeRecordStore,
 };
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ pub struct SimpleDurableEngine {
     size_bytes: u64,
     block_size: u64,
     blob_store: MutableBlobStoreHandle,
-    tree_reader: Arc<dyn TreeReader<SimpleTreeSnapshot>>,
+    tree_reader: Arc<dyn TreeReader<SimpleMutableTree>>,
     tree: SimpleMutableTree,
 }
 
@@ -40,9 +40,10 @@ impl SimpleDurableEngine {
     pub async fn load(
         descriptor: &ActiveExportDescriptor,
         blob_store: MutableBlobStoreHandle,
-        catalog: Arc<dyn SimpleTreeMetadataStore>,
+        catalog: Arc<dyn TreeRecordStore>,
+        head: ExportHead,
     ) -> Result<Self> {
-        let tree = SimpleMutableTree::load(catalog, descriptor).await?;
+        let tree = SimpleMutableTree::load(catalog, descriptor, head).await?;
         Self::from_loaded_tree(descriptor, blob_store, tree).await
     }
 
@@ -74,14 +75,7 @@ impl SimpleDurableEngine {
     }
 
     pub async fn export_head(&self) -> Result<ExportHead> {
-        let snapshot = self.tree.snapshot().await?;
-        ExportHead::new(
-            ExportLayoutKind::SimpleMutableTree,
-            snapshot.root_node_id().cloned(),
-            snapshot.size_bytes(),
-            WalSeq::zero(),
-        )
-        .map_err(ServerError::catalog)
+        self.tree.export_head().await
     }
 
     fn validate_range(&self, operation: &'static str, offset: u64, length: u64) -> Result<()> {
@@ -91,9 +85,8 @@ impl SimpleDurableEngine {
     async fn read(&self, offset: u64, len: u32) -> Result<Vec<u8>> {
         let range = ByteRange::new(offset, len);
         self.validate_range("read", range.start(), range.len())?;
-        let snapshot = self.tree.snapshot().await?;
         self.tree_reader
-            .read_committed(&snapshot, range)
+            .read_committed(&self.tree, range)
             .await?
             .materialize()
     }

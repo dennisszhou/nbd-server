@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::{TreeGeometry, TreeNodeSpan};
 use nbd_control_plane::{
     BlobKey, ExportId, ExportLayoutKind, NodeId, TreeEdgeRecord, TreeLeafRefRecord, TreeNodeKind,

@@ -2,7 +2,7 @@ use nbd_config::{ExportRuntimeKind, ServerConfig};
 use nbd_control_plane::{
     CatalogError, CatalogUrl, CowTreeMetadataStore, CowTreeSnapshot, CreateExport, ExportCatalog,
     ExportEngineKind, ExportName, PublishCompaction, PublishCompactionOutcome, SQLiteExportCatalog,
-    SimpleTreeMetadataStore, WalSeq,
+    TreeRecordStore, WalSeq,
 };
 use nbd_server::{
     ConfiguredBlobStore, ExportFactory, ExportOwner, ExportReply, LocalExportRegistry,
@@ -17,9 +17,10 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
 
-const MIGRATIONS: &[&str] = &[include_str!(
-    "../../../prisma/migrations/20260506000000_baseline/migration.sql"
-)];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../../prisma/migrations/20260506000000_baseline/migration.sql"),
+    include_str!("../../../prisma/migrations/20260512000000_tree_format/migration.sql"),
+];
 
 #[tokio::test]
 async fn registry_rejects_second_unique_owner_until_close() {
@@ -430,7 +431,7 @@ async fn registry_reopen_replays_wal_after_close_compaction_fails() {
 
 async fn migrated_catalog(runtime: &TestRuntime) -> SQLiteExportCatalog {
     let url = CatalogUrl::parse(runtime.catalog_url()).expect("catalog URL");
-    let catalog = SQLiteExportCatalog::connect(&url)
+    let catalog = SQLiteExportCatalog::connect_path(url.sqlite_path().expect("sqlite path"))
         .await
         .expect("connect catalog");
 
@@ -469,14 +470,14 @@ fn local_registry_with_compaction_store(
 ) -> LocalExportRegistry {
     let catalog = Arc::new(catalog);
     let export_catalog: Arc<dyn ExportCatalog> = catalog.clone();
-    let simple_tree_store: Arc<dyn SimpleTreeMetadataStore> = catalog.clone();
+    let tree_record_store: Arc<dyn TreeRecordStore> = catalog.clone();
     let cow_tree_store = compaction_store.clone();
     let wal_provider = Arc::new(LocalWalProvider::new(runtime.wal_dir()));
     let factory = Arc::new(ExportFactory::new(
         config,
         ConfiguredBlobStore::local(blob_dir(runtime)),
         export_catalog,
-        simple_tree_store,
+        tree_record_store,
         cow_tree_store,
         wal_provider,
     ));

@@ -53,7 +53,7 @@ impl NbdServer {
             catalog_provider = catalog_provider_name(catalog_url.provider()),
         );
         let export_catalog = catalog.export_catalog();
-        let simple_tree_store = catalog.simple_tree_store();
+        let tree_record_store = catalog.tree_record_store();
         let cow_tree_store = catalog.cow_tree_store();
         let blob_store = ConfiguredBlobStore::open(&config).await?;
         let wal_provider = Arc::new(LocalWalProvider::new(config.runtime.wal_dir.clone()));
@@ -61,7 +61,7 @@ impl NbdServer {
             config.server.clone(),
             blob_store,
             export_catalog.clone(),
-            simple_tree_store,
+            tree_record_store,
             cow_tree_store,
             wal_provider,
         ));

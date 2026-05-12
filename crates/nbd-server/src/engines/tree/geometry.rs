@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::error::{Result, ServerError};
 use crate::range::ByteRange;
 use nbd_control_plane::{ChunkIndex, TREE_CHUNK_BYTES, TreeFormat};
@@ -66,24 +64,8 @@ impl TreeGeometry {
         })
     }
 
-    pub(crate) fn format(self) -> TreeFormat {
-        self.format
-    }
-
-    pub(crate) fn fanout(self) -> u16 {
-        self.fanout
-    }
-
     pub(crate) fn chunk_bytes(self) -> u64 {
         self.chunk_bytes
-    }
-
-    pub(crate) fn size_bytes(self) -> u64 {
-        self.size_bytes
-    }
-
-    pub(crate) fn root_level(self) -> u16 {
-        self.root_level
     }
 
     pub(crate) fn root_span(self) -> TreeNodeSpan {
@@ -219,10 +201,6 @@ impl TreeGeometry {
 }
 
 impl TreePath {
-    pub(crate) fn chunk_index(&self) -> ChunkIndex {
-        self.chunk_index
-    }
-
     pub(crate) fn slots(&self) -> &[u16] {
         &self.slots
     }
@@ -246,14 +224,6 @@ impl TreeChunkRange {
     pub(crate) fn chunk_index(self) -> ChunkIndex {
         self.chunk_index
     }
-
-    pub(crate) fn chunk_offset(self) -> u64 {
-        self.chunk_offset
-    }
-
-    pub(crate) fn range(self) -> ByteRange {
-        self.range
-    }
 }
 
 fn invalid_tree(message: impl Into<String>) -> ServerError {
@@ -272,15 +242,15 @@ mod tests {
         let geometry =
             TreeGeometry::new(TreeFormat::Bounded32V1, 1024 * 1024 * 1024 * 1024).unwrap();
 
-        assert_eq!(geometry.fanout(), 32);
-        assert_eq!(geometry.size_bytes(), 1024 * 1024 * 1024 * 1024);
-        assert_eq!(geometry.root_level(), 3);
+        assert_eq!(geometry.fanout, 32);
+        assert_eq!(geometry.size_bytes, 1024 * 1024 * 1024 * 1024);
+        assert_eq!(geometry.root_level, 3);
         assert_eq!(geometry.root_span().len_bytes(), 1024 * 1024 * 1024 * 1024);
 
         let path = geometry
             .path_for_chunk(ChunkIndex::new(32 * 32 * 32 - 1))
             .unwrap();
-        assert_eq!(path.chunk_index(), ChunkIndex::new(32 * 32 * 32 - 1));
+        assert_eq!(path.chunk_index, ChunkIndex::new(32 * 32 * 32 - 1));
         assert_eq!(path.slots(), &[31, 31, 31]);
     }
 
@@ -293,10 +263,10 @@ mod tests {
 
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chunk_index(), ChunkIndex::new(0));
-        assert_eq!(chunks[0].chunk_offset(), TREE_CHUNK_BYTES - 4);
-        assert_eq!(chunks[0].range(), ByteRange::new(TREE_CHUNK_BYTES - 4, 4));
+        assert_eq!(chunks[0].chunk_offset, TREE_CHUNK_BYTES - 4);
+        assert_eq!(chunks[0].range, ByteRange::new(TREE_CHUNK_BYTES - 4, 4));
         assert_eq!(chunks[1].chunk_index(), ChunkIndex::new(1));
-        assert_eq!(chunks[1].chunk_offset(), 0);
-        assert_eq!(chunks[1].range(), ByteRange::new(TREE_CHUNK_BYTES, 8));
+        assert_eq!(chunks[1].chunk_offset, 0);
+        assert_eq!(chunks[1].range, ByteRange::new(TREE_CHUNK_BYTES, 8));
     }
 }

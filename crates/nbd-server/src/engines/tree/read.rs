@@ -594,6 +594,6 @@ mod lazy_tests {
         );
 
         assert!(reader.root_node_id().is_none());
-        assert_eq!(reader.geometry().format(), TreeFormat::Bounded32V1);
+        assert_eq!(reader.geometry(), geometry);
     }
 }
