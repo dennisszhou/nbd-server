@@ -1,11 +1,14 @@
 Title: Control Plane Storage Adapter Boundary Execution
 Date: 2026-05-12
-Status: approved
+Status: completed
 Approval:
 - overall doc approved: yes
-- current state: Series 1 approved
+- current state: Series 1 finished
 Completion:
-- execution complete: no
+- execution complete: yes
+- completed series: Series 1
+- review complete: yes, `$review-series` accepted the series
+- closeout approved: yes, `$finish-series`
 
 ## Goal
 
@@ -75,7 +78,7 @@ Done means: all commits in this one series are landed, source leakage checks
 pass, targeted crate tests pass, the workspace builds and tests, and the final
 series review has no in-scope findings left unfixed.
 
-Approval: approved
+Approval: finished
 
 Verification plan:
 
