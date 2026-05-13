@@ -1,6 +1,6 @@
 Title: Storage Engine Architecture
-Date: 2026-05-01
-Status: draft
+Date: 2026-05-12
+Status: approved
 
 # Problem
 
@@ -188,9 +188,12 @@ RustFS is the current S3-compatible endpoint used by Docker smoke tests. It is
 replaceable by any endpoint that honors the same create-only and ranged-read
 contract.
 
-# CommittedTreeReader Interaction
+# Tree Reader Interaction
 
-`CommittedTreeReader` owns logical read resolution:
+Server tree readers own logical read resolution above `BlobStore`.
+`SimpleTreeReader` resolves simple mutable chunks through `MutableBlobStore`.
+`CowTreeReader` resolves committed COW chunks through the base `BlobStore`.
+Both share lazy sparse-tree metadata helpers.
 
 - walks sparse catalog/tree metadata;
 - locates the leaf blob for a logical range;

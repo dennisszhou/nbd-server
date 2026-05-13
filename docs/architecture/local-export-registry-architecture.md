@@ -1,5 +1,5 @@
 Title: Local Export Registry Architecture
-Date: 2026-05-01
+Date: 2026-05-12
 Status: draft
 
 # Problem
@@ -15,10 +15,10 @@ Define `LocalExportRegistry` as the in-process registry for active exports:
 
 - register exports on successful open;
 - unregister exports after close;
-- maintain serving lease state for active exports;
+- count same-owner connection references for an already-open export;
 - expose local active export state for request routing and debugging;
-- support serving lease renewal through etcd;
-- leave room for future single-writer/fencing integration.
+- leave room for future serving lease renewal through etcd and
+  single-writer/fencing integration.
 
 # Scope
 
@@ -35,7 +35,28 @@ export state and one active writable owner per export. A future fencing design
 can add stronger durable mutation checks behind the lease/catalog/WAL
 boundaries.
 
-# Data Structures
+# Current Implementation
+
+The implemented registry is intentionally local-only:
+
+- `LocalExportRegistry` stores an in-memory map from `ExportName` to
+  `Opening`, `Open`, or `Closing` state;
+- `ExportOwner` is currently synthetic, and the protocol path creates one
+  unique owner per connection;
+- a second open from the same owner increments a connection reference count
+  and shares the same `ExportRuntime`;
+- a second open from a different owner fails with `ExportBusy`;
+- final owner close calls `ExportRuntime::close()` and removes the active map
+  entry even if close returns an error;
+- no etcd-backed `ExportLeaseStore`, `ExportLifecycleManager`, lease renewal
+  worker, or lease-loss halt path exists yet.
+
+The registry opens export descriptors from `ExportCatalog`, then delegates
+engine/runtime construction to `ExportFactory`. Engines load the latest head
+or tree state during construction rather than treating the descriptor as the
+serving head.
+
+# Target Lease Data Structures
 
 Use structured records instead of passing many loose fields.
 
@@ -101,7 +122,7 @@ const ACTIVE_EXPORT_LEASE_TTL: Duration = Duration::from_secs(60);
 const ACTIVE_EXPORT_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 ```
 
-# API Shape
+# Target Lease API Shape
 
 Conceptual API:
 
@@ -292,28 +313,35 @@ that the export must not continue serving writes after its lease has expired.
 
 # Invariants
 
+Current implementation:
+
 - `LocalExportRegistry` is process-local active export lifecycle truth.
-- `ExportCatalog` remains durable export recorddata truth.
-- Etcd per-export leases are cross-process lifecycle exclusion truth.
-- A local record may be registered as `Opening` after lease acquisition and
-  before export initialization.
-- `Opening` transitions to `Active` only after initialization succeeds.
-- Failed initialization unregisters the local record and releases the lease.
+- `ExportCatalog` remains durable export record data truth.
+- A local record may be registered as `Opening` before export initialization.
+- `Opening` transitions to `Open` only after initialization succeeds.
+- Failed initialization unregisters the local record.
 - Unregister happens on close/shutdown.
 - Closing exports remain registered until close cleanup finishes.
-- `nbdcli delete` fails if it cannot acquire the per-export lease.
-- `nbdcli delete` uses `ExportLifecycleManager`, not a local NBD server socket.
 - First implementation allows at most one active writable connection per
   export.
 - Multiple connections for the same export require same-client authentication
   and are out of scope for the first implementation.
+- Local registry state is not used for crash recovery.
+
+Future lease model:
+
+- Etcd per-export leases are cross-process lifecycle exclusion truth.
+- A local record may be registered as `Opening` after lease acquisition and
+  before export initialization.
+- Failed initialization releases the lease.
+- `nbdcli delete` fails if it cannot acquire the per-export lease.
+- `nbdcli delete` uses `ExportLifecycleManager`, not a local NBD server socket.
 - Lease renewal is derived from local active records.
 - Serving leases use a 60 second TTL.
 - The renewal worker refreshes serving leases every 30 seconds.
 - Successful lease renewal updates the active export's observed lease
   timestamp/deadline.
 - Export lease loss halts the active export.
-- Local registry state is not used for crash recovery.
 
 # Design-Phase Details
 

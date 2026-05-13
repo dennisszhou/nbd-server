@@ -1,5 +1,5 @@
 Title: Workqueue Architecture
-Date: 2026-05-01
+Date: 2026-05-12
 Status: draft
 
 # Problem
@@ -41,8 +41,8 @@ storage work queue:
   concurrency limits and shared backend client resources
 
 compaction queue:
-  runs background checkpointing work at lower priority; owned by
-  CompactionManager and separate from export request queue slots
+  runs background checkpointing work at lower priority; currently engine-owned
+  by WalDurableEngine and separate from export request queue slots
 
 lease queue:
   scans local active exports every 30 seconds, renews etcd leases, and runs
@@ -114,16 +114,17 @@ reply path attached to the original request.
 
 # Storage Boundary
 
-Storage callers should normally submit object work to `StorageWorkQueue` rather
-than call the backend directly from request workers.
+The current implementation calls `BlobStore` directly from engine/read-view
+work. A future `StorageWorkQueue` can wrap the same backend boundary when S3 or
+local storage pressure needs explicit scheduling.
 
 This keeps storage concurrency and backpressure policy out of:
 
 - NBD protocol code;
 - `Export`;
 - `ExportReadView`;
-- `CommittedTreeReader`;
-- `CompactionManager`.
+- tree readers;
+- `CowCompactor`.
 
 The queue may reorder independent storage I/O, but it must not define export
 correctness ordering. Correctness ordering belongs to `ExportAdmissionCtl` and
@@ -136,22 +137,37 @@ correctness is still defined above it.
 
 # Compaction Boundary
 
-Compaction has its own logical queue. It may run on the same Tokio executor as
-the rest of the process, but it must not share export request queue-depth slots
-or connection reply queues.
+Compaction has its own logical lifecycle. It may run on the same Tokio executor
+as the rest of the process, but it must not share export request queue-depth
+slots or connection reply queues.
 
-The first compaction queue can be simple:
+The current implementation is engine-local:
+
+```text
+WalDurableEngine
+  -> BackgroundCompactionTask timer
+  -> CompactionCoordinator
+  -> CowCompactor
+  -> TreeRecordStore.publish_tree_update(...)
+```
+
+The coordinator uses a per-export compaction lock. Background compaction skips
+when write pressure has reached the hard threshold or when another compaction
+is already in flight. Write-pressure and close-time compaction are best effort:
+failure leaves acknowledged writes durable in WAL.
+
+A future generic compaction queue can be simple:
 
 ```text
 bounded pending queue
   -> one or a small fixed number of background workers
-  -> CompactionManager.compact_export(job)
+  -> engine or external compaction worker
 ```
 
-The queue limits background catalog, WAL replay, and blob construction work.
-Correctness does not rely on single-worker serialization. Duplicate or racing
-compaction attempts remain safe because catalog publication is idempotent and
-compares against the current database head.
+Such a queue would limit background catalog, WAL replay, and blob construction
+work. Correctness must not rely on single-worker serialization. Duplicate or
+racing compaction attempts remain safe because catalog publication compares
+against the current database head.
 
 The compaction queue API should hide whether workers are Tokio tasks on the
 main server runtime, a dedicated current-thread Tokio runtime on one OS thread,
@@ -162,11 +178,10 @@ If the compaction queue is full or shutting down, enqueue failure delays
 cleanup but does not invalidate close or write durability. WAL replay remains
 the recovery path.
 
-The first compaction queue shutdown policy is explicit: stop accepting new
-jobs, let the currently running job finish, drop pending queued jobs, and join
-the worker before manager shutdown completes. Dropping queued compaction work
-is safe because compaction is cleanup/checkpointing, not the write durability
-boundary.
+A future compaction queue shutdown policy should be explicit: stop accepting
+new jobs, let the currently running job finish, drop pending queued jobs, and
+join workers before shutdown completes. Dropping queued compaction work is safe
+because compaction is cleanup/checkpointing, not the write durability boundary.
 
 # Invariants
 

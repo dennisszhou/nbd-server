@@ -1,15 +1,17 @@
 Title: Compaction Manager Architecture
-Date: 2026-05-01
+Date: 2026-05-12
 Status: superseded
 
-Superseded by `docs/plans/2026-05-06-export-head-ownership-compaction.md`
-and `docs/plans/2026-05-12-control-plane-storage-adapter-boundary.md`.
-The live implementation uses an engine-owned compaction coordinator over a
-direct `CowCompactor`; it no longer has a global `CompactionManager` queue or
-background worker shutdown lifecycle. Compaction publication now goes through
-the storage-neutral `TreeRecordStore::publish_tree_update` boundary, not the
-old catalog compaction-publish API. This document is retained only as
-historical context for the earlier queue-based design.
+Superseded by `docs/plans/2026-05-06-export-head-ownership-compaction.md`,
+`docs/plans/2026-05-07-read-view-background-compaction.md`, and
+`docs/plans/2026-05-12-control-plane-storage-adapter-boundary.md`.
+The live implementation uses an engine-owned `CompactionCoordinator` over a
+direct `CowCompactor`; it no longer has a global `CompactionManager` queue.
+Close-time, write-pressure, and background compaction are owned by
+`WalDurableEngine`, and publication goes through the storage-neutral
+`TreeRecordStore::publish_tree_update` boundary, not the old catalog
+compaction-publish API. This document is retained only as historical context
+for the earlier global queue design.
 
 # Problem
 

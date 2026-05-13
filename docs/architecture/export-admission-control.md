@@ -1,6 +1,6 @@
 Title: Export Admission Control
-Date: 2026-05-01
-Status: draft
+Date: 2026-05-12
+Status: approved
 
 # Problem
 
@@ -139,6 +139,22 @@ Non-overlapping reads and writes may run concurrently in the long-term policy,
 but the first implementation may choose a coarser policy as long as it
 preserves these semantics.
 
+# Current Policy
+
+The current implementation uses the range-oriented API directly:
+
+- every request receives a volatile accepted-order ticket;
+- active and waiting operations are tracked in memory;
+- overlapping writes conflict with reads and writes;
+- reads can pass only when no active or earlier waiting conflicting write
+  blocks them;
+- flush conflicts with every operation and acts as a full-export barrier;
+- dropping an ungranted waiter cancels that admission request.
+
+This is not a global mutex. Non-overlapping writes can run concurrently, and
+overlapping read/write ordering is preserved by checking active operations and
+earlier waiting tickets.
+
 # Policy Evolution
 
 The stable API is more important than the first scheduling data structure.
@@ -211,8 +227,6 @@ capability so storage code does not need a serial-only bypass.
 
 # Open Questions
 
-- Whether the first implementation should use a global mutex or global
-  reader/writer lock behind the range-oriented API.
 - Whether flush must conflict with reads forever or only with writes after the
   first implementation.
 - How admission should expose queue depth, wait time, and per-export

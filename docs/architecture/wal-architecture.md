@@ -1,6 +1,6 @@
 Title: WAL Architecture
-Date: 2026-05-01
-Status: draft
+Date: 2026-05-12
+Status: approved
 
 # Problem
 
@@ -86,7 +86,7 @@ to `(owner, export_name)` when auth/client identity exists, without changing
 
 ## LocalWalProvider
 
-The initial WAL backend is local and keyed by `export_id`.
+The implemented WAL backend is local and keyed by `export_id`.
 
 Responsibilities:
 
@@ -98,6 +98,11 @@ Responsibilities:
 
 Local WAL durability is enough for the first prototype. It is not the final
 cross-machine durability model.
+
+The local backend stores segment files under the configured WAL root, uses a
+128 MiB target segment size, writes framed records, syncs the segment before
+returning append success, scans complete records on open, and exposes explicit
+`prune_through` cleanup for checkpointed prefixes.
 
 ## RemoteWalProvider
 
@@ -214,11 +219,12 @@ published tree at checkpoint C
 ```
 
 After compaction publishes checkpoint `C`, WAL records `<= C` are no longer
-needed by a fresh read view. They may still be needed by an active stale view
-that has not installed checkpoint `C`, so physical deletion must obey a
-retention policy.
+needed by a fresh read view. The current single-process engine prunes local WAL
+only after its own `ExportReadView` installs the checkpoint. Future external
+cleanup or multi-process serving must add a retention policy or leases before
+deleting WAL that another stale-but-valid read view may still need.
 
-The first pruning policy can be time based:
+One future pruning policy can be time based:
 
 ```text
 WAL segment is prune-eligible when:
@@ -295,10 +301,7 @@ segment is deleted.
 
 # Open Questions
 
-- Local WAL record framing and segment size.
-- Whether local WAL payloads are always inline for the first implementation.
 - Remote WAL service API and object/storage layout.
-- Checksum scheme and record framing.
 - Whether flush should write an explicit flush marker for debugging or recovery
   evidence.
 - How to represent failed or abandoned partial append attempts.

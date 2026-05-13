@@ -177,6 +177,11 @@ Leaf nodes:
 
 Missing committed data zero-fills.
 
+The current implementation uses this bounded 32-wide shape for both simple
+mutable trees and COW immutable trees. Older simple-durable planning text
+described a one-level root with direct leaf edges as the first implementation;
+that historical detail is no longer the current tree geometry.
+
 # Copy-On-Write Roots And Clone
 
 This section applies only to `cow_immutable_tree`.

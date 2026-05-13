@@ -1,5 +1,5 @@
 Title: Export Lifecycle Architecture
-Date: 2026-05-01
+Date: 2026-05-12
 Status: draft
 
 # Problem
@@ -43,6 +43,10 @@ It does not store metadata by itself. It coordinates:
 This is the target open/delete race-prevention boundary. The current local
 prototype has catalog delete and process-local open exclusion, but it does not
 yet implement `ExportLifecycleManager` or `ExportLeaseStore`.
+
+Today, open goes through `LocalExportRegistry` and delete goes directly through
+`ExportCatalog`. That is acceptable for the single-process prototype, but it is
+not the intended cross-process lifecycle contract.
 
 # Lease Model
 
@@ -148,7 +152,7 @@ marked deleted, later opens fail from catalog state.
 
 # Invariants
 
-- `ExportCatalog` remains durable export recorddata truth.
+- `ExportCatalog` remains durable export record data truth.
 - `ExportLeaseStore` remains lifecycle exclusion truth.
 - Open and delete contend on the same per-export lease.
 - A delete operation marks the catalog deleted only while holding the lease.

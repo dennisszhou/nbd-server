@@ -1,6 +1,6 @@
 Title: Export Read View Architecture
-Date: 2026-05-01
-Status: draft
+Date: 2026-05-12
+Status: approved
 
 # Problem
 
@@ -25,9 +25,10 @@ Define `ExportReadView` so that:
 - optional read-through/blob cache entries can be evicted safely;
 - compaction can advance the committed root and checkpoint through an explicit
   cutover event;
-- in-flight reads using an old root remain correct because the WAL overlay
-  still contains every write not represented by that root;
-- untagged logical range caches are forbidden.
+- in-flight reads using an old root remain correct because they capture the
+  overlay/cache slices needed for that read before the root changes;
+- logical range caches remain owned by `ExportReadView` and cannot become an
+  independent source of truth.
 
 # Serving Model
 
@@ -41,18 +42,22 @@ The view is the cache and the arbiter of what is authoritative for reads:
 ```rust
 struct ExportReadView {
     state: RwLock<ReadViewState>,
-    active_reads: ReadEpochTracker,
+    tree_reader: Arc<dyn TreeReader<RootSnapshot>>,
 }
 
 struct ReadViewState {
-    base_tree: PublishedTree,
-    wal_overlay: RangeIndex<WalEntry>,
-    cache: RangeCache<CacheEntry>,
+    root: RootSnapshot,
+    last_applied_seq: WalSeq,
+    wal_debt_bytes: u64,
+    overlay: OverlayExtentMap,
+    cache: ReadCache,
 }
 
-struct PublishedTree {
+struct RootSnapshot {
     root_node_id: Option<NodeId>,
     base_wal_seq: WalSeq,
+    size_bytes: u64,
+    tree_format: Option<TreeFormat>,
 }
 
 struct WalEntry {
@@ -63,7 +68,6 @@ struct WalEntry {
 
 struct CacheEntry {
     range: ByteRange,
-    visible_at_or_before: WalSeq,
     data_ref: CacheDataRef,
 }
 ```
@@ -77,8 +81,9 @@ Read order:
 
 ```text
 1. required WAL overlay entries in ExportReadView
-2. committed tree/blob state through the current or captured BackingReader
-3. zero-fill
+2. optional ReadCache entries for gaps not covered by overlay
+3. committed tree/blob state through the current or captured tree reader
+4. zero-fill committed tree holes
 ```
 
 The WAL overlay is required correctness state. It is not evictable until a
@@ -92,16 +97,27 @@ required:
   WAL overlay entries where seq > base_wal_seq
 
 optional:
-  immutable blob cache entries keyed by BlobKey
-  tagged logical read-through cache entries, if ever added
-  tree lookup metadata tagged by root/checkpoint
+  logical ReadCache entries owned by ExportReadView
+  tree lookup metadata, if added, scoped to root/checkpoint
+  immutable blob cache entries keyed by BlobKey, if added
 ```
 
-Cache entries are valid only when their version tag proves they are no newer
-than the current visible WAL boundary for the read. A cache entry backed by
-WAL storage must not outlive the WAL segment it references; before WAL pruning,
-such entries must be dropped or converted to cache data that no longer depends
-on the WAL file.
+The current `ReadCache` is a logical extent cache, not an independent
+versioned source of truth. It is safe only because it is owned inside
+`ExportReadView` state:
+
+- reads capture cache slices while holding the same state lock used for the
+  current root and overlay lookup;
+- WAL writes trim overlapping cache ranges before they become visible through
+  the overlay;
+- tree fills are inserted only if the read-view root did not change while the
+  tree miss was being filled;
+- checkpoint advancement inserts now-committed WAL slices into the cache before
+  removing those ranges from the authoritative overlay.
+
+A cache entry backed by WAL storage must not outlive the WAL segment it
+references; before external WAL pruning, such entries must be dropped or
+converted to cache data that no longer depends on the WAL file.
 
 # Global WAL Prefix Checkpoint
 
@@ -129,58 +145,48 @@ plus the required WAL overlay and optional memory caches.
 Conceptual API:
 
 ```rust
-trait BackingReader {
+trait TreeReader<R> {
     async fn read_committed(
         &self,
-        root: RootSnapshot,
+        root: &R,
         range: ByteRange,
-    ) -> Result<Bytes>;
+    ) -> Result<Block>;
 }
 
 impl ExportReadView {
-    async fn read(&self, range: ByteRange) -> Result<Bytes>;
+    async fn read(&self, range: ByteRange) -> Result<Vec<u8>>;
 
-    fn apply_wal_record(&self, record: WalRecord) -> Result<()>;
+    async fn apply_wal_record(&self, record: WalRecord) -> Result<()>;
 
-    fn install_checkpoint(&self, checkpoint: ReadViewCheckpoint)
-        -> Result<()>;
+    async fn advance_root(&self, new_root: RootSnapshot) -> Result<()>;
 }
 ```
 
-`BackingReader` is intentionally above `BlobStore`. `ExportReadView`
+`TreeReader<RootSnapshot>` is intentionally above `BlobStore`. `ExportReadView`
 should not know how to walk sparse tree nodes, but it may own the current
-`RootSnapshot` and pass that snapshot to the backing reader.
+`RootSnapshot` and pass that snapshot to the tree reader.
 
-# Read Epochs And Root Guards
+# Read Snapshots And Checkpoint Advancement
 
-A read should capture a root guard before filling misses. The guard identifies
-the committed tree root and WAL checkpoint used by that read.
-
-```rust
-struct RootGuard {
-    root: RootSnapshot,
-    checkpoint: WalSeq,
-    epoch: ReadEpoch,
-}
-```
-
-The guard is a lightweight active-reader reference, not a correctness lock.
-Its job is to prevent WAL overlay downgrade while a read may still use an
-older root.
+A read captures the root snapshot, overlapping WAL overlay slices, optional
+cache hits, and remaining tree misses while holding the read-view state lock.
+Captured overlay slices own references to their WAL records, so the read can
+remain correct even if a checkpoint is installed before the tree miss reads
+finish.
 
 Read flow:
 
 ```text
-capture root guard R/S
-read WAL overlay entries that cover the request
+capture root R/S plus overlay/cache slices for the requested range
 read remaining holes from committed tree using R
+copy tree fills and cache hits
+overlay captured WAL slices last
 assemble result
-drop root guard
 ```
 
 If compaction publishes root `R2` while a read is still using old root `R1`,
-the read remains correct as long as `ExportReadView` has not dropped WAL
-overlay entries that are not represented by `R1`.
+the read remains correct because it already captured the WAL overlay slices
+needed with `R1`.
 
 That is the key cutover invariant:
 
@@ -188,46 +194,48 @@ That is the key cutover invariant:
 > root snapshot still usable by in-flight reads represents that sequence, or
 > the read captured an overlay snapshot that still includes it.
 
-The first implementation can satisfy this conservatively by holding a read-view
-lock across root-guard capture and overlay lookup, then delaying overlay
-downgrade until no root guards with older checkpoints remain.
-
-Root guards protect downgrade eligibility only. Reads remain correct because
-each read combines:
+The current implementation satisfies this without a separate root-guard type:
+it captures the overlay slices before releasing the read lock. Reads remain
+correct because each read combines:
 
 ```text
 captured root/checkpoint
   + WAL overlay entries newer than the captured checkpoint
 ```
 
-The read epoch tracker records the oldest checkpoint still usable by in-flight
-reads. Checkpoint installation may make a newer root available for new reads,
-but it must not retire authoritative WAL entries needed by any active epoch.
+Checkpoint installation may make a newer root available for new reads, but it
+must not invalidate the overlay slices already captured by in-flight reads.
 
-# BackingReader
+# Tree Reader
 
-`CommittedTreeReader` implements `BackingReader` by:
+`CowTreeReader` implements `TreeReader<RootSnapshot>` by:
 
 - resolving the supplied committed root snapshot;
 - walking sparse internal nodes;
 - locating 32 MiB leaf blobs;
-- reading blob ranges through `StorageWorkQueue`;
+- reading blob ranges through the configured `BlobStore`;
 - zero-filling holes.
 
-The tree reader may cache immutable node/blob lookups internally, but logical
-range caching must be tagged by root/checkpoint.
+The tree reader may cache immutable node/blob lookups internally. Any future
+logical range cache outside `ExportReadView` state must be tagged by
+root/checkpoint; the current logical `ReadCache` is safe only because it is
+owned by the read view and maintained under that state lock.
 
 # Checkpoint Events
 
 Compaction creates a new committed root for a global WAL prefix.
 
-Checkpoint event:
+Current checkpoint advancement entry points:
 
 ```rust
-struct ReadViewCheckpoint {
-    old_root: RootId,
-    new_root: RootId,
-    compacted_through: WalSeq,
+impl ExportReadView {
+    async fn advance_root(&self, new_root: RootSnapshot) -> Result<()>;
+
+    async fn advance_after_compaction(
+        &self,
+        new_root: RootSnapshot,
+        snapshot: &ReadViewCompactionSnapshot,
+    ) -> Result<()>;
 }
 ```
 
@@ -236,15 +244,14 @@ On checkpoint installation, `ExportReadView` should:
 - atomically make `new_root` the root used for new read snapshots;
 - record that the committed checkpoint advanced to `compacted_through`;
 - keep WAL overlay entries with `seq > compacted_through`;
-- demote or retire WAL overlay entries with `seq <= compacted_through` only
-  when no root guard with an older checkpoint can still need them;
-- keep immutable blob cache entries by `BlobKey`;
-- invalidate logical read-through cache entries tagged with older roots.
+- demote or retire WAL overlay index entries with `seq <= compacted_through`;
+- keep optional cache entries that remain correct for the new read view.
 
 Demotion means an entry stops being authoritative WAL overlay state because
 the published tree now includes it. The implementation may:
 
-- drop the entry immediately when no active read can need it;
+- drop the entry from the live overlay index after captured read slices own
+  their record references;
 - keep a copy as optional cache if it no longer references prunable WAL
   storage;
 - keep a WAL-backed cache entry only while the referenced WAL segment is still
@@ -278,9 +285,10 @@ catch-up path is:
 
 ```text
 load newer export head/root checkpoint C
-  -> install root/checkpoint C for new reads
+  -> advance the read-view root/checkpoint for new reads
   -> keep overlay entries with seq > C authoritative
-  -> demote/drop overlay entries with seq <= C after older read epochs drain
+  -> demote/drop overlay entries with seq <= C after captured read slices own
+     any record references they still need
 ```
 
 If WAL cleanup uses a time-based retention window, a read view older than that
@@ -298,9 +306,9 @@ choose global checkpoint S
   -> read WAL records (old_checkpoint + 1)..S
   -> upload new leaf blobs
   -> create new tree nodes
-  -> ExportCatalog.publish_compaction(expected_base, new_root, S)
+  -> TreeRecordStore.publish_tree_update(expected_head, next_head, records)
   -> optionally notify active Export
-  -> ExportReadView.install_checkpoint(new_root, S), if active
+  -> ExportReadView.advance_after_compaction(new_root, snapshot), if active
   -> retire now-committed WAL overlay entries when safe
 ```
 
@@ -312,7 +320,11 @@ for stale-but-valid read views according to the retention contract.
 
 # WAL Retention Interaction
 
-The first pruning contract can be time based rather than lease based.
+The current local engine prunes checkpointed WAL only after the active
+`ExportReadView` has installed the newly published checkpoint. That is a
+single-process cleanup policy, not a cross-process retention protocol.
+
+A future external cleanup contract can be time based rather than lease based.
 
 ```rust
 struct WalRetentionPolicy {
@@ -379,7 +391,8 @@ represented by the committed root.
 - WAL overlay entries with `seq > base_wal_seq` are required state.
 - Required WAL overlay entries are not evicted for memory pressure.
 - WAL entries with `seq <= base_wal_seq` may be demoted from
-  authoritative overlay state after active older read epochs drain.
+  authoritative overlay state after captured read slices own any record
+  references they still need.
 - Optional blob/read-through cache entries may be evicted for memory pressure.
 - Optional cache entries that reference WAL storage must be dropped or copied
   before the referenced WAL segment is pruned.
@@ -388,21 +401,16 @@ represented by the committed root.
 - Startup replays every durable WAL record with `seq > base_wal_seq`.
 - Checkpoint installation never drops WAL overlay entries newer than the
   checkpoint.
-- Checkpoint installation does not retire older overlay entries until root
-  guards with older checkpoints no longer need them.
-- Immutable blob cache entries do not become stale when roots move.
-- Untagged logical read caches are forbidden.
-- Cache invalidation is driven by checkpoint/root advancement, not object
-  deletion.
-- A serving read view older than the WAL retention window is invalid and must
-  refresh or stop serving.
+- Checkpoint installation does not invalidate overlay slices already captured
+  by in-flight reads.
+- Logical `ReadCache` entries are valid only while owned by `ExportReadView`
+  state and maintained by write trimming, root-checked tree fill insertion, and
+  checkpoint demotion.
+- Under a future external retention policy, a serving read view older than the
+  WAL retention window is invalid and must refresh or stop serving.
 
 # Open Questions
 
-- Whether first implementation should delay overlay retirement with a root
-  guard count or by serializing reads during checkpoint install.
-- Whether the first read view should include immutable blob caching or only the
-  required WAL overlay.
 - Whether cache memory pressure can ever spill WAL overlay state to a local
   durable cache while preserving the same read-view invariant.
 - Exact default WAL retention window and refresh interval.

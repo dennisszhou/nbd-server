@@ -11,7 +11,8 @@ this file only records local facts and conventions.
   client, and CLI.
 - Main workspace crates:
   - `crates/nbd-server`: TCP NBD server, connection runtime, export runtime,
-    admission, registry, memory engine, simple durable engine.
+    admission, registry, memory engine, simple durable engine, WAL durable
+    engine, local/S3 blob storage, and local WAL.
   - `crates/nbd-control-plane`: public catalog facade and provider factory.
   - `crates/nbd-control-plane-core`: storage-neutral catalog domain types,
     traits, diagnostics, and errors.
@@ -54,6 +55,14 @@ this file only records local facts and conventions.
   - `crates/nbd-server/src/engines/simple_durable/`
   - `crates/nbd-server/src/engines/tree/`
   - `crates/nbd-server/tests/simple_durable.rs`
+- WAL durable, read-view, or compaction work:
+  - `docs/architecture/wal-architecture.md`
+  - `docs/architecture/export-read-view-architecture.md`
+  - `docs/architecture/export-tree-metadata.md`
+  - `crates/nbd-server/src/engines/wal_durable/`
+  - `crates/nbd-server/src/wal/`
+  - `crates/nbd-server/tests/wal.rs`
+  - `crates/nbd-server/tests/wal_durable.rs`
 - Config work:
   - `crates/nbd-config/src/lib.rs`
   - `crates/nbd-config/tests/config_loading.rs`
@@ -89,6 +98,12 @@ this file only records local facts and conventions.
 - `MemoryExportEngine` relies on admission for range safety.
 - Durable engines store sparse 32 MiB chunks behind the configured blob store
   and persist tree metadata through storage-neutral catalog traits.
+- Tree-backed exports use stored `TreeFormat::Bounded32V1`: 32 MiB leaves and
+  32-wide internal nodes, with geometry interpreted only by server engine code.
+- `WalDurableEngine` serves from `ExportReadView`, which combines committed
+  COW tree state, retained WAL overlay state, and optional read cache entries.
+- WAL durable compaction is engine-owned. Close-time, write-pressure, and
+  background compaction publish COW roots through `TreeRecordStore`.
 - `nbd-control-plane` is the public catalog facade. Concrete database
   implementation details live in adapter crates such as
   `nbd-control-plane-sqlite`.
@@ -106,6 +121,12 @@ this file only records local facts and conventions.
   clone-ready, garbage-collected, or atomic across multi-chunk failures.
 - `SimpleMutableTree` is the only request-path owner that should update simple
   tree metadata. Keep random catalog writes out of `SimpleDurableEngine`.
+- WAL overlay state is correctness state until a committed checkpoint covers
+  it. Optional read-cache state may be dropped, but acknowledged WAL records
+  must remain reconstructable from retained WAL or committed tree state.
+- Local WAL pruning is tied to engine-owned checkpoint installation. Do not add
+  external cleanup, retention windows, or lease assumptions without updating
+  the WAL/read-view architecture docs and tests together.
 - The current protocol path uses one synthetic owner per connection. Same-owner
   multi-connection support is a future auth/client-identity feature.
 - The server does not advertise `NBD_FLAG_CAN_MULTI_CONN`.
@@ -209,8 +230,10 @@ nbd-client -d /dev/nbd1 || true
 - SQLite-specific opening, SQL, row mapping, and schema checks live in
   `nbd-control-plane-sqlite`.
 - Simple durable uses `layout_kind = simple_mutable_tree`.
-- Future WAL/COW work should use a different layout meaning rather than
-  reinterpret simple mutable rows as immutable history.
+- WAL durable uses `layout_kind = cow_immutable_tree`; do not reinterpret simple
+  mutable rows as immutable history.
+- Both simple mutable and COW tree paths use bounded 32-wide tree geometry.
+  Catalog adapters persist rows and do not infer fanout or plan sparse paths.
 - Catalog schema changes need focused tests in
   `crates/nbd-control-plane-sqlite/tests/sqlite_catalog.rs`.
 

@@ -1,6 +1,6 @@
 Title: NBD Protocol Architecture
-Date: 2026-05-01
-Status: draft
+Date: 2026-05-12
+Status: approved
 
 # Problem
 
@@ -59,13 +59,15 @@ requests, drain or cancel per-connection work according to policy, and join
 connection tasks before server shutdown returns.
 
 This connection registry is not durable metadata and is not the
-`LocalExportRegistry`. `LocalExportRegistry` tracks active exports and serving
-leases; the connection registry tracks socket/task lifecycle.
+`LocalExportRegistry`. `LocalExportRegistry` tracks active exports and leaves
+room for future serving leases; the connection registry tracks socket/task
+lifecycle.
 
-The current prototype joins the listener task and shuts down background
-compaction, but it does not yet own a full accepted-connection task registry.
-Until that lands, `server.shutdown.completed` should not be read as proof that
-every accepted connection task was joined.
+The current implementation owns accepted connection tasks with a `JoinSet`.
+Shutdown stops accepting new connections, broadcasts connection shutdown,
+drains or cancels connection-local work according to the connection shutdown
+path, and joins accepted connection tasks before logging
+`server.shutdown.completed`.
 
 ## NBDConnection
 
@@ -138,19 +140,17 @@ Socket handling owns byte transport and protocol state. It may validate wire
 shape, size write payloads, and route requests. It must not own export
 correctness, WAL durability, storage object I/O, cache fill, or compaction.
 
-Long-term socket handling should include an explicit active-connection registry
-or task set. The accept loop registers each connection before spawning its
-runtime work and unregisters it only after inbound handling, reply writing, and
-connection cleanup have finished. Global shutdown uses that registry to:
+Socket handling includes an explicit active-connection task set. The accept
+loop registers each connection before spawning its runtime work and unregisters
+it only after inbound handling, reply writing, and connection cleanup have
+finished. Global shutdown uses that task set to:
 
 - stop accepting new connections;
 - signal active connections to stop accepting new requests;
 - drain or cancel outstanding per-connection work according to shutdown policy;
 - join connection tasks so shutdown completion is truthful.
 
-The in-memory server may detach connection tasks for the first vertical slice,
-but future socket-runtime design should not preserve that as the production
-model.
+Connection tasks are not detached during normal server shutdown.
 
 ## Export Runtime
 
@@ -213,7 +213,7 @@ Handling:
 
 ```text
 parse export name and info requests
-  -> LocalExportRegistry.open(export_name, export_owner)
+  -> LocalExportRegistry.open(export_name, synthetic_connection_owner)
   -> on failure, send fixed-newstyle option error reply
   -> on success, send NBD_REP_INFO for NBD_INFO_EXPORT
   -> send final NBD_REP_ACK
@@ -447,8 +447,9 @@ Every request must be checked for:
 - configured maximum payload size;
 - zero-length behavior.
 
-The first implementation should reject unsupported nonzero command flags unless
-the negotiated transmission flags make those command flags meaningful.
+The current maximum transmission I/O length is 64 MiB. The implementation
+rejects unsupported nonzero command flags unless the negotiated transmission
+flags make those command flags meaningful.
 
 # Multi-Connection Policy
 
@@ -464,7 +465,9 @@ export name inside that namespace. The filesystem and backing stores may use
 the same ordering, so protocol multi-connection policy must decide owner
 identity before joining or creating a serving domain.
 
-The default is conservative: one active writable NBD connection per export.
+The default is conservative: one active writable NBD owner per export. The
+current protocol path creates one synthetic owner per connection, so two
+connections to the same export conflict even if they come from the same host.
 
 Multiple transport connections still use separate per-connection inbound and
 outbound ownership. Runtime ordering should be correct for multiple
@@ -494,10 +497,7 @@ boundary.
 
 # Open Questions
 
-- Exact maximum payload size for the first implementation.
 - Whether to include standalone `NBD_OPT_INFO` before it is required.
 - Whether `NBD_OPT_GO` should ignore all info requests except
   `NBD_INFO_EXPORT`, or reject malformed/duplicated requests more strictly.
-- How much of the long-term `ConnectionRuntime` split should land before
-  durable export support. The current plan of record names the export-owned
-  ordering and workqueue boundary `ExportRuntime`.
+- Authenticated same-owner multi-connection policy.

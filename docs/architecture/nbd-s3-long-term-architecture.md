@@ -1,5 +1,5 @@
 Title: NBD S3 Long-Term Architecture
-Date: 2026-05-01
+Date: 2026-05-12
 Status: draft
 
 # Purpose
@@ -60,11 +60,11 @@ deep discussion:
 - `docs/architecture/export-lifecycle-architecture.md`
   - open/delete orchestration across catalog metadata and per-export leases
 - `docs/architecture/compaction-manager-architecture.md`
-  - WAL prefix compaction, copy-on-write tree construction, close-time
-    compaction, and read-view notification
+  - superseded historical design for the older global compaction queue;
+    current WAL durable compaction is engine-owned
 - `docs/architecture/local-export-registry-architecture.md`
-  - active local exports, etcd lease renewal, delete interaction, and close
-    lifecycle
+  - active local exports, future etcd lease renewal, delete interaction, and
+    close lifecycle
 
 Later docs should be added for GC, writer fencing, and detailed active export
 lease protocols when those topics become active. Writer fencing should be
@@ -83,7 +83,7 @@ management plane:
   nbdcli -> ExportLifecycleManager -> ExportCatalog / ExportLeaseStore
 
 local control plane:
-  LocalExportRegistry -> active export etcd lease renewal
+  LocalExportRegistry -> future active export etcd lease renewal
 ```
 
 The data plane serves block-device operations. The management plane owns durable
@@ -183,15 +183,21 @@ per-export WAL. The long-term backend can be a WAL service behind the same
 Owns the authoritative in-process serving view for acknowledged writes and
 optional read-through cache state. It retains required WAL overlay entries
 newer than the committed catalog checkpoint, exposes `read`, and may fill
-misses through a committed backing reader. Overlay retirement is driven by
-global WAL prefix checkpoint/root advancement events.
+misses through a committed backing reader.
 
-## CommittedTreeReader
+The current prototype retires overlay entries when its engine-owned compaction
+path advances the active view to a newly published checkpoint. A future
+cross-process service can replace that local trigger with global checkpoint/root
+advancement events once leases and multi-writer fencing exist.
 
-Resolves reads from committed catalog/tree/blob state. It walks sparse internal
-nodes, reads immutable 32 MiB leaf blobs, and zero-fills holes. Clone/fork is
-represented by shared immutable tree nodes, not parent-root fallback during
-reads.
+## Committed Tree Reader
+
+Resolves reads from committed catalog/tree/blob state. The current COW
+implementation names this component `CowTreeReader`; simple mutable storage has
+its own `SimpleTreeReader`. Both share lazy sparse-tree traversal helpers that
+walk bounded 32-wide internal nodes, read immutable 32 MiB leaf blobs, and
+zero-fill holes. Clone/fork is represented by shared immutable tree nodes, not
+parent-root fallback during reads.
 
 ## BlobStore
 
@@ -221,19 +227,21 @@ catalog deleted. It does not store metadata itself.
 
 ## LocalExportRegistry
 
-Owns active exports on this server process and serving-lease renewal. It is not
-the durable export database. Per-export leases are the cross-process lifecycle
-exclusion truth used by open/delete orchestration and future routing/fencing
-behavior. If an active export observes that its lease expired, it must halt;
-recovery from lease loss is out of scope.
+Today, `LocalExportRegistry` owns active exports on one server process, enforces
+local same-owner reference counts, and rejects different-owner opens as busy. It
+is not the durable export database. Per-export serving leases are the future
+cross-process lifecycle exclusion truth for open/delete orchestration,
+routing, and fencing behavior. If an active export later observes that its
+lease expired, it must halt; recovery from lease loss is out of scope.
 
 ## Compaction
 
 Turns WAL records into committed tree state and publishes new roots through
-`ExportCatalog`. Serving engines own the read view that decides which base they
-serve, so close-time and write-pressure compaction are coordinated by the
-active engine instead of a global queue manager. Close remains correct if
-compaction fails because acknowledged writes remain durable in WAL.
+`TreeRecordStore::publish_tree_update`. Serving engines own the read view that
+decides which base they serve, so close-time, write-pressure, and background
+compaction are coordinated by the active WAL durable engine instead of a
+global queue manager. Close remains correct if compaction fails because
+acknowledged writes remain durable in WAL.
 
 ## nbdcli
 
@@ -327,6 +335,8 @@ Include:
 - concurrent export runtime with bounded queue depth;
 - `WalProvider` / `ExportWal` with durable local WAL;
 - `WalDurableEngine` read serving from committed COW tree plus retained WAL;
+- engine-owned close-time, write-pressure, and background compaction;
+- local WAL pruning after the active read view installs a published checkpoint;
 - local `LocalBlobStore`;
 - feature-gated `S3BlobStore` for WAL durable committed COW blobs;
 - SQLite `ExportCatalog` with `exports`, `export_heads`, simple mutable tree,
@@ -339,7 +349,6 @@ Defer:
 
 - external WAL service;
 - garbage collection;
-- physical WAL pruning;
 - serving read-view refresh workers;
 - `ExportLifecycleManager`;
 - serving lease renewal;
@@ -350,10 +359,7 @@ Defer:
 
 # Open Questions
 
-- Exact first WAL segment/object format.
-- Exact future catalog schema for tree nodes, edges, and GC metadata.
-- Whether first read-through view should store only WAL overlay state or also
-  immutable blob objects.
+- Exact future GC metadata.
 - Exact queue shutdown behavior for in-flight writes after connection close.
 - Exact close-time compaction timeout and fallback policy.
 

@@ -12,8 +12,12 @@ boundaries explicit and testable.
 
 - `nbd-server`: TCP NBD server, connection runtime, export runtime, admission,
   local export registry, memory storage, simple durable storage, WAL-backed
-  durable storage, and local/S3-compatible blob storage.
-- `nbd-control-plane`: catalog domain model and SQLite-backed catalog.
+  durable storage, local/S3-compatible blob storage, and local WAL.
+- `nbd-control-plane`: public catalog facade and provider factory.
+- `nbd-control-plane-core`: storage-neutral catalog contracts and domain
+  types.
+- `nbd-control-plane-sqlite`: SQLite catalog adapter, row mapping, and
+  integration tests.
 - `nbd-config`: default config generation and config loading.
 - `nbd-protocol`: NBD wire constants, parsing, and encoding.
 - `nbd-us-client`: userspace NBD client used by integration tests.
@@ -115,15 +119,17 @@ make docker-smoke
 The default Docker smoke scenario is `wal-durable-basic`. Other scenarios:
 
 ```sh
-KERNEL_SMOKE_SCENARIO=memory-basic make docker-smoke
-KERNEL_SMOKE_SCENARIO=simple-durable-basic make docker-smoke
-KERNEL_SMOKE_SCENARIO=wal-durable-basic make docker-smoke
+NBD_DEVICE_SMOKE_SCENARIO=memory-basic make docker-smoke
+NBD_DEVICE_SMOKE_SCENARIO=simple-durable-basic make docker-smoke
+NBD_DEVICE_SMOKE_SCENARIO=wal-durable-basic make docker-smoke
 ```
 
 Smoke artifacts are written under `.tmp/docker-smoke` by default. WAL clone
 scenarios use `/dev/nbd0` for the source export and `/dev/nbd1` for the clone by
 default; override them with `NBD_DEVICE_SMOKE_DEVICE` and
-`NBD_DEVICE_SMOKE_CLONE_DEVICE`.
+`NBD_DEVICE_SMOKE_CLONE_DEVICE`. The older `KERNEL_SMOKE_*` variables remain
+compatibility aliases, but new docs and scripts should prefer
+`NBD_DEVICE_SMOKE_*`.
 
 S3/RustFS smoke test:
 
@@ -384,11 +390,14 @@ Useful architecture docs:
 - `docs/architecture/export-admission-control.md`
 - `docs/architecture/local-export-registry-architecture.md`
 - `docs/architecture/storage-engine-architecture.md`
+- `docs/architecture/export-tree-metadata.md`
 - `docs/architecture/nbd-s3-long-term-architecture.md`
 - `docs/architecture/wal-architecture.md`
 - `docs/architecture/export-read-view-architecture.md`
-- `docs/architecture/compaction-manager-architecture.md`
 - `docs/architecture/export-catalog-architecture.md`
+
+`docs/architecture/compaction-manager-architecture.md` is retained only as a
+superseded historical design for the older global compaction queue.
 
 ## Development Workflow
 
